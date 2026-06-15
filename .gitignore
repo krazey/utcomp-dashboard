@@ -1,0 +1,76 @@
+# Gradle / Android build output
+.gradle/
+build/
+*/build/
+captures/
+.externalNativeBuild/
+.cxx/
+intermediates/
+outputs/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Local SDK / machine-specific config
+local.properties
+
+# Keystores / signing / secrets
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+keystore.properties
+signing.properties
+secrets.properties
+
+# APK / bundle artifacts
+*.apk
+*.ap_
+*.aab
+*.aar
+
+# Logs
+*.log
+logcat*.txt
+test_all_*.zip
+test_*.log
+
+# Kotlin / Java / JVM
+*.class
+*.jar
+*.war
+*.ear
+hs_err_pid*
+replay_pid*
+
+# Native / CMake leftovers
+*.so
+*.dylib
+*.dll
+*.o
+*.a
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python helper-script cache
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Reverse engineering / reference material
+# Keep these outside the app repo unless intentionally committed.
+utcomp_reverse_workspace/
+decompiled_csharp/
+managed_assemblies/
+apktool_out/
+jadx_out/
+*.apktool.yml
