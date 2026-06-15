@@ -1,7 +1,6 @@
 package de.krazey.utcomp.probe
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -11,7 +10,10 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -38,10 +40,13 @@ class MainActivity : Activity() {
     private enum class DataMode { USB, SIM }
     private enum class UiMode { FANCY, SIMPLE, DEBUG }
     private enum class Page { PERFORMANCE, TEMPS, TRIP }
+    private enum class MinMaxMode { ON_TAP, ALWAYS }
 
     private lateinit var usb: UtcompUsbTransport
     private lateinit var statusText: TextView
+    private lateinit var controlsPanel: LinearLayout
     private lateinit var dashboardRoot: LinearLayout
+    private lateinit var logTitleText: TextView
     private lateinit var logText: TextView
     private lateinit var logScroll: ScrollView
 
@@ -53,8 +58,12 @@ class MainActivity : Activity() {
     private var connected = false
     private var autoRefresh = false
     private var simTick = 0L
+    private var controlsVisible = false
     private var showSourceLine = true
     private val minMaxBySensor = LinkedHashMap<String, MinMax>()
+    private var minMaxDisplayMode = MinMaxMode.ON_TAP
+    private var activeMinMaxCard: String? = null
+    private var minMaxHideRunnable: Runnable? = null
 
     private data class MinMax(
         var min: Float = Float.NaN,
@@ -105,6 +114,19 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) enableImmersiveDriverMode()
+    }
+
+    private fun enableImmersiveDriverMode() {
+        window.decorView.windowInsetsController?.let { controller ->
+            controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+            controller.systemBarsBehavior =
+                WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+
     override fun onDestroy() {
         autoRefresh = false
         handler.removeCallbacksAndMessages(null)
@@ -120,20 +142,33 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.rgb(10, 12, 16))
         }
 
-        val title = TextView(this).apply {
-            text = "UTCOMP Performance Dashboard"
-            textSize = 19f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER_HORIZONTAL
-            typeface = Typeface.DEFAULT_BOLD
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(2, 0, 2, 4)
         }
-        root.addView(title, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        topBar.addView(TextView(this).apply {
+            text = ""
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        topBar.addView(Button(this).apply {
+            text = "⚙"
+            textSize = 18f
+            setAllCaps(false)
+            setOnClickListener { toggleControls() }
+            background = roundedBg(Color.rgb(16, 20, 30), 18f)
+            setTextColor(Color.WHITE)
+        }, LinearLayout.LayoutParams(56, 48))
+
+        root.addView(topBar, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         statusText = TextView(this).apply {
             textSize = 12f
             setTextColor(Color.rgb(190, 198, 210))
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, 4, 0, 8)
+            setPadding(0, 0, 0, 6)
+            visibility = View.GONE
         }
         root.addView(statusText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
@@ -162,6 +197,7 @@ class MainActivity : Activity() {
 
         val row4 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         row4.addView(button("Reset min/max") { resetAllMinMax() })
+        row4.addView(button("Min/max") { toggleMinMaxMode() })
         row4.addView(button("Toggle subtitles") {
             showSourceLine = !showSourceLine
             appendLog("Sensor source subtitles ${if (showSourceLine) "enabled" else "hidden"}")
@@ -169,7 +205,12 @@ class MainActivity : Activity() {
         })
         controls.addView(row4)
 
-        root.addView(controls, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        controlsPanel = controls.apply {
+            visibility = View.GONE
+            background = roundedBg(Color.rgb(15, 18, 24), 18f)
+            setPadding(8, 8, 8, 8)
+        }
+        root.addView(controlsPanel, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         val dashScroll = ScrollView(this).apply {
             isFillViewport = false
@@ -184,17 +225,18 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 0,
-                2.2f,
+                5.5f,
             ),
         )
 
-        val logTitle = TextView(this).apply {
+        logTitleText = TextView(this).apply {
             text = "Protocol/debug log"
             textSize = 12f
             setTextColor(Color.rgb(170, 178, 190))
             typeface = Typeface.DEFAULT_BOLD
+            visibility = View.GONE
         }
-        root.addView(logTitle, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        root.addView(logTitleText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         logText = TextView(this).apply {
             textSize = 10f
@@ -204,6 +246,7 @@ class MainActivity : Activity() {
         }
         logScroll = ScrollView(this).apply {
             setBackgroundColor(Color.rgb(4, 5, 7))
+            visibility = View.GONE
             addView(logText, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         root.addView(
@@ -216,6 +259,7 @@ class MainActivity : Activity() {
         )
 
         setContentView(root)
+        window.decorView.post { enableImmersiveDriverMode() }
     }
 
     private fun button(label: String, onClick: () -> Unit): Button = Button(this).apply {
@@ -224,6 +268,11 @@ class MainActivity : Activity() {
         setAllCaps(false)
         setOnClickListener { onClick() }
         layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+    }
+
+    private fun toggleControls() {
+        controlsVisible = !controlsVisible
+        renderDashboard()
     }
 
     private fun setDataMode(mode: DataMode) {
@@ -320,13 +369,22 @@ class MainActivity : Activity() {
     private fun renderDashboard() {
         if (!::dashboardRoot.isInitialized || !::statusText.isInitialized) return
 
+        if (::controlsPanel.isInitialized) {
+            controlsPanel.visibility = if (controlsVisible) View.VISIBLE else View.GONE
+        }
+
+        val showDebugLog = controlsVisible || uiMode == UiMode.DEBUG
+        if (::logTitleText.isInitialized) logTitleText.visibility = if (showDebugLog) View.VISIBLE else View.GONE
+        if (::logScroll.isInitialized) logScroll.visibility = if (showDebugLog) View.VISIBLE else View.GONE
+        if (::statusText.isInitialized) statusText.visibility = if (showDebugLog) View.VISIBLE else View.GONE
+
         val s = UtcompDecoder.snapshot
         statusText.text = buildString {
-            append("Mode: $dataMode")
-            append("  •  Style: $uiMode")
-            append("  •  Page: $page")
-            append("  •  USB: ${if (connected) "connected" else "not connected"}")
-            if (autoRefresh) append("  •  auto")
+            append("$page")
+            append("  •  $uiMode")
+            append("  •  $dataMode")
+            append("  •  USB ${if (connected) "OK" else "—"}")
+            if (autoRefresh) append("  •  AUTO")
             if (s.firmware != "?") append("  •  fw ${s.firmware}")
         }
 
@@ -462,7 +520,11 @@ class MainActivity : Activity() {
         val card = baseCard().apply {
             isClickable = true
             isFocusable = true
-            setOnClickListener { showMinMaxDialog(title, value, unit, stats) }
+            setOnClickListener { showMinMaxInline(title) }
+            setOnLongClickListener {
+                resetMinMax(title)
+                true
+            }
         }
         card.addView(TextView(this).apply {
             text = title
@@ -471,12 +533,32 @@ class MainActivity : Activity() {
             typeface = Typeface.DEFAULT_BOLD
         })
 
-        card.addView(TextView(this).apply {
-            text = fmt(value, if (unit.isEmpty()) "" else " $unit")
+        val valueSuffix = if (unit.isEmpty()) "" else " $unit"
+        val valueRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        valueRow.addView(TextView(this).apply {
+            text = fmt(value, valueSuffix)
             textSize = 30f
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
-        })
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        valueRow.addView(TextView(this).apply {
+            text = if (shouldShowMinMax(title)) {
+                "min ${fmt(stats.min, valueSuffix)}\nmax ${fmt(stats.max, valueSuffix)}"
+            } else {
+                ""
+            }
+            textSize = 10f
+            setTextColor(Color.rgb(120, 210, 255))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.END
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        card.addView(valueRow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         card.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             this.max = 1000
@@ -490,12 +572,6 @@ class MainActivity : Activity() {
                 setTextColor(Color.rgb(130, 140, 155))
             })
         }
-
-        card.addView(TextView(this).apply {
-            text = "tap: min ${fmt(stats.min, if (unit.isEmpty()) "" else " $unit")} / max ${fmt(stats.max, if (unit.isEmpty()) "" else " $unit")}"
-            textSize = 10f
-            setTextColor(Color.rgb(95, 105, 120))
-        })
 
         return card
     }
@@ -560,14 +636,14 @@ class MainActivity : Activity() {
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(18, 16, 18, 16)
-            background = roundedBg(Color.rgb(20, 24, 32), 22f)
+            background = roundedBg(Color.rgb(16, 20, 30), 22f)
         }
 
     private fun roundedBg(color: Int, radius: Float): GradientDrawable =
         GradientDrawable().apply {
             setColor(color)
             cornerRadius = radius
-            setStroke(1, Color.rgb(42, 48, 62))
+            setStroke(2, Color.rgb(38, 78, 104))
         }
 
 
@@ -593,20 +669,37 @@ class MainActivity : Activity() {
         renderDashboard()
     }
 
-    private fun showMinMaxDialog(title: String, value: Float, unit: String, stats: MinMax) {
-        val suffix = if (unit.isEmpty()) "" else " $unit"
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setMessage(
-                buildString {
-                    appendLine("Current: ${fmt(value, suffix)}")
-                    appendLine("Lowest:  ${fmt(stats.min, suffix)}")
-                    appendLine("Highest: ${fmt(stats.max, suffix)}")
-                },
-            )
-            .setPositiveButton("OK", null)
-            .setNegativeButton("Reset this") { _, _ -> resetMinMax(title) }
-            .show()
+    private fun toggleMinMaxMode() {
+        minMaxDisplayMode = when (minMaxDisplayMode) {
+            MinMaxMode.ON_TAP -> MinMaxMode.ALWAYS
+            MinMaxMode.ALWAYS -> MinMaxMode.ON_TAP
+        }
+        activeMinMaxCard = null
+        minMaxHideRunnable?.let { handler.removeCallbacks(it) }
+        minMaxHideRunnable = null
+        appendLog("Min/max display mode: ${if (minMaxDisplayMode == MinMaxMode.ALWAYS) "always" else "tap for 3 seconds"}")
+        renderDashboard()
+    }
+
+    private fun shouldShowMinMax(key: String): Boolean =
+        minMaxDisplayMode == MinMaxMode.ALWAYS || activeMinMaxCard == key
+
+    private fun showMinMaxInline(key: String) {
+        activeMinMaxCard = key
+        minMaxHideRunnable?.let { handler.removeCallbacks(it) }
+
+        if (minMaxDisplayMode == MinMaxMode.ON_TAP) {
+            val hide = Runnable {
+                if (activeMinMaxCard == key) {
+                    activeMinMaxCard = null
+                    renderDashboard()
+                }
+            }
+            minMaxHideRunnable = hide
+            handler.postDelayed(hide, 3000)
+        }
+
+        renderDashboard()
     }
 
     private fun progressFor(value: Float, min: Float, maxValue: Float): Int {
