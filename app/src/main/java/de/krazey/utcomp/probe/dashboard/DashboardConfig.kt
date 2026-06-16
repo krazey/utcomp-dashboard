@@ -149,10 +149,19 @@ data class DashboardBoxConfig(
      * NaN means that side is disabled. This supports both high alarms
      * (oil temp too hot) and low alarms (oil pressure too low) later.
      */
-    val warningLow: Float = Float.NaN,
-    val criticalLow: Float = Float.NaN,
+    val warningLow: Float = defaultWarningLow(sensor),
+    val criticalLow: Float = defaultCriticalLow(sensor),
     val warningHigh: Float = defaultWarningHigh(sensor),
     val criticalHigh: Float = defaultCriticalHigh(sensor),
+    /**
+     * UTCOMP-style oil pressure guard:
+     * oil pressure low alarm is armed only when boost reaches the arm threshold.
+     */
+    val oilPressureBoostAlarm: Boolean = sensor == DashboardSensor.OIL_PRESSURE,
+    val oilPressureBoostArmBar: Float = defaultOilPressureBoostArmBar(sensor),
+    val oilPressureWarningBar: Float = defaultOilPressureWarningBar(sensor),
+    val oilPressureCriticalBar: Float = defaultOilPressureCriticalBar(sensor),
+
     val warningColor: Int = uncheckedColor(0xFFFFAA30u),
     val criticalColor: Int = uncheckedColor(0xFFFF4848u),
     /**
@@ -184,26 +193,17 @@ data class DashboardPageConfig(
                 it.copy(
                     valueScale = sourceBox.valueScale,
                     iconScale = sourceBox.iconScale,
+                    scaleMin = sourceBox.scaleMin,
+                    scaleMax = sourceBox.scaleMax,
                     decimalPlaces = sourceBox.decimalPlaces,
                     splitValueDigits = sourceBox.splitValueDigits,
                     smoothingAlpha = sourceBox.smoothingAlpha,
                     backgroundColor = sourceBox.backgroundColor,
                     foregroundColor = sourceBox.foregroundColor,
+                    valueColor = sourceBox.valueColor,
                     unitColor = sourceBox.unitColor,
-                    alarmColor = sourceBox.alarmColor,
                     minColor = sourceBox.minColor,
                     maxColor = sourceBox.maxColor,
-                    valueColor = sourceBox.valueColor,
-                    warningLow = sourceBox.warningLow,
-                    criticalLow = sourceBox.criticalLow,
-                    warningHigh = sourceBox.warningHigh,
-                    criticalHigh = sourceBox.criticalHigh,
-                    warningColor = sourceBox.warningColor,
-                    criticalColor = sourceBox.criticalColor,
-                    warningValueColor = sourceBox.warningValueColor,
-                    criticalValueColor = sourceBox.criticalValueColor,
-                    alarmColorsBackground = sourceBox.alarmColorsBackground,
-                    alarmColorsValue = sourceBox.alarmColorsValue,
                     showIcon = sourceBox.showIcon,
                     showUnit = sourceBox.showUnit,
                     showMinMax = sourceBox.showMinMax,
@@ -264,6 +264,36 @@ object DefaultDashboardPages {
 
     val all: List<DashboardPageConfig> = listOf(race2x2, strip1x4, full2x4)
 }
+
+private fun defaultWarningLow(sensor: DashboardSensor): Float =
+    when (sensor) {
+        DashboardSensor.OIL_PRESSURE -> 4.50f
+        else -> Float.NaN
+    }
+
+private fun defaultCriticalLow(sensor: DashboardSensor): Float =
+    when (sensor) {
+        DashboardSensor.OIL_PRESSURE -> 4.00f
+        else -> Float.NaN
+    }
+
+private fun defaultOilPressureBoostArmBar(sensor: DashboardSensor): Float =
+    when (sensor) {
+        DashboardSensor.OIL_PRESSURE -> 0.30f
+        else -> Float.NaN
+    }
+
+private fun defaultOilPressureWarningBar(sensor: DashboardSensor): Float =
+    when (sensor) {
+        DashboardSensor.OIL_PRESSURE -> 4.50f
+        else -> Float.NaN
+    }
+
+private fun defaultOilPressureCriticalBar(sensor: DashboardSensor): Float =
+    when (sensor) {
+        DashboardSensor.OIL_PRESSURE -> 4.00f
+        else -> Float.NaN
+    }
 
 private fun defaultSmoothingAlpha(sensor: DashboardSensor): Float =
     when (sensor) {

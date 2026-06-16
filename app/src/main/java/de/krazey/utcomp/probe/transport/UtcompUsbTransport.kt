@@ -11,7 +11,6 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
-import android.util.Log
 import de.krazey.utcomp.probe.protocol.TransmitterPacket
 import de.krazey.utcomp.probe.protocol.TransmitterPacketParser
 import de.krazey.utcomp.probe.protocol.UsbPacket
@@ -78,7 +77,7 @@ class UtcompUsbTransport(
             context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             @Suppress("DEPRECATION")
-            context.registerReceiver(receiver, filter)
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         }
         logLine("USB receiver registered")
     }

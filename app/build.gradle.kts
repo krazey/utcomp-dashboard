@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "de.krazey.utcomp.probe"
-        minSdk = 23
+        minSdk = 33
         targetSdk = 33
         versionCode = 1
         versionName = "0.1-android13-usb-bt-probe"

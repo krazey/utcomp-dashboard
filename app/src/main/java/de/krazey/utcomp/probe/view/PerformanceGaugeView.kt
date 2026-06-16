@@ -94,13 +94,13 @@ class PerformanceGaugeView @JvmOverloads constructor(
         val sweepAngle = 130f
 
         canvas.drawArc(arcRect, startAngle, sweepAngle, false, trackPaint)
-        drawTicks(canvas, startAngle, sweepAngle)
+        drawTicks(canvas)
 
         fillPaint.color = accentForValue()
         glowPaint.color = fillPaint.color
 
         if (centerZero && minValue < 0f && maxValue > 0f) {
-            drawCenterZeroGauge(canvas, startAngle, sweepAngle)
+            drawCenterZeroGauge(canvas)
         } else {
             val frac = normalized(currentValue)
             canvas.drawArc(arcRect, startAngle, sweepAngle * frac, false, glowPaint)
@@ -108,7 +108,9 @@ class PerformanceGaugeView @JvmOverloads constructor(
         }
     }
 
-    private fun drawCenterZeroGauge(canvas: Canvas, startAngle: Float, sweepAngle: Float) {
+    private fun drawCenterZeroGauge(canvas: Canvas) {
+        val startAngle = 205.0f
+        val sweepAngle = 130.0f
         val zeroFrac = normalized(0f)
         val zeroAngle = startAngle + sweepAngle * zeroFrac
         val valueFrac = normalized(currentValue)
@@ -123,7 +125,9 @@ class PerformanceGaugeView @JvmOverloads constructor(
         }
     }
 
-    private fun drawTicks(canvas: Canvas, startAngle: Float, sweepAngle: Float) {
+    private fun drawTicks(canvas: Canvas) {
+        val startAngle = 205.0f
+        val sweepAngle = 130.0f
         for (i in 0..6) {
             val angle = Math.toRadians((startAngle + sweepAngle * i / 6f).toDouble())
             val cx = arcRect.centerX()

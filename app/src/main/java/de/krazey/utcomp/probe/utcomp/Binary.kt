@@ -1,5 +1,6 @@
 package de.krazey.utcomp.probe.utcomp
 
+import kotlin.math.pow
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.roundToInt
@@ -24,6 +25,6 @@ internal fun ByteArray.f32le(offset: Int): Float {
 internal fun Float.pretty(digits: Int = 2): String {
     if (isNaN()) return "NaN"
     if (isInfinite()) return if (this > 0) "+Inf" else "-Inf"
-    val scale = Math.pow(10.0, digits.toDouble()).toFloat()
+    val scale = 10.0.pow(digits.toDouble()).toFloat()
     return ((this * scale).roundToInt() / scale).toString()
 }

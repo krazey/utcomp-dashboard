@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_utcomp_battery_48dp,@drawable/ic_rcomp_afr_48dp,@drawable/ic_rcomp_boost_48dp,@drawable/ic_rcomp_inside_temp_48dp,@drawable/ic_rcomp_oilpres_48dp,@drawable/ic_rcomp_oiltemp_48dp,@drawable/ic_rcomp_outside_temp_48dp,@drawable/ic_rcomp_timer_trip_48dp,@drawable/ic_rcomp_volts_48dp" />

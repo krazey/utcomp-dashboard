@@ -212,7 +212,7 @@ object UtcompDeviceConfig {
     }
 
     private fun ByteArray.ascii9(offset: Int): String {
-        if (offset < 0 || offset >= size) return ""
+        if (offset !in indices) return ""
         val len = minOf(9, size - offset)
         return copyOfRange(offset, offset + len)
             .takeWhile { it.toInt() != 0 }
