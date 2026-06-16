@@ -43,6 +43,18 @@ class PerformanceGaugeView @JvmOverloads constructor(
             invalidate()
         }
 
+    var warningValue: Float = Float.NaN
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    var criticalValue: Float = Float.NaN
+        set(value) {
+            field = value
+            invalidate()
+        }
+
     private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(42, 48, 62)
         strokeWidth = 12f
@@ -169,10 +181,17 @@ class PerformanceGaugeView @JvmOverloads constructor(
     private fun accentForValue(): Int {
         if (currentValue.isNaN() || currentValue.isInfinite()) return Color.rgb(70, 80, 96)
 
+        if (!criticalValue.isNaN() && currentValue >= criticalValue) {
+            return Color.rgb(255, 72, 72)
+        }
+        if (!warningValue.isNaN() && currentValue >= warningValue) {
+            return Color.rgb(255, 170, 48)
+        }
+
         val frac = normalized(currentValue)
         return when {
-            frac > 0.88f -> Color.rgb(255, 72, 72)
-            frac > 0.72f -> Color.rgb(255, 170, 48)
+            warningValue.isNaN() && criticalValue.isNaN() && frac > 0.88f -> Color.rgb(255, 72, 72)
+            warningValue.isNaN() && criticalValue.isNaN() && frac > 0.72f -> Color.rgb(255, 170, 48)
             else -> accentColor
         }
     }
