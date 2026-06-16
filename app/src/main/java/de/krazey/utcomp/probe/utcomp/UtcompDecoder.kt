@@ -118,6 +118,26 @@ object UtcompDecoder {
                 out += "trip travel=${snapshot.tripTravelTime1s}s ignition=${snapshot.ignitionTime1s}s cons=${snapshot.tripCons.pretty()} dist=${snapshot.tripDist.pretty()} qty=${snapshot.tripQty.pretty()} cost=${snapshot.tripCost.pretty()} vavg=${snapshot.tripVavg.pretty()} vmax=${snapshot.vmax}"
             }
 
+            TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS -> {
+                UtcompDeviceConfig.updateTemperatureSettings(b)
+                out += "temperatures_settings ${UtcompDeviceConfig.debugSummary()}"
+            }
+
+            TransmitterConstants.UtcompPid.GPIO_SETTINGS -> {
+                UtcompDeviceConfig.updateGpioSettings(b)
+                out += "gpio_settings ${UtcompDeviceConfig.debugSummary()}"
+            }
+
+            TransmitterConstants.UtcompPid.ANALOG_OSC_SETTINGS1 -> {
+                UtcompDeviceConfig.updateAnalogOscSettings1(b)
+                out += "analog_osc_settings1 ${UtcompDeviceConfig.debugSummary()}"
+            }
+
+            TransmitterConstants.UtcompPid.ANALOG_OSC_SETTINGS2 -> {
+                UtcompDeviceConfig.updateAnalogOscSettings2(b)
+                out += "analog_osc_settings2 ${UtcompDeviceConfig.debugSummary()}"
+            }
+
             TransmitterConstants.UtcompPid.GENERAL_SETTINGS1 -> {
                 snapshot.vref = b.u16le(32)
                 out += "settings1 buzzer=${b.u8(0)} sleep=${b.u8(1)} unitsTacho=${b.u8(3)} unitsTemp=${b.u8(4)} rpmMode=${b.u8(6)} brightness=${b.u8(11)} defaultScreen=${b.u8(13)} lang=${b.u8(16)} pressureUnit=${b.u8(31)} vref=${snapshot.vref} orientation=${b.u8(34)}"

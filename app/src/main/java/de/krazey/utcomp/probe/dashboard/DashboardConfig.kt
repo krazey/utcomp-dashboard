@@ -123,6 +123,34 @@ data class DashboardBoxConfig(
     val minColor: Int = uncheckedColor(0xFF50AAFFu),
     val maxColor: Int = uncheckedColor(0xFFFF4848u),
 
+    /**
+     * Normal value color is separate from background and alarm colors.
+     */
+    val valueColor: Int = foregroundColor,
+
+    /**
+     * First real alarm model.
+     *
+     * NaN means that side is disabled. This supports both high alarms
+     * (oil temp too hot) and low alarms (oil pressure too low) later.
+     */
+    val warningLow: Float = Float.NaN,
+    val criticalLow: Float = Float.NaN,
+    val warningHigh: Float = defaultWarningHigh(sensor),
+    val criticalHigh: Float = defaultCriticalHigh(sensor),
+    val warningColor: Int = uncheckedColor(0xFFFFAA30u),
+    val criticalColor: Int = uncheckedColor(0xFFFF4848u),
+    /**
+     * Separate value colors for alarm states.
+     *
+     * Background alarm colors and value alarm colors must not be forced to be
+     * the same color, otherwise the value can disappear on warning/critical.
+     */
+    val warningValueColor: Int = uncheckedColor(0xFF000000u),
+    val criticalValueColor: Int = uncheckedColor(0xFFFFFFFFu),
+    val alarmColorsBackground: Boolean = true,
+    val alarmColorsValue: Boolean = true,
+
     val showIcon: Boolean = true,
     val showUnit: Boolean = true,
     val showMinMax: Boolean = true,
@@ -147,6 +175,17 @@ data class DashboardPageConfig(
                     alarmColor = sourceBox.alarmColor,
                     minColor = sourceBox.minColor,
                     maxColor = sourceBox.maxColor,
+                    valueColor = sourceBox.valueColor,
+                    warningLow = sourceBox.warningLow,
+                    criticalLow = sourceBox.criticalLow,
+                    warningHigh = sourceBox.warningHigh,
+                    criticalHigh = sourceBox.criticalHigh,
+                    warningColor = sourceBox.warningColor,
+                    criticalColor = sourceBox.criticalColor,
+                    warningValueColor = sourceBox.warningValueColor,
+                    criticalValueColor = sourceBox.criticalValueColor,
+                    alarmColorsBackground = sourceBox.alarmColorsBackground,
+                    alarmColorsValue = sourceBox.alarmColorsValue,
                     showIcon = sourceBox.showIcon,
                     showUnit = sourceBox.showUnit,
                     showMinMax = sourceBox.showMinMax,
@@ -207,6 +246,18 @@ object DefaultDashboardPages {
 
     val all: List<DashboardPageConfig> = listOf(race2x2, strip1x4, full2x4)
 }
+
+private fun defaultWarningHigh(sensor: DashboardSensor): Float =
+    when (sensor) {
+        DashboardSensor.OIL_TEMP -> 120.0f
+        else -> Float.NaN
+    }
+
+private fun defaultCriticalHigh(sensor: DashboardSensor): Float =
+    when (sensor) {
+        DashboardSensor.OIL_TEMP -> 130.0f
+        else -> Float.NaN
+    }
 
 @Suppress("NOTHING_TO_INLINE")
 private inline fun uncheckedColor(value: UInt): Int = value.toInt()
