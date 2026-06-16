@@ -10,13 +10,14 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import de.krazey.utcomp.probe.protocol.TransmitterConstants
@@ -26,11 +27,11 @@ import de.krazey.utcomp.probe.transport.UtcompUsbTransport
 import de.krazey.utcomp.probe.utcomp.UtcompDataSnapshot
 import de.krazey.utcomp.probe.utcomp.UtcompDecoder
 import de.krazey.utcomp.probe.utcomp.pretty
+import de.krazey.utcomp.probe.view.PerformanceGaugeView
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.LinkedHashMap
-import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
     private companion object {
@@ -39,7 +40,14 @@ class MainActivity : Activity() {
 
     private enum class DataMode { USB, SIM }
     private enum class UiMode { FANCY, SIMPLE, DEBUG }
-    private enum class Page { PERFORMANCE, TEMPS, TRIP }
+    private enum class Page(val label: String, val rows: Int, val columns: Int) {
+        RACE_2X2("Race 2×2", 2, 2),
+        STRIP_1X4("Strip 1×4", 4, 1),
+        FULL_2X4("Full 2×4", 4, 2),
+        ;
+
+        override fun toString(): String = label
+    }
     private enum class MinMaxMode { ON_TAP, ALWAYS }
 
     private lateinit var usb: UtcompUsbTransport
@@ -54,11 +62,13 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private var dataMode = DataMode.USB
     private var uiMode = UiMode.FANCY
-    private var page = Page.PERFORMANCE
+    private var page = Page.RACE_2X2
     private var connected = false
     private var autoRefresh = false
     private var simTick = 0L
     private var controlsVisible = false
+    private var swipeStartX = 0f
+    private var swipeStartY = 0f
     private var showSourceLine = true
     private val minMaxBySensor = LinkedHashMap<String, MinMax>()
     private var minMaxDisplayMode = MinMaxMode.ON_TAP
@@ -213,12 +223,13 @@ class MainActivity : Activity() {
         root.addView(controlsPanel, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         val dashScroll = ScrollView(this).apply {
-            isFillViewport = false
+            isFillViewport = true
+            setOnTouchListener { _, event -> handlePageSwipe(event) }
             dashboardRoot = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(0, 10, 0, 10)
             }
-            addView(dashboardRoot, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            addView(dashboardRoot, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
         root.addView(
             dashScroll,
@@ -314,12 +325,47 @@ class MainActivity : Activity() {
     }
 
     private fun cyclePage() {
-        page = when (page) {
-            Page.PERFORMANCE -> Page.TEMPS
-            Page.TEMPS -> Page.TRIP
-            Page.TRIP -> Page.PERFORMANCE
-        }
+        nextPage()
+    }
+
+    private fun nextPage() {
+        val pages = Page.values()
+        page = pages[(page.ordinal + 1) % pages.size]
         renderDashboard()
+    }
+
+    private fun previousPage() {
+        val pages = Page.values()
+        page = pages[(page.ordinal + pages.size - 1) % pages.size]
+        renderDashboard()
+    }
+
+    private fun handlePageSwipe(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                swipeStartX = event.x
+                swipeStartY = event.y
+                return false
+            }
+
+            MotionEvent.ACTION_UP -> {
+                val dx = event.x - swipeStartX
+                val dy = event.y - swipeStartY
+                val absDx = kotlin.math.abs(dx)
+                val absDy = kotlin.math.abs(dy)
+
+                if (absDx >= 90f && absDx > absDy * 1.6f) {
+                    if (dx < 0f) {
+                        nextPage()
+                    } else {
+                        previousPage()
+                    }
+                    return true
+                }
+            }
+        }
+
+        return false
     }
 
     private fun requestUsb(pid: Int, logEach: Boolean) {
@@ -398,79 +444,65 @@ class MainActivity : Activity() {
     }
 
     private fun renderFancy(s: UtcompDataSnapshot) {
-        when (page) {
-            Page.PERFORMANCE -> {
-                addFancyRow(
-                    fancyCard("Boost", s.bar1, "bar", -1.0f, 2.0f, "ADC3 boost pressure"),
-                    fancyCard("AFR", s.afr1, "", 10f, 22f, "ADC1 wideband O2"),
-                )
-                addFancyRow(
-                    fancyCard("Oil pressure", s.bar2, "bar", 0f, 8f, "ADC4 oil pressure"),
-                    fancyCard("Oil temp", s.temperatureNtc1, "°C", 0f, 140f, "ADCVCC1 NTC"),
-                )
-                addFancyRow(
-                    compactCard("Battery", fmt(s.adcInValCh0, " V"), "supply"),
-                    compactCard("Inside", fmt(s.temperatureDsB, " °C"), "DS-B"),
-                )
-            }
+        val cards = when (page) {
+            Page.RACE_2X2 -> listOf(
+                fancyCard("Boost", s.bar1, "bar", -1.0f, 2.0f, "ADC3 boost pressure"),
+                fancyCard("AFR", s.afr1, "", 10f, 22f, "ADC1 wideband O2"),
+                fancyCard("Oil temp", s.temperatureNtc1, "°C", 0f, 140f, "ADCVCC1 NTC"),
+                fancyCard("Oil pressure", s.bar2, "bar", 0f, 8f, "ADC4 oil pressure"),
+            )
 
-            Page.TEMPS -> {
-                addFancyRow(
-                    fancyCard("Outside", s.temperatureDsA, "°C", -20f, 80f, "DS-A behind oil cooler"),
-                    fancyCard("Inside", s.temperatureDsB, "°C", -20f, 80f, "DS-B cabin"),
-                )
-                addFancyRow(
-                    fancyCard("Oil / NTC", s.temperatureNtc1, "°C", 0f, 140f, "ADCVCC1 NTC"),
-                    fancyCard("Engine", s.temperatureEngine, "°C", 0f, 140f, "coolant slot"),
-                )
-            }
+            Page.STRIP_1X4 -> listOf(
+                fancyCard("Boost", s.bar1, "bar", -1.0f, 2.0f, "ADC3 boost pressure"),
+                fancyCard("AFR", s.afr1, "", 10f, 22f, "ADC1 wideband O2"),
+                fancyCard("Oil temp", s.temperatureNtc1, "°C", 0f, 140f, "ADCVCC1 NTC"),
+                fancyCard("Oil pressure", s.bar2, "bar", 0f, 8f, "ADC4 oil pressure"),
+            )
 
-            Page.TRIP -> {
-                addFancyRow(
-                    fancyCard("Speed", s.vssSpeed1s.toFloat(), "km/h", 0f, 260f, "vehicle speed"),
-                    fancyCard("Fuel left", s.fuelLeftPb, "L", 0f, 80f, "petrol tank"),
-                )
-                addFancyRow(
-                    compactCard("Trip distance", fmt(s.tripDist, " km"), "current trip"),
-                    compactCard("Trip cost", fmt(s.tripCost, " €"), "current trip"),
-                )
-                addFancyRow(
-                    compactCard("Avg cons.", fmt(s.consumptionAvg, " l/100km"), "average"),
-                    compactCard("Cur cons.", fmt(s.consumptionCur, " l/100km"), "current"),
-                )
-            }
+            Page.FULL_2X4 -> listOf(
+                fancyCard("Boost", s.bar1, "bar", -1.0f, 2.0f, "ADC3 boost pressure"),
+                fancyCard("AFR", s.afr1, "", 10f, 22f, "ADC1 wideband O2"),
+                fancyCard("Oil temp", s.temperatureNtc1, "°C", 0f, 140f, "ADCVCC1 NTC"),
+                fancyCard("Oil pressure", s.bar2, "bar", 0f, 8f, "ADC4 oil pressure"),
+                compactCard("Battery", fmt(s.adcInValCh0, " V"), "supply"),
+                compactCard("Outside", fmt(s.temperatureDsA, " °C"), "DS-A"),
+                compactCard("Inside", fmt(s.temperatureDsB, " °C"), "DS-B"),
+                compactCard("Time", SimpleDateFormat("HH:mm", Locale.US).format(Date()), "system"),
+            )
         }
+
+        addPresetGrid(page.rows, page.columns, cards)
     }
 
     private fun renderSimple(s: UtcompDataSnapshot) {
-        val values = when (page) {
-            Page.PERFORMANCE -> listOf(
-                rowValue("🌀", "Boost", fmt(s.bar1, " bar")),
-                rowValue("λ", "AFR", fmt(s.afr1, "")),
-                rowValue("🛢", "Oil pressure", fmt(s.bar2, " bar")),
-                rowValue("🌡", "Oil temp", fmt(s.temperatureNtc1, " °C")),
-                rowValue("🔋", "Battery", fmt(s.adcInValCh0, " V")),
-                rowValue("🏠", "Inside", fmt(s.temperatureDsB, " °C")),
+        val cards = when (page) {
+            Page.RACE_2X2 -> listOf(
+                simpleGridCard("🌀", "ic_rcomp_boost_48dp", "Boost", fmt(s.bar1, ""), "BAR", "Boost", s.bar1, " BAR"),
+                simpleGridCard("AFR", "ic_rcomp_afr_48dp", "AFR", fmt(s.afr1, ""), "", "AFR", s.afr1, ""),
+                simpleGridCard("🛢", "ic_rcomp_oiltemp_48dp", "Oil temp", fmt(s.temperatureNtc1, ""), "°C", "Oil temp", s.temperatureNtc1, " °C"),
+                simpleGridCard("💧", "ic_rcomp_oilpres_48dp", "Oil pressure", fmt(s.bar2, ""), "BAR", "Oil pressure", s.bar2, " BAR"),
             )
 
-            Page.TEMPS -> listOf(
-                rowValue("🌡", "Outside DS-A", fmt(s.temperatureDsA, " °C")),
-                rowValue("🌡", "Inside DS-B", fmt(s.temperatureDsB, " °C")),
-                rowValue("🌡", "Oil / NTC", fmt(s.temperatureNtc1, " °C")),
-                rowValue("🌡", "Engine", fmt(s.temperatureEngine, " °C")),
+            Page.STRIP_1X4 -> listOf(
+                simpleGridCard("🌀", "ic_rcomp_boost_48dp", "Boost", fmt(s.bar1, ""), "BAR", "Boost", s.bar1, " BAR"),
+                simpleGridCard("AFR", "ic_rcomp_afr_48dp", "AFR", fmt(s.afr1, ""), "", "AFR", s.afr1, ""),
+                simpleGridCard("🛢", "ic_rcomp_oiltemp_48dp", "Oil temp", fmt(s.temperatureNtc1, ""), "°C", "Oil temp", s.temperatureNtc1, " °C"),
+                simpleGridCard("💧", "ic_rcomp_oilpres_48dp", "Oil pressure", fmt(s.bar2, ""), "BAR", "Oil pressure", s.bar2, " BAR"),
             )
 
-            Page.TRIP -> listOf(
-                rowValue("🚗", "Speed", "${s.vssSpeed1s} km/h"),
-                rowValue("⛽", "Fuel PB", fmt(s.fuelLeftPb, " L")),
-                rowValue("📏", "Trip distance", fmt(s.tripDist, " km")),
-                rowValue("💶", "Trip cost", fmt(s.tripCost, " €")),
-                rowValue("📊", "Avg consumption", fmt(s.consumptionAvg, " l/100km")),
-                rowValue("⚡", "Current consumption", fmt(s.consumptionCur, " l/100km")),
+            Page.FULL_2X4 -> listOf(
+                simpleGridCard("🌀", "ic_rcomp_boost_48dp", "Boost", fmt(s.bar1, ""), "BAR", "Boost", s.bar1, " BAR"),
+                simpleGridCard("AFR", "ic_rcomp_afr_48dp", "AFR", fmt(s.afr1, ""), "", "AFR", s.afr1, ""),
+                simpleGridCard("🛢", "ic_rcomp_oiltemp_48dp", "Oil temp", fmt(s.temperatureNtc1, ""), "°C", "Oil temp", s.temperatureNtc1, " °C"),
+                simpleGridCard("💧", "ic_rcomp_oilpres_48dp", "Oil pressure", fmt(s.bar2, ""), "BAR", "Oil pressure", s.bar2, " BAR"),
+                simpleGridCard("🏠", "ic_rcomp_inside_temp_48dp", "Inside", fmt(s.temperatureDsB, ""), "°C", "Inside", s.temperatureDsB, " °C"),
+                simpleGridCard("☁", "ic_rcomp_outside_temp_48dp", "Outside", fmt(s.temperatureDsA, ""), "°C", "Outside", s.temperatureDsA, " °C"),
+                simpleGridCard("🔋", "ic_utcomp_battery_48dp", "Battery", fmt(s.adcInValCh0, ""), "V", "Battery", s.adcInValCh0, " V"),
+                simpleGridCard("19:47", "ic_rcomp_timer_trip_48dp", "Time", SimpleDateFormat("HH:mm", Locale.US).format(Date()), "", null, null, ""),
             )
         }
 
-        values.forEach { addSimpleRow(it.icon, it.label, it.value) }
+        addPresetGrid(page.rows, page.columns, cards)
     }
 
     private fun renderDebug(s: UtcompDataSnapshot) {
@@ -496,6 +528,68 @@ class MainActivity : Activity() {
 
     private data class RowValue(val icon: String, val label: String, val value: String)
     private fun rowValue(icon: String, label: String, value: String) = RowValue(icon, label, value)
+
+    private fun addPresetGrid(rows: Int, columns: Int, cards: List<LinearLayout>) {
+        val safeRows = rows.coerceAtLeast(1)
+        val safeColumns = columns.coerceAtLeast(1)
+        val totalCells = safeRows * safeColumns
+        val cells = cards.take(totalCells)
+
+        val outer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, 0)
+        }
+
+        for (rowIndex in 0 until safeRows) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, 0)
+            }
+
+            for (columnIndex in 0 until safeColumns) {
+                val index = rowIndex * safeColumns + columnIndex
+                val cell = cells.getOrNull(index) ?: emptyGridCell()
+
+                cell.minimumWidth = 0
+                cell.minimumHeight = 0
+                cell.setOnTouchListener { _, event -> handlePageSwipe(event) }
+
+                row.addView(
+                    cell,
+                    LinearLayout.LayoutParams(
+                        0,
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        1f,
+                    ).apply {
+                        setMargins(6, 6, 6, 6)
+                    },
+                )
+            }
+
+            outer.addView(
+                row,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    0,
+                    1f,
+                ),
+            )
+        }
+
+        dashboardRoot.addView(
+            outer,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+    }
+
+    private fun emptyGridCell(): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
 
     private fun addFancyRow(left: LinearLayout, right: LinearLayout) {
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -541,7 +635,7 @@ class MainActivity : Activity() {
 
         valueRow.addView(TextView(this).apply {
             text = fmt(value, valueSuffix)
-            textSize = 30f
+            textSize = 28f
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
@@ -560,9 +654,18 @@ class MainActivity : Activity() {
 
         card.addView(valueRow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
-        card.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            this.max = 1000
-            progress = progressFor(value, min, maxValue)
+        card.addView(PerformanceGaugeView(this).apply {
+            minValue = min
+            this.maxValue = maxValue
+            currentValue = value
+            centerZero = title == "Boost"
+            accentColor = when (title) {
+                "Boost" -> Color.rgb(0, 210, 255)
+                "AFR" -> Color.rgb(140, 110, 255)
+                "Oil pressure" -> Color.rgb(255, 190, 60)
+                "Oil temp" -> Color.rgb(255, 90, 60)
+                else -> Color.rgb(0, 210, 255)
+            }
         }, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         if (showSourceLine && subtitle.isNotBlank()) {
@@ -585,7 +688,7 @@ class MainActivity : Activity() {
         })
         card.addView(TextView(this).apply {
             text = value
-            textSize = 24f
+            textSize = 22f
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
         })
@@ -596,6 +699,114 @@ class MainActivity : Activity() {
         })
         return card
     }
+
+    private fun simpleGridCard(
+        fallbackIcon: String,
+        iconResourceName: String,
+        label: String,
+        value: String,
+        unit: String,
+        minMaxKey: String?,
+        rawValue: Float?,
+        minMaxSuffix: String,
+    ): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            contentDescription = label
+            background = roundedBg(Color.rgb(11, 14, 20), 0f)
+            setPadding(12, 4, 10, 4)
+
+            val stats = if (minMaxKey != null && rawValue != null) {
+                trackMinMax(minMaxKey, rawValue)
+            } else {
+                null
+            }
+
+            if (stats != null && minMaxKey != null) {
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { showMinMaxInline(minMaxKey) }
+                setOnLongClickListener {
+                    resetMinMax(minMaxKey)
+                    true
+                }
+            }
+
+            val iconResId = resources.getIdentifier(iconResourceName, "drawable", packageName)
+            if (iconResId != 0) {
+                addView(ImageView(this@MainActivity).apply {
+                    setImageResource(iconResId)
+                    adjustViewBounds = true
+                    alpha = 0.95f
+                }, LinearLayout.LayoutParams(44, 44).apply {
+                    setMargins(0, 0, 10, 0)
+                })
+            } else {
+                addView(TextView(this@MainActivity).apply {
+                    text = fallbackIcon
+                    textSize = if (fallbackIcon.length > 2) 14f else 22f
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.WHITE)
+                    typeface = Typeface.DEFAULT_BOLD
+                }, LinearLayout.LayoutParams(44, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, 0, 10, 0)
+                })
+            }
+
+            val valueRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
+            valueRow.addView(TextView(this@MainActivity).apply {
+                text = value
+                textSize = 29f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER_VERTICAL
+                typeface = Typeface.DEFAULT_BOLD
+                includeFontPadding = false
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+            if (unit.isNotBlank()) {
+                valueRow.addView(TextView(this@MainActivity).apply {
+                    text = " $unit"
+                    textSize = 14f
+                    setTextColor(Color.rgb(210, 216, 225))
+                    gravity = Gravity.CENTER_VERTICAL
+                    typeface = Typeface.DEFAULT_BOLD
+                    includeFontPadding = false
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            }
+
+            addView(valueRow, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+            val showStats = stats != null && minMaxKey != null && shouldShowMinMax(minMaxKey)
+            val statBox = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            }
+
+            statBox.addView(TextView(this@MainActivity).apply {
+                text = if (showStats) fmt(stats!!.max, minMaxSuffix) else ""
+                textSize = 11f
+                setTextColor(Color.rgb(255, 72, 72))
+                gravity = Gravity.END
+                typeface = Typeface.DEFAULT_BOLD
+                includeFontPadding = false
+            }, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+            statBox.addView(TextView(this@MainActivity).apply {
+                text = if (showStats) fmt(stats!!.min, minMaxSuffix) else ""
+                textSize = 11f
+                setTextColor(Color.rgb(80, 170, 255))
+                gravity = Gravity.END
+                typeface = Typeface.DEFAULT_BOLD
+                includeFontPadding = false
+            }, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+            addView(statBox, LinearLayout.LayoutParams(84, LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
 
     private fun addSimpleRow(icon: String, label: String, value: String) {
         val row = LinearLayout(this).apply {
@@ -635,7 +846,7 @@ class MainActivity : Activity() {
     private fun baseCard(): LinearLayout =
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(18, 16, 18, 16)
+            setPadding(14, 12, 14, 12)
             background = roundedBg(Color.rgb(16, 20, 30), 22f)
         }
 
@@ -700,12 +911,6 @@ class MainActivity : Activity() {
         }
 
         renderDashboard()
-    }
-
-    private fun progressFor(value: Float, min: Float, maxValue: Float): Int {
-        if (value.isNaN() || value.isInfinite() || maxValue <= min) return 0
-        val normalized = (value - min) / (maxValue - min)
-        return (normalized.coerceIn(0f, 1f) * 1000f).roundToInt()
     }
 
     private fun fmt(v: Float, suffix: String): String =
