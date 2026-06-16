@@ -114,6 +114,21 @@ data class DashboardBoxConfig(
     val scaleMax: Float = sensor.defaultMax,
 
     /**
+     * Display formatting.
+     *
+     * decimalPlaces controls the printed value.
+     * splitValueDigits makes the main digits larger and the decimal part smaller,
+     * similar to the OEM UTCOMP simple dashboard.
+     *
+     * smoothingAlpha:
+     * - 1.00 = off
+     * - lower values = more smoothing
+     */
+    val decimalPlaces: Int = defaultDecimalPlaces(sensor),
+    val splitValueDigits: Boolean = true,
+    val smoothingAlpha: Float = defaultSmoothingAlpha(sensor),
+
+    /**
      * Stored as ARGB Ints. Use 0xAARRGGBB.
      */
     val backgroundColor: Int = uncheckedColor(0xFF0B0E14u),
@@ -169,6 +184,9 @@ data class DashboardPageConfig(
                 it.copy(
                     valueScale = sourceBox.valueScale,
                     iconScale = sourceBox.iconScale,
+                    decimalPlaces = sourceBox.decimalPlaces,
+                    splitValueDigits = sourceBox.splitValueDigits,
+                    smoothingAlpha = sourceBox.smoothingAlpha,
                     backgroundColor = sourceBox.backgroundColor,
                     foregroundColor = sourceBox.foregroundColor,
                     unitColor = sourceBox.unitColor,
@@ -246,6 +264,26 @@ object DefaultDashboardPages {
 
     val all: List<DashboardPageConfig> = listOf(race2x2, strip1x4, full2x4)
 }
+
+private fun defaultSmoothingAlpha(sensor: DashboardSensor): Float =
+    when (sensor) {
+        DashboardSensor.AFR,
+        DashboardSensor.BOOST,
+        DashboardSensor.OIL_PRESSURE -> 0.35f
+        else -> 1.0f
+    }
+
+private fun defaultDecimalPlaces(sensor: DashboardSensor): Int =
+    when (sensor) {
+        DashboardSensor.AFR -> 2
+        DashboardSensor.BOOST,
+        DashboardSensor.OIL_PRESSURE,
+        DashboardSensor.BATTERY -> 2
+        DashboardSensor.OIL_TEMP,
+        DashboardSensor.OUTSIDE_TEMP,
+        DashboardSensor.INSIDE_TEMP -> 1
+        DashboardSensor.TIME -> 0
+    }
 
 private fun defaultWarningHigh(sensor: DashboardSensor): Float =
     when (sensor) {

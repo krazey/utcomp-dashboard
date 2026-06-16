@@ -1,5 +1,13 @@
 package de.krazey.utcomp.probe
 
+import android.os.SystemClock
+import org.json.JSONObject
+import org.json.JSONArray
+import android.content.SharedPreferences
+import android.widget.FrameLayout
+import android.text.style.RelativeSizeSpan
+import android.text.Spanned
+import android.text.SpannableString
 import android.widget.EditText
 import android.text.InputType
 import android.app.AlertDialog
@@ -43,6 +51,10 @@ import java.util.LinkedHashMap
 
 class MainActivity : Activity() {
     private companion object {
+        private const val USB_FAST_POLL_MS = 50L
+        private const val USB_SLOW_POLL_MS = 1000L
+        private const val USB_RECONNECT_MS = 2500L
+        private const val DASHBOARD_RENDER_MS = 125L
         const val TAG = "UTCOMPProbe"
     }
 
@@ -80,6 +92,43 @@ class MainActivity : Activity() {
     private var dataMode = DataMode.USB
     private var simTestMode = SimTestMode.OFF
     private val simTickerHandler = Handler(Looper.getMainLooper())
+    private val autoUsbHandler = Handler(Looper.getMainLooper())
+    private val dashboardRenderHandler = Handler(Looper.getMainLooper())
+    private var dashboardRenderPending = false
+    private val dashboardRenderRunnable = Runnable {
+        dashboardRenderPending = false
+        renderDashboard()
+    }
+
+    private var lastSlowUsbRequestMs = 0L
+
+    private val autoUsbRunnable = object : Runnable {
+        override fun run() {
+            if (dataMode != DataMode.USB) {
+                return
+            }
+
+            if (!connected) {
+                runCatching { usb.requestPermissionAndConnect() }
+                autoUsbHandler.postDelayed(this, USB_RECONNECT_MS)
+                return
+            }
+
+            val nowMs = SystemClock.elapsedRealtime()
+            runCatching {
+                requestFastLiveData(logEach = false)
+
+                if (nowMs - lastSlowUsbRequestMs >= USB_SLOW_POLL_MS) {
+                    lastSlowUsbRequestMs = nowMs
+                    requestSlowLiveData(logEach = false)
+                }
+            }
+
+            autoUsbHandler.postDelayed(this, USB_FAST_POLL_MS)
+        }
+    }
+
+
     private val simTickerRunnable = object : Runnable {
         override fun run() {
             if (simTestMode == SimTestMode.OFF && dataMode != DataMode.SIM) {
@@ -105,6 +154,7 @@ class MainActivity : Activity() {
     private var swipeStartY = 0f
     private var showSourceLine = true
     private val minMaxBySensor = LinkedHashMap<String, MinMax>()
+    private val smoothedValuesByBox = LinkedHashMap<String, Float>()
     private var minMaxDisplayMode = MinMaxMode.ON_TAP
     private var activeMinMaxCard: String? = null
     private var minMaxHideRunnable: Runnable? = null
@@ -135,9 +185,14 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        loadDashboardPrefs()
+        applyFastSensorSmoothingMigrationIfNeeded()
+        dataMode = DataMode.USB
+        simTestMode = SimTestMode.OFF
         usb = UtcompUsbTransport(this, ::appendLog)
         buildUi()
         usb.register()
+        startUsbAutoConnect()
 
         appendLog("UTCOMP dashboard started")
         appendLog("USB target: VID=${UtcompUsbTransport.VID}, PID=${UtcompUsbTransport.PID}")
@@ -171,7 +226,16 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onPause() {
+        saveDashboardPrefs()
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        dashboardRenderHandler.removeCallbacks(dashboardRenderRunnable)
+        dashboardRenderPending = false
+        saveDashboardPrefs()
+        stopUsbAutoConnect()
         autoRefresh = false
         handler.removeCallbacksAndMessages(null)
         usb.unregister()
@@ -341,6 +405,219 @@ class MainActivity : Activity() {
         layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
     }
 
+    private val dashboardPrefs: SharedPreferences
+        get() = getSharedPreferences("utcomp_dashboard", MODE_PRIVATE)
+
+    private fun applyFastSensorSmoothingMigrationIfNeeded() {
+        val prefs = dashboardPrefs
+        if (prefs.getBoolean("fastSensorSmoothingV1Applied", false)) return
+
+        var touched = false
+        dashboardPages = dashboardPages.map { pageConfig ->
+            pageConfig.copy(
+                boxes = pageConfig.boxes.map { box ->
+                    if (
+                        box.smoothingAlpha >= 0.999f &&
+                        (box.sensor == DashboardSensor.AFR ||
+                            box.sensor == DashboardSensor.BOOST ||
+                            box.sensor == DashboardSensor.OIL_PRESSURE)
+                    ) {
+                        touched = true
+                        box.copy(smoothingAlpha = 0.35f)
+                    } else {
+                        box
+                    }
+                },
+            )
+        }
+
+        prefs.edit().putBoolean("fastSensorSmoothingV1Applied", true).apply()
+        if (touched) saveDashboardPrefs()
+    }
+
+    private fun loadDashboardPrefs() {
+        val prefs = dashboardPrefs
+
+        prefs.getString("uiMode", null)?.let { saved ->
+            enumValues<UiMode>().firstOrNull { it.name == saved }?.let { uiMode = it }
+        }
+
+        prefs.getString("page", null)?.let { saved ->
+            enumValues<Page>().firstOrNull { it.name == saved }?.let { page = it }
+        }
+
+        showSourceLine = prefs.getBoolean("showSourceLine", showSourceLine)
+
+        dashboardPagesFromJson(prefs.getString("dashboardPagesJson", null))?.let { savedPages ->
+            if (savedPages.isNotEmpty()) {
+                dashboardPages = savedPages
+            }
+        }
+    }
+
+    private fun saveDashboardPrefs() {
+        runCatching {
+            dashboardPrefs.edit()
+                .putString("uiMode", uiMode.name)
+                .putString("page", page.name)
+                .putBoolean("showSourceLine", showSourceLine)
+                .putString("dashboardPagesJson", dashboardPagesToJson(dashboardPages))
+                .apply()
+        }.onFailure { error ->
+            appendLog("Could not save dashboard settings: ${error.message}")
+        }
+    }
+
+    private fun dashboardPagesToJson(pages: List<DashboardPageConfig>): String =
+        JSONArray().apply {
+            pages.forEach { pageConfig ->
+                put(pageConfigToJson(pageConfig))
+            }
+        }.toString()
+
+    private fun pageConfigToJson(pageConfig: DashboardPageConfig): JSONObject =
+        JSONObject().apply {
+            put("id", pageConfig.id)
+            put("title", pageConfig.title)
+            put("rows", pageConfig.rows)
+            put("columns", pageConfig.columns)
+            put("boxes", JSONArray().apply {
+                pageConfig.boxes.forEach { box ->
+                    put(boxConfigToJson(box))
+                }
+            })
+        }
+
+    private fun boxConfigToJson(box: DashboardBoxConfig): JSONObject =
+        JSONObject().apply {
+            put("sensor", box.sensor.name)
+            put("row", box.row)
+            put("column", box.column)
+            put("rowSpan", box.rowSpan)
+            put("columnSpan", box.columnSpan)
+            putFloatJson(this, "valueScale", box.valueScale)
+            putFloatJson(this, "iconScale", box.iconScale)
+            putFloatJson(this, "scaleMin", box.scaleMin)
+            putFloatJson(this, "scaleMax", box.scaleMax)
+            putFloatJson(this, "smoothingAlpha", box.smoothingAlpha)
+            putFloatJson(this, "warningLow", box.warningLow)
+            putFloatJson(this, "criticalLow", box.criticalLow)
+            putFloatJson(this, "warningHigh", box.warningHigh)
+            putFloatJson(this, "criticalHigh", box.criticalHigh)
+            put("decimalPlaces", box.decimalPlaces)
+            put("backgroundColor", box.backgroundColor)
+            put("foregroundColor", box.foregroundColor)
+            put("unitColor", box.unitColor)
+            put("alarmColor", box.alarmColor)
+            put("minColor", box.minColor)
+            put("maxColor", box.maxColor)
+            put("valueColor", box.valueColor)
+            put("warningColor", box.warningColor)
+            put("criticalColor", box.criticalColor)
+            put("warningValueColor", box.warningValueColor)
+            put("criticalValueColor", box.criticalValueColor)
+            put("splitValueDigits", box.splitValueDigits)
+            put("alarmColorsBackground", box.alarmColorsBackground)
+            put("alarmColorsValue", box.alarmColorsValue)
+            put("showIcon", box.showIcon)
+            put("showUnit", box.showUnit)
+            put("showMinMax", box.showMinMax)
+        }
+
+    private fun dashboardPagesFromJson(raw: String?): List<DashboardPageConfig>? {
+        if (raw.isNullOrBlank()) return null
+
+        return runCatching {
+            val array = JSONArray(raw)
+            val defaults = DefaultDashboardPages.all
+            (0 until array.length()).map { index ->
+                val fallback = defaults.getOrElse(index) { defaults.last() }
+                pageConfigFromJson(array.optJSONObject(index), fallback)
+            }
+        }.getOrNull()
+    }
+
+    private fun pageConfigFromJson(json: JSONObject?, fallback: DashboardPageConfig): DashboardPageConfig {
+        if (json == null) return fallback
+
+        val boxArray = json.optJSONArray("boxes")
+        val boxes = if (boxArray != null) {
+            (0 until boxArray.length()).map { index ->
+                val fallbackBox = fallback.boxes.getOrElse(index) {
+                    fallback.boxes.lastOrNull() ?: DashboardBoxConfig(DashboardSensor.BOOST, row = 0, column = 0)
+                }
+                boxConfigFromJson(boxArray.optJSONObject(index), fallbackBox)
+            }
+        } else {
+            fallback.boxes
+        }
+
+        return DashboardPageConfig(
+            id = json.optString("id", fallback.id),
+            title = json.optString("title", fallback.title),
+            rows = json.optInt("rows", fallback.rows),
+            columns = json.optInt("columns", fallback.columns),
+            boxes = boxes,
+        )
+    }
+
+    private fun boxConfigFromJson(json: JSONObject?, fallback: DashboardBoxConfig): DashboardBoxConfig {
+        if (json == null) return fallback
+
+        return fallback.copy(
+            sensor = dashboardSensorFromName(json.optString("sensor", fallback.sensor.name), fallback.sensor),
+            row = json.optInt("row", fallback.row),
+            column = json.optInt("column", fallback.column),
+            rowSpan = json.optInt("rowSpan", fallback.rowSpan),
+            columnSpan = json.optInt("columnSpan", fallback.columnSpan),
+            valueScale = optFloatJson(json, "valueScale", fallback.valueScale),
+            iconScale = optFloatJson(json, "iconScale", fallback.iconScale),
+            scaleMin = optFloatJson(json, "scaleMin", fallback.scaleMin),
+            scaleMax = optFloatJson(json, "scaleMax", fallback.scaleMax),
+            smoothingAlpha = optFloatJson(json, "smoothingAlpha", fallback.smoothingAlpha),
+            warningLow = optFloatJson(json, "warningLow", fallback.warningLow),
+            criticalLow = optFloatJson(json, "criticalLow", fallback.criticalLow),
+            warningHigh = optFloatJson(json, "warningHigh", fallback.warningHigh),
+            criticalHigh = optFloatJson(json, "criticalHigh", fallback.criticalHigh),
+            decimalPlaces = json.optInt("decimalPlaces", fallback.decimalPlaces),
+            backgroundColor = json.optInt("backgroundColor", fallback.backgroundColor),
+            foregroundColor = json.optInt("foregroundColor", fallback.foregroundColor),
+            unitColor = json.optInt("unitColor", fallback.unitColor),
+            alarmColor = json.optInt("alarmColor", fallback.alarmColor),
+            minColor = json.optInt("minColor", fallback.minColor),
+            maxColor = json.optInt("maxColor", fallback.maxColor),
+            valueColor = json.optInt("valueColor", fallback.valueColor),
+            warningColor = json.optInt("warningColor", fallback.warningColor),
+            criticalColor = json.optInt("criticalColor", fallback.criticalColor),
+            warningValueColor = json.optInt("warningValueColor", fallback.warningValueColor),
+            criticalValueColor = json.optInt("criticalValueColor", fallback.criticalValueColor),
+            splitValueDigits = json.optBoolean("splitValueDigits", fallback.splitValueDigits),
+            alarmColorsBackground = json.optBoolean("alarmColorsBackground", fallback.alarmColorsBackground),
+            alarmColorsValue = json.optBoolean("alarmColorsValue", fallback.alarmColorsValue),
+            showIcon = json.optBoolean("showIcon", fallback.showIcon),
+            showUnit = json.optBoolean("showUnit", fallback.showUnit),
+            showMinMax = json.optBoolean("showMinMax", fallback.showMinMax),
+        )
+    }
+
+    private fun dashboardSensorFromName(name: String?, fallback: DashboardSensor): DashboardSensor =
+        runCatching { DashboardSensor.valueOf(name ?: fallback.name) }.getOrDefault(fallback)
+
+    private fun putFloatJson(json: JSONObject, key: String, value: Float) {
+        if (value.isNaN() || value.isInfinite()) {
+            json.put(key, JSONObject.NULL)
+        } else {
+            json.put(key, value.toDouble())
+        }
+    }
+
+    private fun optFloatJson(json: JSONObject, key: String, fallback: Float): Float =
+        if (!json.has(key) || json.isNull(key)) {
+            fallback
+        } else {
+            json.optDouble(key, fallback.toDouble()).toFloat()
+        }
+
     private fun currentPageConfig(): DashboardPageConfig =
         dashboardPages.getOrElse(page.ordinal) { page.config }
 
@@ -348,6 +625,7 @@ class MainActivity : Activity() {
         dashboardPages = dashboardPages.mapIndexed { index, pageConfig ->
             if (index == page.ordinal) transform(pageConfig) else pageConfig
         }
+        saveDashboardPrefs()
         renderDashboard()
     }
 
@@ -358,6 +636,17 @@ class MainActivity : Activity() {
             }
             pageConfig.copy(boxes = updatedBoxes)
         }
+    }
+
+    private fun startUsbAutoConnect() {
+        if (dataMode != DataMode.USB) return
+        autoRefresh = true
+        autoUsbHandler.removeCallbacks(autoUsbRunnable)
+        autoUsbHandler.postDelayed(autoUsbRunnable, 350L)
+    }
+
+    private fun stopUsbAutoConnect() {
+        autoUsbHandler.removeCallbacks(autoUsbRunnable)
     }
 
     private fun startSimTicker() {
@@ -380,6 +669,11 @@ class MainActivity : Activity() {
         }
 
         dataMode = if (simTestMode == SimTestMode.OFF) DataMode.USB else DataMode.SIM
+        if (dataMode == DataMode.USB) {
+            startUsbAutoConnect()
+        } else {
+            stopUsbAutoConnect()
+        }
         if (simTestMode == SimTestMode.OFF) {
             stopSimTicker()
         } else {
@@ -462,6 +756,12 @@ class MainActivity : Activity() {
             handler.removeCallbacks(simRunnable)
             appendLog("USB mode enabled")
         }
+        if (dataMode == DataMode.USB) {
+            startUsbAutoConnect()
+        } else {
+            stopUsbAutoConnect()
+        }
+        saveDashboardPrefs()
         renderDashboard()
     }
 
@@ -483,6 +783,7 @@ class MainActivity : Activity() {
             UiMode.SIMPLE -> UiMode.DEBUG
             UiMode.DEBUG -> UiMode.FANCY
         }
+        saveDashboardPrefs()
         renderDashboard()
     }
 
@@ -561,6 +862,22 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         ).forEach { requestUsb(it, logEach) }
     }
 
+    private fun requestFastLiveData(logEach: Boolean) {
+        requestUsb(TransmitterConstants.UtcompPid.GENERAL_DATA2, logEach)
+    }
+
+    private fun requestSlowLiveData(logEach: Boolean) {
+        listOf(
+            TransmitterConstants.UtcompPid.GENERAL_DATA1,
+            TransmitterConstants.UtcompPid.CONSUMPTION_DATA,
+            TransmitterConstants.UtcompPid.TEMPERATURES_DATA,
+            TransmitterConstants.UtcompPid.VSS_DATA,
+            TransmitterConstants.UtcompPid.TRIP_DATA,
+        ).forEach { requestUsb(it, logEach) }
+    }
+
+
+
     private fun appendLog(line: String) {
         Log.i(TAG, line)
         runOnUiThread {
@@ -569,13 +886,13 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             when {
                 line.contains("USB connected") -> {
                     connected = true
-                    renderDashboard()
+                    renderDashboardNow()
                 }
                 line.contains("USB closed") || line.contains("USB detached") -> {
                     connected = false
-                    renderDashboard()
+                    renderDashboardNow()
                 }
-                line.startsWith("DECODE ") -> renderDashboard()
+                line.startsWith("DECODE ") -> scheduleDashboardRender()
             }
 
             val stamp = timeFmt.format(Date())
@@ -656,6 +973,20 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             // No nullable UtcompDataSnapshot backing field was detected.
     }
 
+    private fun scheduleDashboardRender(delayMs: Long = DASHBOARD_RENDER_MS) {
+        if (!::dashboardRoot.isInitialized) return
+        if (dashboardRenderPending) return
+
+        dashboardRenderPending = true
+        dashboardRenderHandler.postDelayed(dashboardRenderRunnable, delayMs.coerceAtLeast(0L))
+    }
+
+    private fun renderDashboardNow() {
+        dashboardRenderHandler.removeCallbacks(dashboardRenderRunnable)
+        dashboardRenderPending = false
+        renderDashboard()
+    }
+
     private fun renderDashboard() {
         if (!::dashboardRoot.isInitialized || !::statusText.isInitialized) return
 
@@ -709,9 +1040,9 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             .sortedWith(compareBy<Pair<Int, DashboardBoxConfig>> { it.second.row }.thenBy { it.second.column })
             .map { (boxIndex, box) ->
                 val card = if (simple) {
-                    simpleConfigCard(box, snapshot)
+                    simpleConfigCard(boxIndex, box, snapshot)
                 } else {
-                    fancyConfigCard(box, snapshot)
+                    fancyConfigCard(boxIndex, box, snapshot)
                 }
 
                 if (editMode) {
@@ -729,17 +1060,22 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         addPresetGrid(pageConfig.rows, pageConfig.columns, cards)
     }
 
-    private fun fancyConfigCard(box: DashboardBoxConfig, snapshot: UtcompDataSnapshot): LinearLayout {
+    private fun fancyConfigCard(boxIndex: Int, box: DashboardBoxConfig, snapshot: UtcompDataSnapshot): LinearLayout {
         val sensor = box.sensor
         val rawValue = sensor.readValue(snapshot)
-        val valueForGauge = rawValue ?: 0f
+        val displayValue = displayValueForBox(box, boxIndex, rawValue)
+        val valueForGauge = displayValue ?: rawValue ?: 0f
         val suffix = if (sensor.unit.isBlank()) "" else sensor.unit.lowercase(Locale.US)
         val alarmLevel = alarmLevelFor(box, rawValue)
         val card = when (sensor) {
             DashboardSensor.TIME -> compactCard(sensor.label, SimpleDateFormat("HH:mm", Locale.US).format(Date()), sourceSubtitleFor(sensor))
             DashboardSensor.BATTERY,
             DashboardSensor.OUTSIDE_TEMP,
-            DashboardSensor.INSIDE_TEMP -> compactCard(sensor.label, fmt(valueForGauge, " ${sensor.unit}"), sourceSubtitleFor(sensor))
+            DashboardSensor.INSIDE_TEMP -> compactCard(
+                sensor.label,
+                formatBoxValue(valueForGauge, box.decimalPlaces) + if (sensor.unit.isBlank()) "" else " ${sensor.unit}",
+                sourceSubtitleFor(sensor),
+            )
             else -> fancyCard(
                 sensor.label,
                 valueForGauge,
@@ -754,13 +1090,14 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         return card
     }
 
-    private fun simpleConfigCard(box: DashboardBoxConfig, snapshot: UtcompDataSnapshot): LinearLayout {
+    private fun simpleConfigCard(boxIndex: Int, box: DashboardBoxConfig, snapshot: UtcompDataSnapshot): LinearLayout {
         val sensor = box.sensor
         val rawValue = sensor.readValue(snapshot)
+        val displayValue = displayValueForBox(box, boxIndex, rawValue)
         val valueText = if (sensor == DashboardSensor.TIME) {
             SimpleDateFormat("HH:mm", Locale.US).format(Date())
         } else {
-            fmt(rawValue ?: 0f, "")
+            formatBoxValue(displayValue ?: rawValue, box.decimalPlaces)
         }
 
         val minMaxKey = if (sensor == DashboardSensor.TIME || rawValue == null || !box.showMinMax) null else sensor.label
@@ -783,6 +1120,7 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             minColor = box.minColor,
             maxColor = box.maxColor,
             showIcon = box.showIcon,
+            splitValueDigits = box.splitValueDigits,
         )
     }
 
@@ -790,6 +1128,125 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         val name: String,
         val color: Int,
     )
+
+    private fun DashboardSensor.defaultDisplayDecimals(): Int =
+        when (this) {
+            DashboardSensor.AFR -> 2
+            DashboardSensor.BOOST,
+            DashboardSensor.OIL_PRESSURE,
+            DashboardSensor.BATTERY -> 2
+            DashboardSensor.OIL_TEMP,
+            DashboardSensor.OUTSIDE_TEMP,
+            DashboardSensor.INSIDE_TEMP -> 1
+            DashboardSensor.TIME -> 0
+        }
+
+    private fun DashboardSensor.defaultDisplaySmoothing(): Float =
+        when (this) {
+            DashboardSensor.AFR,
+            DashboardSensor.BOOST,
+            DashboardSensor.OIL_PRESSURE -> 0.35f
+            else -> 1.0f
+        }
+
+
+
+    private fun displayValueForBox(box: DashboardBoxConfig, boxIndex: Int, rawValue: Float?): Float? {
+        val value = rawValue ?: return null
+        if (value.isNaN() || value.isInfinite()) return value
+
+        val alpha = box.smoothingAlpha.coerceIn(0.01f, 1.0f)
+        if (alpha >= 0.999f || simTestMode != SimTestMode.OFF) {
+            smoothedValuesByBox[smoothedValueKey(boxIndex, box)] = value
+            return value
+        }
+
+        val key = smoothedValueKey(boxIndex, box)
+        val previous = smoothedValuesByBox[key]
+        val smoothed = if (previous == null || previous.isNaN() || previous.isInfinite()) {
+            value
+        } else {
+            previous + (value - previous) * alpha
+        }
+        smoothedValuesByBox[key] = smoothed
+        return smoothed
+    }
+
+    private fun smoothedValueKey(boxIndex: Int, box: DashboardBoxConfig): String =
+        "${page.ordinal}:$boxIndex:${box.sensor.name}"
+
+    private fun formatBoxValue(value: Float?, decimals: Int): String {
+        val safeValue = value ?: return "--"
+        if (safeValue.isNaN() || safeValue.isInfinite()) return "--"
+        val places = decimals.coerceIn(0, 2)
+        return "%.${places}f".format(Locale.US, safeValue)
+    }
+
+    private fun styledValueText(valueText: String, split: Boolean): CharSequence {
+        if (!split) return valueText
+
+        val dot = valueText.indexOf('.')
+        if (dot <= 0 || dot >= valueText.length - 1) return valueText
+
+        val span = SpannableString(valueText)
+        span.setSpan(RelativeSizeSpan(1.18f), 0, dot, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        span.setSpan(RelativeSizeSpan(0.62f), dot, valueText.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        return span
+    }
+
+    private fun decimalsText(decimals: Int): String =
+        when (decimals.coerceIn(0, 2)) {
+            0 -> "0 decimals"
+            1 -> "1 decimal"
+            else -> "2 decimals"
+        }
+
+    private fun smoothingText(alpha: Float): String =
+        when {
+            alpha >= 0.999f -> "off"
+            alpha >= 0.45f -> "light"
+            alpha >= 0.20f -> "medium"
+            else -> "heavy"
+        }
+
+    private fun smoothingValues(): FloatArray =
+        floatArrayOf(1.0f, 0.5f, 0.25f, 0.10f)
+
+    private fun smoothingLabels(current: Float): Array<String> {
+        val values = smoothingValues()
+        val names = arrayOf("Off", "Light", "Medium", "Heavy")
+        return names.mapIndexed { index, name ->
+            val marker = if (kotlin.math.abs(values[index] - current) < 0.01f) " ✓" else ""
+            "$name$marker"
+        }.toTypedArray()
+    }
+
+    private fun showDecimalsPicker(boxIndex: Int, box: DashboardBoxConfig) {
+        val labels = arrayOf(0, 1, 2).map { decimals ->
+            val marker = if (box.decimalPlaces.coerceIn(0, 2) == decimals) " ✓" else ""
+            "${decimalsText(decimals)}$marker"
+        }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("Decimal digits")
+            .setItems(labels) { _, which ->
+                updateBoxConfig(boxIndex) { it.copy(decimalPlaces = which) }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showSmoothingPicker(boxIndex: Int, box: DashboardBoxConfig) {
+        val values = smoothingValues()
+        AlertDialog.Builder(this)
+            .setTitle("Smoothing")
+            .setItems(smoothingLabels(box.smoothingAlpha)) { _, which ->
+                smoothedValuesByBox.remove(smoothedValueKey(boxIndex, box))
+                updateBoxConfig(boxIndex) { it.copy(smoothingAlpha = values[which]) }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
 
     private fun enabledText(enabled: Boolean): String =
         if (enabled) "enabled" else "disabled"
@@ -906,7 +1363,7 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         if (value % 1.0f == 0.0f) value.toInt().toString() else "%.1f".format(Locale.US, value)
 
     private fun colorName(color: Int): String =
-        allNamedColors().firstOrNull { it.color == color }?.name
+        allNamedColors().firstOrNull { namedColor -> namedColor.color == color }?.name
             ?: "#%06X".format(Locale.US, 0xFFFFFF and color)
 
     private fun valueColorPalette(): List<NamedColor> =
@@ -970,6 +1427,9 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             "Sensor: ${box.sensor.label}",
             "Value size: ${formatScale(box.valueScale)}",
             "Icon size: ${formatScale(box.iconScale)}",
+            "Decimals: ${decimalsText(box.decimalPlaces)}",
+            "Split decimals: ${enabledText(box.splitValueDigits)}",
+            "Smoothing: ${smoothingText(box.smoothingAlpha)}",
             "Normal value color: ${colorName(box.valueColor)}",
             "Background color: ${colorName(box.backgroundColor)}",
             "Warning high: ${formatThreshold(box.warningHigh, box.sensor.unit)}",
@@ -1002,39 +1462,42 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
                         title = "Icon size",
                         current = box.iconScale,
                     ) { selected -> updateBoxConfig(boxIndex) { it.copy(iconScale = selected) } }
-                    3 -> showColorPicker(
+                    3 -> showDecimalsPicker(boxIndex, box)
+                    4 -> updateBoxConfig(boxIndex) { it.copy(splitValueDigits = !it.splitValueDigits) }
+                    5 -> showSmoothingPicker(boxIndex, box)
+                    6 -> showColorPicker(
                         title = "Normal value color",
                         current = box.valueColor,
                         palette = valueColorPalette(),
                     ) { selected -> updateBoxConfig(boxIndex) { it.copy(valueColor = selected, foregroundColor = selected) } }
-                    4 -> showColorPicker(
+                    7 -> showColorPicker(
                         title = "Background color",
                         current = box.backgroundColor,
                         palette = backgroundColorPalette(),
                     ) { selected -> updateBoxConfig(boxIndex) { it.copy(backgroundColor = selected) } }
-                    5 -> showHighThresholdEditor(
+                    8 -> showHighThresholdEditor(
                         title = "Warning high",
                         boxIndex = boxIndex,
                         box = box,
                         current = box.warningHigh,
                     ) { newValue -> copy(warningHigh = newValue) }
-                    6 -> showHighThresholdEditor(
+                    9 -> showHighThresholdEditor(
                         title = "Critical high",
                         boxIndex = boxIndex,
                         box = box,
                         current = box.criticalHigh,
                     ) { newValue -> copy(criticalHigh = newValue) }
-                    7 -> showColorPicker(
+                    10 -> showColorPicker(
                         title = "Warning background",
                         current = box.warningColor,
                         palette = warningColorPalette(),
                     ) { selected -> updateBoxConfig(boxIndex) { it.copy(warningColor = selected) } }
-                    8 -> showColorPicker(
+                    11 -> showColorPicker(
                         title = "Warning value color",
                         current = box.warningValueColor,
                         palette = alarmValueColorPalette(),
                     ) { selected -> updateBoxConfig(boxIndex) { it.copy(warningValueColor = selected) } }
-                    9 -> showColorPicker(
+                    12 -> showColorPicker(
                         title = "Critical background",
                         current = box.criticalColor,
                         palette = criticalColorPalette(),
@@ -1047,20 +1510,20 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
                             )
                         }
                     }
-                    10 -> showColorPicker(
+                    13 -> showColorPicker(
                         title = "Critical value color",
                         current = box.criticalValueColor,
                         palette = alarmValueColorPalette(),
                     ) { selected -> updateBoxConfig(boxIndex) { it.copy(criticalValueColor = selected) } }
-                    11 -> updateBoxConfig(boxIndex) { it.copy(alarmColorsBackground = !it.alarmColorsBackground) }
-                    12 -> updateBoxConfig(boxIndex) { it.copy(alarmColorsValue = !it.alarmColorsValue) }
-                    13 -> updateBoxConfig(boxIndex) { it.copy(showIcon = !it.showIcon) }
-                    14 -> updateBoxConfig(boxIndex) { it.copy(showUnit = !it.showUnit) }
-                    15 -> updateBoxConfig(boxIndex) { it.copy(showMinMax = !it.showMinMax) }
-                    16 -> confirmApplyStyleToPage(boxIndex)
-                    17 -> updateBoxConfig(boxIndex) { withDefaultAlarmThresholds(it) }
-                    18 -> updateBoxConfig(boxIndex) { clearAlarmThresholds(it) }
-                    19 -> updateBoxConfig(boxIndex) { resetBoxStyle(it) }
+                    14 -> updateBoxConfig(boxIndex) { it.copy(alarmColorsBackground = !it.alarmColorsBackground) }
+                    15 -> updateBoxConfig(boxIndex) { it.copy(alarmColorsValue = !it.alarmColorsValue) }
+                    16 -> updateBoxConfig(boxIndex) { it.copy(showIcon = !it.showIcon) }
+                    17 -> updateBoxConfig(boxIndex) { it.copy(showUnit = !it.showUnit) }
+                    18 -> updateBoxConfig(boxIndex) { it.copy(showMinMax = !it.showMinMax) }
+                    19 -> confirmApplyStyleToPage(boxIndex)
+                    20 -> updateBoxConfig(boxIndex) { withDefaultAlarmThresholds(it) }
+                    21 -> updateBoxConfig(boxIndex) { clearAlarmThresholds(it) }
+                    22 -> updateBoxConfig(boxIndex) { resetBoxStyle(it) }
                 }
             }
             .setNegativeButton("Close", null)
@@ -1093,6 +1556,9 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             box.copy(
                 valueScale = 1.0f,
                 iconScale = 1.0f,
+                decimalPlaces = box.sensor.defaultDisplayDecimals(),
+                splitValueDigits = true,
+                smoothingAlpha = box.sensor.defaultDisplaySmoothing(),
                 backgroundColor = Color.rgb(11, 14, 20),
                 foregroundColor = Color.WHITE,
                 valueColor = Color.WHITE,
@@ -1497,7 +1963,7 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
 
     private fun simpleGridCard(
         fallbackIcon: String,
-        iconResourceName: String,
+        iconResourceName: String?,
         label: String,
         value: String,
         unit: String,
@@ -1506,22 +1972,21 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         minMaxSuffix: String,
         valueScale: Float = 1.0f,
         iconScale: Float = 1.0f,
-        backgroundColor: Int = Color.rgb(11, 14, 20),
+        backgroundColor: Int = Color.rgb(16, 20, 30),
         foregroundColor: Int = Color.WHITE,
         unitColor: Int = Color.rgb(210, 216, 225),
         minColor: Int = Color.rgb(80, 170, 255),
         maxColor: Int = Color.rgb(255, 72, 72),
         showIcon: Boolean = true,
+        splitValueDigits: Boolean = true,
     ): LinearLayout =
         LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
             contentDescription = label
             background = roundedBg(backgroundColor, 0f)
-            setPadding(12, 4, 10, 4)
+            setPadding(8, 4, 8, 4)
 
-            val safeValueScale = valueScale.coerceIn(0.5f, 2.5f)
-            val safeIconScale = iconScale.coerceIn(0.5f, 2.5f)
             val stats = if (minMaxKey != null && rawValue != null) {
                 trackMinMax(minMaxKey, rawValue)
             } else {
@@ -1538,82 +2003,110 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
                 }
             }
 
-            if (showIcon) {
-                val iconSize = (44f * safeIconScale).toInt().coerceIn(26, 96)
-                val iconResId = resources.getIdentifier(iconResourceName, "drawable", packageName)
-                if (iconResId != 0) {
-                    addView(ImageView(this@MainActivity).apply {
-                        setImageResource(iconResId)
-                        adjustViewBounds = true
-                        alpha = 0.95f
-                    }, LinearLayout.LayoutParams(iconSize, iconSize).apply {
-                        setMargins(0, 0, 10, 0)
-                    })
-                } else {
-                    addView(TextView(this@MainActivity).apply {
-                        text = fallbackIcon
-                        textSize = if (fallbackIcon.length > 2) 14f * safeIconScale else 22f * safeIconScale
-                        gravity = Gravity.CENTER
-                        setTextColor(foregroundColor)
-                        typeface = Typeface.DEFAULT_BOLD
-                    }, LinearLayout.LayoutParams(iconSize, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                        setMargins(0, 0, 10, 0)
-                    })
+            addView(FrameLayout(this@MainActivity).apply {
+                val safeValueScale = valueScale.coerceIn(0.25f, 4.0f)
+                val safeIconScale = iconScale.coerceIn(0.25f, 4.0f)
+                val iconSize = (44f * safeIconScale).toInt().coerceAtLeast(18)
+
+                if (showIcon) {
+                    val iconResId = resources.getIdentifier(iconResourceName ?: "", "drawable", packageName)
+                    val iconOffset = -126f * safeValueScale
+                    val iconBaselineOffset = 8f * safeValueScale
+                    val iconParams = FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER)
+
+                    if (iconResId != 0) {
+                        addView(ImageView(this@MainActivity).apply {
+                            setImageResource(iconResId)
+                            adjustViewBounds = true
+                            alpha = 0.95f
+                            translationX = iconOffset
+                            translationY = iconBaselineOffset
+                        }, iconParams)
+                    } else {
+                        addView(TextView(this@MainActivity).apply {
+                            text = fallbackIcon
+                            textSize = if (fallbackIcon.length > 2) 13f * safeIconScale else 22f * safeIconScale
+                            gravity = Gravity.CENTER
+                            textAlignment = View.TEXT_ALIGNMENT_CENTER
+                            setTextColor(unitColor)
+                            typeface = Typeface.DEFAULT_BOLD
+                            includeFontPadding = false
+                            translationX = iconOffset
+                            translationY = iconBaselineOffset
+                        }, iconParams)
+                    }
                 }
-            }
 
-            val valueRow = LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
+                val valueLine = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                    isBaselineAligned = false
+                }
 
-            valueRow.addView(TextView(this@MainActivity).apply {
-                text = value
-                textSize = 29f * safeValueScale
-                setTextColor(foregroundColor)
-                gravity = Gravity.CENTER_VERTICAL
-                typeface = Typeface.DEFAULT_BOLD
-                includeFontPadding = false
-            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-
-            if (unit.isNotBlank()) {
-                valueRow.addView(TextView(this@MainActivity).apply {
-                    text = " $unit"
-                    textSize = 14f * safeValueScale
-                    setTextColor(unitColor)
-                    gravity = Gravity.CENTER_VERTICAL
+                valueLine.addView(TextView(this@MainActivity).apply {
+                    text = styledValueText(value, splitValueDigits)
+                    textSize = 29f * safeValueScale
+                    setTextColor(foregroundColor)
+                    gravity = Gravity.CENTER
+                    textAlignment = View.TEXT_ALIGNMENT_CENTER
                     typeface = Typeface.DEFAULT_BOLD
                     includeFontPadding = false
                 }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-            }
 
-            addView(valueRow, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                if (unit.isNotBlank()) {
+                    valueLine.addView(TextView(this@MainActivity).apply {
+                        text = " $unit"
+                        textSize = 14f * safeValueScale
+                        setTextColor(unitColor)
+                        gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                        textAlignment = View.TEXT_ALIGNMENT_CENTER
+                        typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
+                        includeFontPadding = false
+                        translationX = 7f * safeValueScale
+                        translationY = -12f * safeValueScale
+                    }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+                }
 
-            val showStats = stats != null && minMaxKey != null && shouldShowMinMax(minMaxKey)
-            val statBox = LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER_VERTICAL or Gravity.END
-            }
+                // Important: this is MATCH_PARENT and Gravity.CENTER, so the value is centered
+                // relative to the whole cell. Icon/minmax are overlays and do not push it away.
+                addView(valueLine, FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER,
+                ))
 
-            statBox.addView(TextView(this@MainActivity).apply {
-                text = if (showStats) fmt(stats!!.max, minMaxSuffix) else ""
-                textSize = 11f
-                setTextColor(maxColor)
-                gravity = Gravity.END
-                typeface = Typeface.DEFAULT_BOLD
-                includeFontPadding = false
-            }, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                val showStats = stats != null && minMaxKey != null && shouldShowMinMax(minMaxKey)
+                val statBox = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER
+                    setPadding(0, 3, 0, 3)
+                }
 
-            statBox.addView(TextView(this@MainActivity).apply {
-                text = if (showStats) fmt(stats!!.min, minMaxSuffix) else ""
-                textSize = 11f
-                setTextColor(minColor)
-                gravity = Gravity.END
-                typeface = Typeface.DEFAULT_BOLD
-                includeFontPadding = false
-            }, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                statBox.addView(TextView(this@MainActivity).apply {
+                    text = if (showStats) fmt(stats!!.max, "") else ""
+                    textSize = 10f
+                    setTextColor(maxColor)
+                    gravity = Gravity.CENTER
+                    textAlignment = View.TEXT_ALIGNMENT_CENTER
+                    typeface = Typeface.DEFAULT_BOLD
+                    includeFontPadding = false
+                        setPadding(0, 2, 0, 2)
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
-            addView(statBox, LinearLayout.LayoutParams(84, LinearLayout.LayoutParams.WRAP_CONTENT))
+                statBox.addView(TextView(this@MainActivity).apply {
+                    text = if (showStats) fmt(stats!!.min, "") else ""
+                    textSize = 10f
+                    setTextColor(minColor)
+                    gravity = Gravity.CENTER
+                    textAlignment = View.TEXT_ALIGNMENT_CENTER
+                    typeface = Typeface.DEFAULT_BOLD
+                    includeFontPadding = false
+                        setPadding(0, 2, 0, 2)
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+                statBox.translationX = 148f * safeValueScale
+                addView(statBox, FrameLayout.LayoutParams(86, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         }
 
     private fun addSimpleRow(icon: String, label: String, value: String) {
