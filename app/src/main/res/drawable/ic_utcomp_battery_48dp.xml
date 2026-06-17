@@ -4,17 +4,29 @@
     android:height="48dp"
     android:viewportWidth="48"
     android:viewportHeight="48">
+
+    <!-- Car-style battery icon, not a phone battery. -->
     <path
         android:fillColor="@android:color/transparent"
         android:strokeColor="#FFFFFFFF"
         android:strokeWidth="3"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:pathData="M7,16 L37,16 Q40,16 40,19 L40,29 Q40,32 37,32 L7,32 Q4,32 4,29 L4,19 Q4,16 7,16 Z" />
+        android:pathData="M9,15 L39,15 Q42,15 42,18 L42,34 Q42,37 39,37 L9,37 Q6,37 6,34 L6,18 Q6,15 9,15 Z" />
+
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M42,20 L45,20 Q46,20 46,21 L46,27 Q46,28 45,28 L42,28 Z" />
+        android:pathData="M14,10 L21,10 Q22,10 22,11 L22,15 L13,15 L13,11 Q13,10 14,10 Z" />
+
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M9,20 L32,20 Q34,20 34,22 L34,26 Q34,28 32,28 L9,28 Z" />
+        android:pathData="M27,10 L34,10 Q35,10 35,11 L35,15 L26,15 L26,11 Q26,10 27,10 Z" />
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M14,25 L22,25 L22,28 L14,28 Z" />
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M29,21 L32,21 L32,25 L36,25 L36,28 L32,28 L32,32 L29,32 L29,28 L25,28 L25,25 L29,25 Z" />
 </vector>

@@ -76,7 +76,7 @@ enum class DashboardSensor(
         unit = "",
         defaultMin = 0.0f,
         defaultMax = 0.0f,
-        iconResourceName = "ic_rcomp_timer_trip_48dp",
+        iconResourceName = "",
     );
 
     fun readValue(snapshot: UtcompDataSnapshot): Float? =
