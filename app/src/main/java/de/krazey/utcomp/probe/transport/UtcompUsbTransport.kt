@@ -15,6 +15,7 @@ import de.krazey.utcomp.probe.protocol.TransmitterPacket
 import de.krazey.utcomp.probe.protocol.TransmitterPacketParser
 import de.krazey.utcomp.probe.protocol.UsbPacket
 import de.krazey.utcomp.probe.utcomp.UtcompDecoder
+import de.krazey.utcomp.probe.utcomp.UtcompDataSnapshot
 import de.krazey.utcomp.probe.util.hex
 import java.io.Closeable
 import java.util.concurrent.LinkedBlockingQueue
@@ -23,6 +24,7 @@ import kotlin.concurrent.thread
 class UtcompUsbTransport(
     private val context: Context,
     private val uiLog: (String) -> Unit,
+    private val onDecodedSnapshot: (UtcompDataSnapshot) -> Unit = {},
 ) : Closeable {
     companion object {
         const val TAG = "UTCOMPProbe"
@@ -221,7 +223,11 @@ class UtcompUsbTransport(
                         val txp = TransmitterPacketParser.fromUsb(usb)
                         if (txp != null) {
                             logLine(txp.toString())
-                            UtcompDecoder.apply(txp).forEach { decoded -> logLine(decoded) }
+                            val decodedLines = UtcompDecoder.apply(txp)
+                            decodedLines.forEach { decoded -> logLine(decoded) }
+                            if (decodedLines.isNotEmpty()) {
+                                onDecodedSnapshot(UtcompDecoder.snapshot.copy())
+                            }
                         }
                     }
                 } catch (t: Throwable) {

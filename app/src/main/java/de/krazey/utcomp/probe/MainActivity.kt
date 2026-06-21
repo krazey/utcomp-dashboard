@@ -18,8 +18,10 @@ import de.krazey.utcomp.probe.dashboard.DefaultDashboardPages
 import de.krazey.utcomp.probe.dashboard.DashboardSensor
 import de.krazey.utcomp.probe.dashboard.DashboardPageConfig
 import de.krazey.utcomp.probe.dashboard.DashboardBoxConfig
+import de.krazey.utcomp.probe.logging.UtcompCsvLogger
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -68,6 +70,7 @@ class MainActivity : Activity() {
         private const val USB_SLOW_POLL_MS = 1000L
         private const val USB_RECONNECT_MS = 2500L
         private const val DASHBOARD_RENDER_MS = 125L
+        private const val DATA_LOG_TREE_REQUEST = 42_100
         const val TAG = "UTCOMPProbe"
     }
 
@@ -99,6 +102,8 @@ class MainActivity : Activity() {
     private lateinit var logTitleText: TextView
     private lateinit var logText: TextView
     private lateinit var logScroll: ScrollView
+    private lateinit var csvLogger: UtcompCsvLogger
+    private var dataLogTreeUri: Uri? = null
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private val handler = Handler(Looper.getMainLooper())
@@ -223,7 +228,8 @@ class MainActivity : Activity() {
         applyFastSensorSmoothingMigrationIfNeeded()
         dataMode = DataMode.USB
         simTestMode = SimTestMode.OFF
-        usb = UtcompUsbTransport(this, ::appendLog)
+        csvLogger = UtcompCsvLogger(this, ::appendLog)
+        usb = UtcompUsbTransport(this, ::appendLog, ::onDecodedSnapshot)
         buildUi()
         usb.register()
         startUsbAutoConnect()
@@ -288,6 +294,7 @@ class MainActivity : Activity() {
         handler.removeCallbacksAndMessages(null)
         usb.unregister()
         usb.close()
+        if (::csvLogger.isInitialized) csvLogger.close()
         stopSimTicker()
         super.onDestroy()
     }
@@ -400,6 +407,10 @@ class MainActivity : Activity() {
         })
         controls.addView(row4)
 
+        val row5 = ClickableLinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        row5.addView(button("Data log") { showDataLoggerMenu() })
+        controls.addView(row5)
+
         controlsPanel = controls.apply {
             visibility = View.GONE
             background = roundedBg(Color.rgb(15, 18, 24), 18f)
@@ -510,6 +521,7 @@ class MainActivity : Activity() {
         }
 
         showSourceLine = prefs.getBoolean("showSourceLine", showSourceLine)
+        dataLogTreeUri = prefs.getString("dataLogTreeUri", null)?.let { Uri.parse(it) }
 
         dashboardPagesFromJson(prefs.getString("dashboardPagesJson", null))?.let { savedPages ->
             if (savedPages.isNotEmpty()) {
@@ -524,6 +536,7 @@ class MainActivity : Activity() {
                 .putString("uiMode", uiMode.name)
                 .putString("page", page.name)
                 .putBoolean("showSourceLine", showSourceLine)
+                .putString("dataLogTreeUri", dataLogTreeUri?.toString())
                 .putString("dashboardPagesJson", dashboardPagesToJson(dashboardPages))
                 .apply()
         }.onFailure { error ->
@@ -1068,6 +1081,107 @@ class MainActivity : Activity() {
         }
 
         return false
+    }
+
+
+    private fun onDecodedSnapshot(snapshot: UtcompDataSnapshot) {
+        if (::csvLogger.isInitialized) {
+            csvLogger.offer(snapshot, source = "usb")
+        }
+    }
+
+    private fun showDataLoggerMenu() {
+        val savedFolder = dataLogTreeUri
+        val items = mutableListOf<String>()
+        val actions = mutableListOf<() -> Unit>()
+
+        items += csvLogger.statusText()
+        actions += { appendLog(csvLogger.statusText()) }
+
+        if (csvLogger.isRunning) {
+            items += "Stop CSV logging"
+            actions += { csvLogger.stop() }
+        } else {
+            items += "Start CSV logging: internal app storage"
+            actions += { startCsvLoggingInternal() }
+
+            items += "Start CSV logging: app external storage"
+            actions += { startCsvLoggingAppExternal() }
+
+            if (savedFolder != null) {
+                items += "Start CSV logging: saved SD/folder"
+                actions += { startCsvLoggingTree(savedFolder) }
+            }
+
+            items += "Pick SD card/folder and start CSV logging"
+            actions += { pickCsvLoggingFolder() }
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("High-resolution data logging")
+            .setItems(items.toTypedArray()) { _, which -> actions.getOrNull(which)?.invoke() }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun startCsvLoggingInternal() {
+        runCatching {
+            csvLogger.startInternal()
+        }.onFailure { error ->
+            appendLog("CSV logging start failed: ${error.message}")
+        }
+    }
+
+    private fun startCsvLoggingAppExternal() {
+        runCatching {
+            csvLogger.startAppExternal()
+        }.onFailure { error ->
+            appendLog("CSV logging start failed: ${error.message}")
+        }
+    }
+
+    private fun startCsvLoggingTree(uri: Uri) {
+        runCatching {
+            csvLogger.startTree(uri)
+        }.onFailure { error ->
+            appendLog("CSV logging start failed: ${error.message}")
+        }
+    }
+
+    private fun pickCsvLoggingFolder() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+        }
+        startActivityForResult(intent, DATA_LOG_TREE_REQUEST)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode != DATA_LOG_TREE_REQUEST || resultCode != RESULT_OK) return
+
+        val uri = data?.data ?: run {
+            appendLog("CSV logging folder selection returned no URI")
+            return
+        }
+
+        val flags = data.flags and (
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+
+        runCatching {
+            contentResolver.takePersistableUriPermission(uri, flags)
+        }.onFailure { error ->
+            appendLog("Could not persist CSV logging folder permission: ${error.message}")
+        }
+
+        dataLogTreeUri = uri
+        saveDashboardPrefs()
+        startCsvLoggingTree(uri)
     }
 
         private fun requestSettingsData() {
@@ -3655,7 +3769,7 @@ card
                     textAlignment = View.TEXT_ALIGNMENT_CENTER
                     typeface = Typeface.DEFAULT_BOLD
                     includeFontPadding = false
-                    setPadding(0, 2, 0, 2)
+                    setPadding(0, minMaxPaddingY, 0, minMaxPaddingY)
                 }, LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT,
