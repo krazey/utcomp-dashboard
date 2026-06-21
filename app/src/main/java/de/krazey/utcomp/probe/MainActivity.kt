@@ -184,6 +184,7 @@ class MainActivity : Activity() {
     private var showSourceLine = true
     private val minMaxBySensor = LinkedHashMap<String, MinMax>()
     private val smoothedValuesByBox = LinkedHashMap<String, Float>()
+    private val visualSmoothedValues = LinkedHashMap<String, VisualSmoothedValue>()
     private var minMaxDisplayMode = MinMaxMode.ON_TAP
     private var activeMinMaxCard: String? = null
     private var minMaxHideRunnable: Runnable? = null
@@ -191,6 +192,10 @@ class MainActivity : Activity() {
     private data class MinMax(
         var min: Float = Float.NaN,
         var max: Float = Float.NaN,
+    )
+
+    private data class VisualSmoothedValue(
+        var value: Float = Float.NaN,
     )
 
     private val simRunnable = object : Runnable {
@@ -555,6 +560,7 @@ class MainActivity : Activity() {
             put("columnSpan", box.columnSpan)
             putFloatJson(this, "valueScale", box.valueScale)
             putFloatJson(this, "iconScale", box.iconScale)
+            putFloatJson(this, "iconValueGapScale", box.iconValueGapScale)
             putFloatJson(this, "scaleMin", box.scaleMin)
             putFloatJson(this, "scaleMax", box.scaleMax)
             putFloatJson(this, "smoothingAlpha", box.smoothingAlpha)
@@ -634,6 +640,7 @@ class MainActivity : Activity() {
             columnSpan = json.optInt("columnSpan", fallback.columnSpan),
             valueScale = optFloatJson(json, "valueScale", fallback.valueScale),
             iconScale = optFloatJson(json, "iconScale", fallback.iconScale),
+            iconValueGapScale = optFloatJson(json, "iconValueGapScale", fallback.iconValueGapScale),
             scaleMin = optFloatJson(json, "scaleMin", fallback.scaleMin),
             scaleMax = optFloatJson(json, "scaleMax", fallback.scaleMax),
             smoothingAlpha = optFloatJson(json, "smoothingAlpha", fallback.smoothingAlpha),
@@ -835,6 +842,12 @@ class MainActivity : Activity() {
     private fun topBarHintText(): String =
         "Tap: min/max · Double tap: menu · Long press: menu"
 
+    private fun View.setTooltipCompat(text: CharSequence?) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            tooltipText = text
+        }
+    }
+
     private fun updateEditModeButton() {
         editModeButton?.apply {
             text = editModeButtonText()
@@ -843,7 +856,7 @@ class MainActivity : Activity() {
             } else {
                 "Edit dashboard boxes"
             }
-            tooltipText = contentDescription
+            setTooltipCompat(contentDescription)
         }
     }
 
@@ -853,15 +866,15 @@ class MainActivity : Activity() {
 
         simModeButton?.apply {
             contentDescription = "SIM test data mode. Current mode: ${simModeDescription()}"
-            tooltipText = contentDescription
+            setTooltipCompat(contentDescription)
         }
         editModeButton?.apply {
             contentDescription = if (editMode) "Finish editing dashboard boxes" else "Edit dashboard boxes"
-            tooltipText = contentDescription
+            setTooltipCompat(contentDescription)
         }
         gearButton?.apply {
             contentDescription = "Open controls menu"
-            tooltipText = contentDescription
+            setTooltipCompat(contentDescription)
         }
     }
 
@@ -1102,9 +1115,33 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         ).forEach { requestUsb(it, false) }
     }
 
-
     private fun appendLog(line: String) {
-        Log.i(TAG, line)
+        val highFrequencyLine =
+            line.startsWith("USB raw[") ||
+                line.startsWith("USB RX DATA") ||
+                line.startsWith("USB TX DATA") ||
+                line.startsWith("USB STATUS") ||
+                line.startsWith("USB write[") ||
+                line.startsWith("queued UsbPacket") ||
+                line.startsWith("DECODE ")
+
+        if (highFrequencyLine) {
+            Log.d(TAG, line)
+        } else {
+            Log.i(TAG, line)
+        }
+
+        val updatesConnectionState =
+            line.contains("USB connected") ||
+                line.contains("USB closed") ||
+                line.contains("USB detached")
+
+        val updatesDashboard = line.startsWith("DECODE ")
+
+        if (!updatesConnectionState && !updatesDashboard && highFrequencyLine) {
+            return
+        }
+
         runOnUiThread {
             if (!::logText.isInitialized || !::logScroll.isInitialized) return@runOnUiThread
 
@@ -1120,9 +1157,28 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
                 line.startsWith("DECODE ") -> scheduleDashboardRender()
             }
 
+            if (highFrequencyLine) return@runOnUiThread
+
             val stamp = timeFmt.format(Date())
-            logText.append("$stamp  $line\n")
-            logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
+            val newEntry = "$stamp  $line\n"
+
+            // Keep the on-screen debug TextView bounded. Without this, the radio eventually
+            // crashes with OOM inside TextView.append()/DynamicLayout.reflow() after enough
+            // USB/debug lines were appended, even when the debug view is hidden.
+            val maxLogChars = 80_000
+            val keepLogChars = 55_000
+
+            if (logText.length() > maxLogChars) {
+                val current = logText.text
+                val keepStart = (current.length - keepLogChars).coerceAtLeast(0)
+                logText.text = "… UI log trimmed …\n${current.subSequence(keepStart, current.length)}"
+            }
+
+            logText.append(newEntry)
+
+            if (logScroll.isShown) {
+                logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
+            }
         }
     }
 
@@ -1336,6 +1392,7 @@ card
             rawValue = rawValue,
             valueScale = box.valueScale,
             iconScale = box.iconScale,
+            iconValueGapScale = box.iconValueGapScale,
             backgroundColor = boxBackgroundColor(box, alarmLevel),
             foregroundColor = effectiveValueColor,
             unitColor = if (alarmLevel == BoxAlarmLevel.NORMAL) box.unitColor else effectiveValueColor,
@@ -1390,6 +1447,30 @@ card
             previous + (value - previous) * alpha
         }
         smoothedValuesByBox[key] = smoothed
+        return smoothed
+    }
+
+    private fun visualSmoothedValue(key: String, target: Float, alpha: Float): Float {
+        if (target.isNaN() || target.isInfinite()) {
+            visualSmoothedValues.remove(key)
+            return target
+        }
+
+        val safeAlpha = alpha.coerceIn(0.01f, 1.0f)
+        if (safeAlpha >= 0.999f || simTestMode != SimTestMode.OFF) {
+            visualSmoothedValues[key] = VisualSmoothedValue(target)
+            return target
+        }
+
+        val state = visualSmoothedValues[key]
+        val previous = state?.value
+        val smoothed = if (previous == null || previous.isNaN() || previous.isInfinite()) {
+            target
+        } else {
+            previous + (target - previous) * safeAlpha
+        }
+
+        visualSmoothedValues[key] = VisualSmoothedValue(smoothed)
         return smoothed
     }
 
@@ -1740,6 +1821,7 @@ card
             "Sensor: ${box.sensor.label}",
             "Value size: ${formatScale(box.valueScale)}",
             "Icon size: ${formatScale(box.iconScale)}",
+            "Icon/value gap: ${formatScale(box.iconValueGapScale)}",
             "Decimals: ${decimalsText(box.decimalPlaces)}",
             "Split decimals: ${enabledText(box.splitValueDigits)}",
             "Smoothing: ${smoothingText(box.smoothingAlpha)}",
@@ -1778,59 +1860,63 @@ card
                         title = "Icon size",
                         current = box.iconScale,
                     ) { selected -> updateBoxConfig(boxIndex) { it.copy(iconScale = selected) } }
-                    3 -> showDecimalsPicker(boxIndex, box)
-                    4 -> updateBoxConfig(boxIndex) { it.copy(splitValueDigits = !it.splitValueDigits) }
-                    5 -> showSmoothingPicker(boxIndex, box)
-                    6 -> showColorPicker(
+                    3 -> showScalePicker(
+                        title = "Icon/value gap",
+                        current = box.iconValueGapScale,
+                    ) { selected -> updateBoxConfig(boxIndex) { it.copy(iconValueGapScale = selected) } }
+                    4 -> showDecimalsPicker(boxIndex, box)
+                    5 -> updateBoxConfig(boxIndex) { it.copy(splitValueDigits = !it.splitValueDigits) }
+                    6 -> showSmoothingPicker(boxIndex, box)
+                    7 -> showColorPicker(
                         title = "Normal value color",
                         current = box.valueColor,
                         palette = valueColorPalette(),
                     ) { selected -> updateBoxConfig(boxIndex) { it.copy(valueColor = selected, foregroundColor = selected) } }
-                    7 -> showColorPicker(
+                    8 -> showColorPicker(
                         title = "Background color",
                         current = box.backgroundColor,
                         palette = backgroundColorPalette(),
                     ) { selected -> updateBoxConfig(boxIndex) { it.copy(backgroundColor = selected) } }
-                    8 -> showHighThresholdEditor(
+                    9 -> showHighThresholdEditor(
                         title = "Warning low",
                         boxIndex = boxIndex,
                         box = box,
                         current = box.warningLow,
                     ) { newValue -> copy(warningLow = newValue) }
-                    9 -> showHighThresholdEditor(
+                    10 -> showHighThresholdEditor(
                         title = "Critical low",
                         boxIndex = boxIndex,
                         box = box,
                         current = box.criticalLow,
                     ) { newValue -> copy(criticalLow = newValue) }
-                    10 -> showHighThresholdEditor(
+                    11 -> showHighThresholdEditor(
                         title = "Warning high",
                         boxIndex = boxIndex,
                         box = box,
                         current = box.warningHigh,
                     ) { newValue -> copy(warningHigh = newValue) }
-                    11 -> showHighThresholdEditor(
+                    12 -> showHighThresholdEditor(
                         title = "Critical high",
                         boxIndex = boxIndex,
                         box = box,
                         current = box.criticalHigh,
                     ) { newValue -> copy(criticalHigh = newValue) }
-                    12 -> if (box.sensor == DashboardSensor.OIL_PRESSURE) {
+                    13 -> if (box.sensor == DashboardSensor.OIL_PRESSURE) {
                         showOilPressureBoostAlarmEditor(boxIndex, box)
                     } else {
                         showSensorPicker(boxIndex)
                     }
-                    13 -> showColorPicker(
+                    14 -> showColorPicker(
                         title = "Warning background",
                         current = box.warningColor,
                         palette = warningColorPalette(),
                     ) { selected -> updateBoxConfig(boxIndex) { it.copy(warningColor = selected) } }
-                    14 -> showColorPicker(
+                    15 -> showColorPicker(
                         title = "Warning value color",
                         current = box.warningValueColor,
                         palette = alarmValueColorPalette(),
                     ) { selected -> updateBoxConfig(boxIndex) { it.copy(warningValueColor = selected) } }
-                    15 -> showColorPicker(
+                    16 -> showColorPicker(
                         title = "Critical background",
                         current = box.criticalColor,
                         palette = criticalColorPalette(),
@@ -1843,20 +1929,20 @@ card
                             )
                         }
                     }
-                    16 -> showColorPicker(
+                    17 -> showColorPicker(
                         title = "Critical value color",
                         current = box.criticalValueColor,
                         palette = alarmValueColorPalette(),
                     ) { selected -> updateBoxConfig(boxIndex) { it.copy(criticalValueColor = selected) } }
-                    17 -> updateBoxConfig(boxIndex) { it.copy(alarmColorsBackground = !it.alarmColorsBackground) }
-                    18 -> updateBoxConfig(boxIndex) { it.copy(alarmColorsValue = !it.alarmColorsValue) }
-                    19 -> updateBoxConfig(boxIndex) { it.copy(showIcon = !it.showIcon) }
-                    20 -> updateBoxConfig(boxIndex) { it.copy(showUnit = !it.showUnit) }
-                    21 -> updateBoxConfig(boxIndex) { it.copy(showMinMax = !it.showMinMax) }
-                    22 -> confirmApplyStyleToPage(boxIndex)
-                    23 -> updateBoxConfig(boxIndex) { withDefaultAlarmThresholds(it) }
-                    24 -> updateBoxConfig(boxIndex) { clearAlarmThresholds(it) }
-                    25 -> updateBoxConfig(boxIndex) { resetBoxStyle(it) }
+                    18 -> updateBoxConfig(boxIndex) { it.copy(alarmColorsBackground = !it.alarmColorsBackground) }
+                    19 -> updateBoxConfig(boxIndex) { it.copy(alarmColorsValue = !it.alarmColorsValue) }
+                    20 -> updateBoxConfig(boxIndex) { it.copy(showIcon = !it.showIcon) }
+                    21 -> updateBoxConfig(boxIndex) { it.copy(showUnit = !it.showUnit) }
+                    22 -> updateBoxConfig(boxIndex) { it.copy(showMinMax = !it.showMinMax) }
+                    23 -> confirmApplyStyleToPage(boxIndex)
+                    24 -> updateBoxConfig(boxIndex) { withDefaultAlarmThresholds(it) }
+                    25 -> updateBoxConfig(boxIndex) { clearAlarmThresholds(it) }
+                    26 -> updateBoxConfig(boxIndex) { resetBoxStyle(it) }
                 }
             }
             .setNegativeButton("Close", null)
@@ -2091,6 +2177,8 @@ card
         val afr = shownAfr ?: Float.NaN
         val oilPressure = shownOilPressure ?: Float.NaN
         val oilTemp = shownOilTemp ?: Float.NaN
+        val visualBoost = visualSmoothedValue("ralliart:boostNeedle", boost, 0.18f)
+        val visualAfr = visualSmoothedValue("ralliart:afrMarker", afr, 0.22f)
 
         val (targetMin, targetMax) = afrTargetRangeForBoost(boost)
         val afrColor = when {
@@ -2383,7 +2471,7 @@ card
         root.addView(RalliartBoostNeedleView(this).apply {
             minValue = -1.0f
             maxValue = 2.0f
-            currentValue = boost.coerceIn(-1.0f, 2.0f)
+            currentValue = visualBoost.coerceIn(-1.0f, 2.0f)
             warningValue = 2.0f
             showDebugGuides = false
         }, lp(boostNeedleBox))
@@ -2414,10 +2502,10 @@ card
             val barMax = 20.0f
             val startFrac = ((targetMin - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
             val endFrac = ((targetMax - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
-            val valueFrac = if (afr.isNaN() || afr.isInfinite()) {
+            val valueFrac = if (visualAfr.isNaN() || visualAfr.isInfinite()) {
                 0f
             } else {
-                ((afr - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
+                ((visualAfr - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
             }
 
             val bandStart = (total * startFrac).toInt()
@@ -3235,7 +3323,8 @@ card
 
     private fun iconDrawableResourceId(resourceName: String?): Int =
         when (resourceName) {
-            "ic_utcomp_battery_48dp" -> R.drawable.ic_utcomp_battery_48dp
+            "ic_utcomp_battery_48dp" -> R.drawable.ic_rcomp_accu_48dp
+            "ic_rcomp_accu_48dp" -> R.drawable.ic_rcomp_accu_48dp
             "ic_rcomp_afr_48dp" -> R.drawable.ic_rcomp_afr_48dp
             "ic_rcomp_boost_48dp" -> R.drawable.ic_rcomp_boost_48dp
             "ic_rcomp_inside_temp_48dp" -> R.drawable.ic_rcomp_inside_temp_48dp
@@ -3243,7 +3332,7 @@ card
             "ic_rcomp_oiltemp_48dp" -> R.drawable.ic_rcomp_oiltemp_48dp
             "ic_rcomp_outside_temp_48dp" -> R.drawable.ic_rcomp_outside_temp_48dp
             "ic_rcomp_timer_trip_48dp" -> R.drawable.ic_rcomp_timer_trip_48dp
-            "ic_rcomp_volts_48dp" -> R.drawable.ic_utcomp_battery_48dp
+            "ic_rcomp_volts_48dp" -> R.drawable.ic_rcomp_accu_48dp
             "ic_rcomp_afr1_48dp" -> R.drawable.ic_rcomp_afr_48dp
             "ic_rcomp_afr2_48dp" -> R.drawable.ic_rcomp_afr_48dp
             "ic_rcomp_bar_48dp" -> R.drawable.ic_rcomp_boost_48dp
@@ -3272,6 +3361,7 @@ card
         rawValue: Float?,
         valueScale: Float = 1.0f,
         iconScale: Float = 1.0f,
+        iconValueGapScale: Float = 1.0f,
         backgroundColor: Int = Color.BLACK,
         foregroundColor: Int = Color.WHITE,
         unitColor: Int = Color.rgb(210, 216, 225),
@@ -3315,24 +3405,31 @@ card
 
                 val safeValueScale = valueScale.coerceIn(0.25f, 4.0f)
                 val safeIconScale = iconScale.coerceIn(0.25f, 4.0f)
+                val safeIconValueGapScale = iconValueGapScale.coerceIn(0.25f, 4.0f)
 
-                // Simple-mode layout tuning:
+                // Simple-mode layout model:
                 // - valueLine is a single measured horizontal row (value + unit)
-                // - icon.RIGHT = valueLine.LEFT - iconGapPx
-                // - icon.BOTTOM = valueLine.BOTTOM + iconBottomOffsetPx
+                // - the full icon + gap + valueLine group is centered horizontally
+                // - the value glyph ink center is centered vertically in the box
+                // - value, unit, and icon are aligned by actual text ink bottom, not font-box bottom
                 val iconSize = (40f * safeIconScale).toInt().coerceAtLeast(18)
-                val iconGapPx = (12f * safeValueScale).coerceAtLeast(4f)
-                val iconBottomOffsetPx = -8f
+                val iconGapPx = (8f * safeValueScale * safeIconValueGapScale).coerceAtLeast(2f)
+                val iconBottomOffsetPx = 0f
                 val unitGapPx = (4f * safeValueScale).toInt().coerceAtLeast(1)
-                val unitBaselineOffsetY = 8f * safeValueScale
+                val minMaxTextSize = 11.5f * safeValueScale
+                val minMaxPaddingY = (2f * safeValueScale).toInt().coerceAtLeast(2)
+                val minMaxWidthPx = (54f * safeValueScale).toInt().coerceAtLeast(46)
+                val minMaxGapPx = (10f * safeValueScale).coerceAtLeast(4f)
                 val valueOffsetX = 0f
                 val valueOffsetY = 0f
 
                 var iconView: View? = null
+                var unitTextView: TextView? = null
+                var statBoxView: View? = null
 
                 val valueLine = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL or Gravity.CENTER_HORIZONTAL
+                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                     isBaselineAligned = false
                     clipToPadding = false
                     clipChildren = false
@@ -3340,36 +3437,39 @@ card
                     translationY = valueOffsetY
                 }
 
-                valueLine.addView(TextView(this@MainActivity).apply {
+                val valueTextView = TextView(this@MainActivity).apply {
                     text = styledValueText(value, splitValueDigits)
                     textSize = 29f * safeValueScale
                     setTextColor(foregroundColor)
-                    gravity = Gravity.CENTER
+                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                     textAlignment = View.TEXT_ALIGNMENT_CENTER
                     typeface = Typeface.DEFAULT_BOLD
                     includeFontPadding = false
-                }, LinearLayout.LayoutParams(
+                }
+
+                valueLine.addView(valueTextView, LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                 ).apply {
-                    gravity = Gravity.CENTER_VERTICAL
+                    gravity = Gravity.BOTTOM
                 })
 
                 if (unit.isNotBlank()) {
-                    valueLine.addView(TextView(this@MainActivity).apply {
+                    val unitText = TextView(this@MainActivity).apply {
                         text = unit
                         textSize = 10.5f * safeValueScale
                         setTextColor(unitColor)
-                        gravity = Gravity.CENTER
+                        gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                         textAlignment = View.TEXT_ALIGNMENT_CENTER
                         typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
                         includeFontPadding = false
-                        translationY = unitBaselineOffsetY
-                    }, LinearLayout.LayoutParams(
+                    }
+                    unitTextView = unitText
+                    valueLine.addView(unitText, LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.WRAP_CONTENT,
                         LinearLayout.LayoutParams.WRAP_CONTENT,
                     ).apply {
-                        gravity = Gravity.CENTER_VERTICAL
+                        gravity = Gravity.BOTTOM
                         leftMargin = unitGapPx
                     })
                 }
@@ -3405,50 +3505,143 @@ card
                     addView(icon, FrameLayout.LayoutParams(iconSize, iconSize))
                 }
 
-                fun alignSimpleIcon() {
-                    val icon = iconView ?: return
-                    if (valueLine.width <= 0 || valueLine.height <= 0 || icon.width <= 0 || icon.height <= 0) return
+                fun textInkBoundsInValueLine(textView: TextView): android.graphics.RectF {
+                    val baseline = textView.baseline
+                    if (textView.height <= 0 || baseline < 0) {
+                        return android.graphics.RectF(
+                            textView.left.toFloat(),
+                            textView.top.toFloat(),
+                            textView.right.toFloat(),
+                            textView.bottom.toFloat(),
+                        )
+                    }
 
-                    // Fixed pattern:
-                    // icon.RIGHT = valueLine.LEFT - iconGapPx
-                    // icon.BOTTOM = valueLine.BOTTOM + iconBottomOffsetPx
-                    icon.x = valueLine.left.toFloat() + valueLine.translationX - icon.width - iconGapPx
-                    icon.y = valueLine.top.toFloat() +
-                        valueLine.translationY +
-                        valueLine.height -
-                        icon.height +
-                        iconBottomOffsetPx
+                    val rawText = textView.text?.toString().orEmpty()
+                    if (rawText.isEmpty()) {
+                        return android.graphics.RectF(
+                            textView.left.toFloat(),
+                            textView.top.toFloat(),
+                            textView.right.toFloat(),
+                            textView.bottom.toFloat(),
+                        )
+                    }
+
+                    // fontMetrics only tells us where the font box ends. Digits usually draw
+                    // inside that box. getTextBounds() gives the actual ink relative to baseline.
+                    val inkBounds = android.graphics.Rect()
+                    textView.paint.getTextBounds(rawText, 0, rawText.length, inkBounds)
+
+                    return android.graphics.RectF(
+                        textView.left + inkBounds.left.toFloat(),
+                        textView.top + baseline + inkBounds.top.toFloat(),
+                        textView.left + inkBounds.right.toFloat(),
+                        textView.top + baseline + inkBounds.bottom.toFloat(),
+                    )
+                }
+
+                fun alignSimpleContent() {
+                    if (width <= 0 || height <= 0 || valueLine.width <= 0 ||
+                        valueLine.height <= 0 || valueTextView.height <= 0
+                    ) return
+
+                    // Reset first so repeated layout passes do not compound the correction.
+                    valueLine.translationX = 0f
+                    valueLine.translationY = 0f
+                    valueTextView.translationY = 0f
+                    unitTextView?.translationY = 0f
+
+                    val icon = iconView
+                    val iconBlockWidth = if (icon != null && icon.width > 0) {
+                        icon.width.toFloat() + iconGapPx
+                    } else {
+                        0f
+                    }
+
+                    val groupWidth = iconBlockWidth + valueLine.width
+                    val groupLeft = (width - groupWidth) / 2f
+                    val valueLineLeft = groupLeft + iconBlockWidth
+
+                    // Vertical centering is based only on the main value glyph, not the icon,
+                    // unit, or min/max block. This keeps the number visually centered in the box.
+                    val valueInkBounds = textInkBoundsInValueLine(valueTextView)
+                    val valueInkCenterInLine = (valueInkBounds.top + valueInkBounds.bottom) / 2f
+                    val valueLineTop = (height / 2f) - valueInkCenterInLine
+                    valueLine.x = valueLineLeft
+                    valueLine.y = valueLineTop
+
+                    val targetBottom = valueLine.y + valueInkBounds.bottom
+
+                    // Shift the unit glyph until its real ink bottom shares the value bottom.
+                    unitTextView?.let { unitText ->
+                        if (unitText.height > 0) {
+                            val unitBottom = valueLine.y + textInkBoundsInValueLine(unitText).bottom
+                            unitText.translationY = targetBottom - unitBottom
+                        }
+                    }
+
+                    icon?.let {
+                        if (it.width <= 0 || it.height <= 0) return@let
+
+                        // Fixed pattern:
+                        // full group centered horizontally
+                        // icon.BOTTOM = value glyph bottom
+                        it.x = groupLeft
+                        it.y = targetBottom - it.height + iconBottomOffsetPx
+                    }
+
+                    statBoxView?.let { statBox ->
+                        if (statBox.visibility == View.GONE || statBox.width <= 0 || statBox.height <= 0) return@let
+
+                        val rightEdge = width - 4f
+                        val leftEdge = 4f
+                        val rightCandidate = groupLeft + groupWidth + minMaxGapPx
+                        val leftCandidate = groupLeft - minMaxGapPx - statBox.width
+                        val statLeft = when {
+                            rightCandidate + statBox.width <= rightEdge -> rightCandidate
+                            leftCandidate >= leftEdge -> leftCandidate
+                            else -> (rightEdge - statBox.width).coerceAtLeast(leftEdge)
+                        }
+
+                        // Keep min/max vertically tied to the same value-centered axis.
+                        statBox.x = statLeft
+                        statBox.y = (height / 2f) - (statBox.height / 2f)
+                    }
                 }
 
                 addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                    alignSimpleIcon()
+                    alignSimpleContent()
                 }
                 valueLine.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                    alignSimpleIcon()
+                    alignSimpleContent()
+                }
+                valueTextView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                    alignSimpleContent()
+                }
+                unitTextView?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                    alignSimpleContent()
                 }
                 iconView?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                    alignSimpleIcon()
-                }
-                post {
-                    alignSimpleIcon()
+                    alignSimpleContent()
                 }
 
                 val showStats = stats != null && minMaxKey != null && shouldShowMinMax(minMaxKey)
                 val statBox = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
                     gravity = Gravity.CENTER
-                    setPadding(0, 3, 0, 3)
+                    visibility = if (showStats) View.VISIBLE else View.GONE
+                    setPadding(0, minMaxPaddingY, 0, minMaxPaddingY)
                 }
+                statBoxView = statBox
 
                 statBox.addView(TextView(this@MainActivity).apply {
                     text = if (showStats) fmt(stats!!.max, "") else ""
-                    textSize = 10f
+                    textSize = minMaxTextSize
                     setTextColor(maxColor)
                     gravity = Gravity.CENTER
                     textAlignment = View.TEXT_ALIGNMENT_CENTER
                     typeface = Typeface.DEFAULT_BOLD
                     includeFontPadding = false
-                    setPadding(0, 2, 0, 2)
+                    setPadding(0, minMaxPaddingY, 0, minMaxPaddingY)
                 }, LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -3456,7 +3649,7 @@ card
 
                 statBox.addView(TextView(this@MainActivity).apply {
                     text = if (showStats) fmt(stats!!.min, "") else ""
-                    textSize = 10f
+                    textSize = minMaxTextSize
                     setTextColor(minColor)
                     gravity = Gravity.CENTER
                     textAlignment = View.TEXT_ALIGNMENT_CENTER
@@ -3468,12 +3661,16 @@ card
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                 ))
 
-                statBox.translationX = 64f * safeValueScale
                 addView(statBox, FrameLayout.LayoutParams(
-                    46,
+                    minMaxWidthPx,
                     FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.CENTER,
                 ))
+                statBox.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                    alignSimpleContent()
+                }
+                post {
+                    alignSimpleContent()
+                }
             }, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 0,

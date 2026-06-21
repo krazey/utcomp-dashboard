@@ -55,7 +55,7 @@ enum class DashboardSensor(
         unit = "V",
         defaultMin = 8.0f,
         defaultMax = 16.0f,
-        iconResourceName = "ic_utcomp_battery_48dp",
+        iconResourceName = "ic_rcomp_accu_48dp",
     ),
     OUTSIDE_TEMP(
         label = "Outside",
@@ -105,6 +105,7 @@ data class DashboardBoxConfig(
      */
     val valueScale: Float = 1.0f,
     val iconScale: Float = 1.0f,
+    val iconValueGapScale: Float = 1.0f,
 
     /**
      * Value/gauge scale.
@@ -193,6 +194,7 @@ data class DashboardPageConfig(
                 it.copy(
                     valueScale = sourceBox.valueScale,
                     iconScale = sourceBox.iconScale,
+                    iconValueGapScale = sourceBox.iconValueGapScale,
                     scaleMin = sourceBox.scaleMin,
                     scaleMax = sourceBox.scaleMax,
                     decimalPlaces = sourceBox.decimalPlaces,
