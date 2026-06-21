@@ -52,7 +52,10 @@ import de.krazey.utcomp.probe.view.PerformanceGaugeView
 import de.krazey.utcomp.probe.view.RalliartBoostGaugeView
 import de.krazey.utcomp.probe.view.RalliartBoostNeedleView
 import de.krazey.utcomp.probe.view.RalliartAfrDebugBarView
+import java.io.BufferedReader
+import java.io.File
 import java.text.SimpleDateFormat
+import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
 import java.util.LinkedHashMap
@@ -71,6 +74,10 @@ class MainActivity : Activity() {
         private const val USB_RECONNECT_MS = 2500L
         private const val DASHBOARD_RENDER_MS = 125L
         private const val DATA_LOG_TREE_REQUEST = 42_100
+        private const val DATA_LOG_VIEW_FILE_REQUEST = 42_101
+        private const val CSV_VIEW_MAX_ROWS = 500
+        private const val DASHBOARD_DOUBLE_TAP_MS = 320L
+        private const val DASHBOARD_SWIPE_CLICK_SUPPRESS_MS = 280L
         const val TAG = "UTCOMPProbe"
     }
 
@@ -171,8 +178,8 @@ class MainActivity : Activity() {
     private var topBarChromeView: View? = null
     private var topBarHintText: TextView? = null
     private var lastDashboardBoxTapMs = 0L
-    private val dashboardTapHandler = Handler(Looper.getMainLooper())
-    private var pendingDashboardSingleTap: Runnable? = null
+    private var lastDashboardTapToken: String? = null
+    private var suppressDashboardClickUntilMs = 0L
     private var lastBoxEditorLaunchMs = 0L
 
     private var topBarActionButtons: List<Button> = emptyList()
@@ -201,6 +208,20 @@ class MainActivity : Activity() {
 
     private data class VisualSmoothedValue(
         var value: Float = Float.NaN,
+    )
+
+    private data class CsvViewerRow(
+        val time: String,
+        val afr: Float,
+        val boost: Float,
+        val oilPressure: Float,
+        val oilTemp: Float,
+    )
+
+    private data class CsvViewerPreview(
+        val totalRows: Int,
+        val rows: List<CsvViewerRow>,
+        val sourceColumns: String,
     )
 
     private val simRunnable = object : Runnable {
@@ -853,7 +874,7 @@ class MainActivity : Activity() {
         }
 
     private fun topBarHintText(): String =
-        "Tap: min/max · Double tap: menu · Long press: menu"
+        "Tap: min/max · Quick double tap: menu · Long press: menu"
 
     private fun View.setTooltipCompat(text: CharSequence?) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -914,34 +935,39 @@ class MainActivity : Activity() {
     }
 
     private fun cancelPendingDashboardSingleTap() {
-        pendingDashboardSingleTap?.let { dashboardTapHandler.removeCallbacks(it) }
-        pendingDashboardSingleTap = null
+        lastDashboardBoxTapMs = 0L
+        lastDashboardTapToken = null
     }
 
-    private fun handleDashboardBoxTapForChrome(minMaxKey: String?) {
+    private fun suppressDashboardClicksBriefly() {
+        suppressDashboardClickUntilMs = SystemClock.uptimeMillis() + DASHBOARD_SWIPE_CLICK_SUPPRESS_MS
+        cancelPendingDashboardSingleTap()
+    }
+
+    private fun dashboardClickSuppressed(): Boolean =
+        SystemClock.uptimeMillis() < suppressDashboardClickUntilMs
+
+    private fun handleDashboardBoxTapForChrome(minMaxKey: String?, tapToken: String) {
         val now = SystemClock.uptimeMillis()
-        val isSecondTap = pendingDashboardSingleTap != null && now - lastDashboardBoxTapMs <= 420L
+        val isSecondTap =
+            lastDashboardTapToken == tapToken &&
+                now - lastDashboardBoxTapMs <= DASHBOARD_DOUBLE_TAP_MS
+
+        lastDashboardBoxTapMs = now
+        lastDashboardTapToken = tapToken
 
         if (isSecondTap) {
             cancelPendingDashboardSingleTap()
-            lastDashboardBoxTapMs = 0L
             revealTopBarChrome(autoHide = true)
             return
         }
 
-        lastDashboardBoxTapMs = now
-        cancelPendingDashboardSingleTap()
-
-        val singleTap = Runnable {
-            pendingDashboardSingleTap = null
-            lastDashboardBoxTapMs = 0L
-            if (minMaxKey != null) {
-                showMinMaxInline(minMaxKey)
-            }
+        // Old behavior delayed this by ~430 ms to wait for a double tap. That felt
+        // laggy on the head unit. Show min/max immediately; a quick second tap still
+        // opens the top-bar menu.
+        if (minMaxKey != null) {
+            showMinMaxInline(minMaxKey)
         }
-
-        pendingDashboardSingleTap = singleTap
-        dashboardTapHandler.postDelayed(singleTap, 430L)
     }
 
 
@@ -971,10 +997,12 @@ class MainActivity : Activity() {
     private fun attachDashboardBoxActions(card: View, boxIndex: Int, minMaxKey: String?) {
         card.isClickable = true
         card.setOnClickListener {
+            if (dashboardClickSuppressed()) return@setOnClickListener
+
             if (editMode) {
                 openBoxEditorOnce(boxIndex)
             } else {
-                handleDashboardBoxTapForChrome(minMaxKey)
+                handleDashboardBoxTapForChrome(minMaxKey, "box:$boxIndex")
             }
         }
         card.setOnLongClickListener {
@@ -1070,6 +1098,7 @@ class MainActivity : Activity() {
                 val absDy = kotlin.math.abs(dy)
 
                 if (absDx >= 90f && absDx > absDy * 1.6f) {
+                    suppressDashboardClicksBriefly()
                     if (dx < 0f) {
                         nextPage()
                     } else {
@@ -1098,6 +1127,15 @@ class MainActivity : Activity() {
         items += csvLogger.statusText()
         actions += { appendLog(csvLogger.statusText()) }
 
+        items += "View latest CSV: internal"
+        actions += { viewLatestCsvLog("internal", File(filesDir, "utcomp-logs")) }
+
+        items += "View latest CSV: app external"
+        actions += { viewLatestCsvLog("app external", File(getExternalFilesDir("utcomp-logs") ?: filesDir, "csv")) }
+
+        items += "Pick CSV log to view"
+        actions += { pickCsvLogToView() }
+
         if (csvLogger.isRunning) {
             items += "Stop CSV logging"
             actions += { csvLogger.stop() }
@@ -1123,6 +1161,225 @@ class MainActivity : Activity() {
             .setNegativeButton("Close", null)
             .show()
     }
+
+    private fun viewLatestCsvLog(label: String, dir: File) {
+        val file = dir.listFiles { candidate ->
+            candidate.isFile && candidate.name.endsWith(".csv", ignoreCase = true)
+        }?.maxByOrNull { candidate -> candidate.lastModified() }
+
+        if (file == null) {
+            appendLog("No CSV log found in $label: ${dir.absolutePath}")
+            return
+        }
+
+        appendLog("Loading CSV viewer from $label: ${file.name}")
+        loadCsvLogPreview(title = "$label: ${file.name}") {
+            file.bufferedReader()
+        }
+    }
+
+    private fun pickCsvLogToView() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
+                "text/csv",
+                "text/comma-separated-values",
+                "application/csv",
+                "text/plain",
+            ))
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivityForResult(intent, DATA_LOG_VIEW_FILE_REQUEST)
+    }
+
+    private fun viewPickedCsvLog(uri: Uri) {
+        val title = "picked: ${uri.lastPathSegment ?: uri}"
+        appendLog("Loading CSV viewer from picked file: $uri")
+        loadCsvLogPreview(title = title) {
+            contentResolver.openInputStream(uri)?.bufferedReader()
+                ?: error("Could not open selected CSV")
+        }
+    }
+
+    private fun loadCsvLogPreview(title: String, openReader: () -> BufferedReader) {
+        Thread({
+            val result = runCatching {
+                openReader().use { reader -> readCsvLogPreview(reader) }
+            }
+
+            handler.post {
+                result
+                    .onSuccess { preview -> showCsvLogPreviewDialog(title, preview) }
+                    .onFailure { error -> appendLog("CSV viewer failed: ${error.message}") }
+            }
+        }, "utcomp-csv-viewer").start()
+    }
+
+    private fun readCsvLogPreview(reader: BufferedReader): CsvViewerPreview {
+        val headerLine = reader.readLine() ?: return CsvViewerPreview(
+            totalRows = 0,
+            rows = emptyList(),
+            sourceColumns = "empty file",
+        )
+        val headers = parseCsvLine(headerLine).map { it.trim() }
+        val lowerHeaders = headers.map { it.lowercase(Locale.US) }
+
+        fun indexOfAny(vararg names: String): Int =
+            names.firstNotNullOfOrNull { name ->
+                lowerHeaders.indexOf(name.lowercase(Locale.US)).takeIf { it >= 0 }
+            } ?: -1
+
+        val timeIndex = indexOfAny("wall_time_iso", "wall_time_ms", "elapsed_realtime_ms")
+        val afrIndex = indexOfAny("afr1", "adc_in_ch1")
+        val boostIndex = indexOfAny("bar1", "adc_in_ch3")
+        val oilPressureIndex = indexOfAny("bar2", "adc_in_ch4")
+        val oilTempIndex = indexOfAny("temperature_ntc1_c", "temperature_oil_c")
+
+        val sourceColumns = listOf(
+            "time=${headers.getOrNull(timeIndex) ?: "?"}",
+            "afr=${headers.getOrNull(afrIndex) ?: "?"}",
+            "boost=${headers.getOrNull(boostIndex) ?: "?"}",
+            "oilP=${headers.getOrNull(oilPressureIndex) ?: "?"}",
+            "oilT=${headers.getOrNull(oilTempIndex) ?: "?"}",
+        ).joinToString(" · ")
+
+        val rows = ArrayDeque<CsvViewerRow>()
+        var total = 0
+
+        while (true) {
+            val line = reader.readLine() ?: break
+            if (line.isBlank()) continue
+            val fields = parseCsvLine(line)
+            total++
+
+            val row = CsvViewerRow(
+                time = compactCsvTime(fields.getOrNull(timeIndex).orEmpty()),
+                afr = fields.getOrNull(afrIndex).toFloatOrNan(),
+                boost = fields.getOrNull(boostIndex).toFloatOrNan(),
+                oilPressure = fields.getOrNull(oilPressureIndex).toFloatOrNan(),
+                oilTemp = fields.getOrNull(oilTempIndex).toFloatOrNan(),
+            )
+            rows.addLast(row)
+            if (rows.size > CSV_VIEW_MAX_ROWS) rows.removeFirst()
+        }
+
+        return CsvViewerPreview(
+            totalRows = total,
+            rows = rows.toList(),
+            sourceColumns = sourceColumns,
+        )
+    }
+
+    private fun showCsvLogPreviewDialog(title: String, preview: CsvViewerPreview) {
+        val body = buildCsvLogPreviewText(preview)
+        val textView = TextView(this).apply {
+            text = body
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+            setPadding(18, 14, 18, 14)
+        }
+
+        val verticalScroll = ScrollView(this).apply {
+            addView(textView, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+        val horizontalScroll = android.widget.HorizontalScrollView(this).apply {
+            addView(verticalScroll, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("CSV viewer · $title")
+            .setView(horizontalScroll)
+            .setPositiveButton("Close", null)
+            .show()
+    }
+
+    private fun buildCsvLogPreviewText(preview: CsvViewerPreview): String {
+        val rows = preview.rows
+        return buildString {
+            appendLine("rows=${preview.totalRows} showing=${rows.size} max=$CSV_VIEW_MAX_ROWS")
+            appendLine(preview.sourceColumns)
+            appendLine()
+            appendLine("AFR   ${rangeText(rows.map { it.afr }, decimals = 2)}")
+            appendLine("Boost ${rangeText(rows.map { it.boost }, decimals = 2)} BAR")
+            appendLine("OilP  ${rangeText(rows.map { it.oilPressure }, decimals = 2)} BAR")
+            appendLine("OilT  ${rangeText(rows.map { it.oilTemp }, decimals = 1)} °C")
+            appendLine()
+            appendLine(String.format(Locale.US, "%-12s %7s %9s %9s %9s", "time", "AFR", "boost", "oilP", "oilT"))
+            appendLine(String.format(Locale.US, "%-12s %7s %9s %9s %9s", "", "", "BAR", "BAR", "°C"))
+            appendLine("-----------------------------------------------------")
+            rows.forEach { row ->
+                appendLine(String.format(
+                    Locale.US,
+                    "%-12s %7s %9s %9s %9s",
+                    row.time.takeLast(12),
+                    row.afr.formatOrDash(2),
+                    row.boost.formatOrDash(2),
+                    row.oilPressure.formatOrDash(2),
+                    row.oilTemp.formatOrDash(1),
+                ))
+            }
+        }
+    }
+
+    private fun rangeText(values: List<Float>, decimals: Int): String {
+        val valid = values.filter { it.isFinite() }
+        if (valid.isEmpty()) return "min=-- max=--"
+        val min = valid.minOrNull() ?: return "min=-- max=--"
+        val max = valid.maxOrNull() ?: return "min=-- max=--"
+        return "min=${min.formatOrDash(decimals)} max=${max.formatOrDash(decimals)}"
+    }
+
+    private fun compactCsvTime(raw: String): String {
+        val value = raw.trim().trim('"')
+        val tIndex = value.indexOf('T')
+        if (tIndex >= 0 && tIndex + 1 < value.length) {
+            return value.substring(tIndex + 1)
+                .substringBefore('+')
+                .substringBefore('Z')
+        }
+        return value
+    }
+
+    private fun parseCsvLine(line: String): List<String> {
+        val fields = mutableListOf<String>()
+        val current = StringBuilder()
+        var quoted = false
+        var index = 0
+
+        while (index < line.length) {
+            val char = line[index]
+            when {
+                char == '"' && quoted && index + 1 < line.length && line[index + 1] == '"' -> {
+                    current.append('"')
+                    index++
+                }
+                char == '"' -> quoted = !quoted
+                char == ',' && !quoted -> {
+                    fields += current.toString()
+                    current.setLength(0)
+                }
+                else -> current.append(char)
+            }
+            index++
+        }
+        fields += current.toString()
+        return fields
+    }
+
+    private fun String?.toFloatOrNan(): Float =
+        this?.trim()?.trim('"')?.toFloatOrNull() ?: Float.NaN
+
+    private fun Float.formatOrDash(decimals: Int): String =
+        if (isFinite()) String.format(Locale.US, "%.${decimals}f", this) else "--"
 
     private fun startCsvLoggingInternal() {
         runCatching {
@@ -1160,6 +1417,16 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == DATA_LOG_VIEW_FILE_REQUEST) {
+            if (resultCode != RESULT_OK) return
+            val uri = data?.data ?: run {
+                appendLog("CSV viewer file selection returned no URI")
+                return
+            }
+            viewPickedCsvLog(uri)
+            return
+        }
 
         if (requestCode != DATA_LOG_TREE_REQUEST || resultCode != RESULT_OK) return
 
@@ -2714,7 +2981,8 @@ card
 
         card.isClickable = true
         card.setOnClickListener {
-            handleDashboardBoxTapForChrome(minMaxKey)
+            if (dashboardClickSuppressed()) return@setOnClickListener
+            handleDashboardBoxTapForChrome(minMaxKey, "fancy:${slot.sensor.name}")
         }
         card.setOnLongClickListener {
             cancelPendingDashboardSingleTap()

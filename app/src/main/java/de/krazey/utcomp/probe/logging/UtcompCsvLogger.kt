@@ -2,6 +2,7 @@ package de.krazey.utcomp.probe.logging
 
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.DocumentsContract
 import de.krazey.utcomp.probe.utcomp.UtcompDataSnapshot
 import java.io.BufferedWriter
@@ -26,6 +27,8 @@ class UtcompCsvLogger(
             "seq",
             "wall_time_ms",
             "wall_time_iso",
+            "elapsed_realtime_ms",
+            "elapsed_realtime_nanos",
             "source",
             "firmware",
             "utcomp_pro",
@@ -101,6 +104,8 @@ class UtcompCsvLogger(
     private data class CsvSample(
         val seq: Long,
         val wallTimeMs: Long,
+        val elapsedRealtimeMs: Long,
+        val elapsedRealtimeNanos: Long,
         val source: String,
         val snapshot: UtcompDataSnapshot,
     )
@@ -169,6 +174,8 @@ class UtcompCsvLogger(
         val sample = CsvSample(
             seq = ++sequence,
             wallTimeMs = System.currentTimeMillis(),
+            elapsedRealtimeMs = SystemClock.elapsedRealtime(),
+            elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos(),
             source = source,
             snapshot = snapshot.copy(),
         )
@@ -212,7 +219,14 @@ class UtcompCsvLogger(
                 var rowsSinceFlush = 0
                 while (running || queue.isNotEmpty()) {
                     val sample = queue.poll(500, TimeUnit.MILLISECONDS) ?: continue
-                    out.write(rowFor(sample.seq, sample.wallTimeMs, sample.source, sample.snapshot))
+                    out.write(rowFor(
+                        seq = sample.seq,
+                        wallTimeMs = sample.wallTimeMs,
+                        elapsedRealtimeMs = sample.elapsedRealtimeMs,
+                        elapsedRealtimeNanos = sample.elapsedRealtimeNanos,
+                        source = sample.source,
+                        s = sample.snapshot,
+                    ))
                     out.newLine()
                     writtenRows++
                     rowsSinceFlush++
@@ -231,11 +245,20 @@ class UtcompCsvLogger(
         }
     }
 
-    private fun rowFor(seq: Long, wallTimeMs: Long, source: String, s: UtcompDataSnapshot): String =
+    private fun rowFor(
+        seq: Long,
+        wallTimeMs: Long,
+        elapsedRealtimeMs: Long,
+        elapsedRealtimeNanos: Long,
+        source: String,
+        s: UtcompDataSnapshot,
+    ): String =
         listOf(
             seq.toString(),
             wallTimeMs.toString(),
             csv(isoTime(wallTimeMs)),
+            elapsedRealtimeMs.toString(),
+            elapsedRealtimeNanos.toString(),
             csv(source),
             csv(s.firmware),
             s.utcompPro.toString(),
