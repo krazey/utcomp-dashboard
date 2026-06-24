@@ -52,10 +52,12 @@ import de.krazey.utcomp.probe.view.PerformanceGaugeView
 import de.krazey.utcomp.probe.view.RalliartBoostGaugeView
 import de.krazey.utcomp.probe.view.RalliartBoostNeedleView
 import de.krazey.utcomp.probe.view.RalliartAfrDebugBarView
+import de.krazey.utcomp.probe.view.CsvLogGraphMarker
+import de.krazey.utcomp.probe.view.CsvLogGraphPoint
+import de.krazey.utcomp.probe.view.CsvLogGraphView
 import java.io.BufferedReader
 import java.io.File
 import java.text.SimpleDateFormat
-import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
 import java.util.LinkedHashMap
@@ -73,9 +75,11 @@ class MainActivity : Activity() {
         private const val USB_SLOW_POLL_MS = 1000L
         private const val USB_RECONNECT_MS = 2500L
         private const val DASHBOARD_RENDER_MS = 125L
+        private const val DASHBOARD_TOUCH_RENDER_GRACE_MS = 220L
+        private const val DASHBOARD_TOUCH_DEFER_RETRY_MS = 80L
         private const val DATA_LOG_TREE_REQUEST = 42_100
         private const val DATA_LOG_VIEW_FILE_REQUEST = 42_101
-        private const val CSV_VIEW_MAX_ROWS = 500
+        private const val CSV_VIEW_GRAPH_MAX_POINTS = 1600
         private const val DASHBOARD_DOUBLE_TAP_MS = 320L
         private const val DASHBOARD_SWIPE_CLICK_SUPPRESS_MS = 280L
         const val TAG = "UTCOMPProbe"
@@ -120,8 +124,18 @@ class MainActivity : Activity() {
     private val autoUsbHandler = Handler(Looper.getMainLooper())
     private val dashboardRenderHandler = Handler(Looper.getMainLooper())
     private var dashboardRenderPending = false
+    private var dashboardRenderDeferredByTouch = false
+    private var dashboardTouchActive = false
+    private var dashboardTouchReleasedAtMs = 0L
     private val dashboardRenderRunnable = Runnable {
         dashboardRenderPending = false
+        if (shouldDeferDashboardRenderForTouch()) {
+            dashboardRenderDeferredByTouch = true
+            scheduleDashboardRender(DASHBOARD_TOUCH_DEFER_RETRY_MS)
+            return@Runnable
+        }
+
+        dashboardRenderDeferredByTouch = false
         renderDashboard()
     }
 
@@ -160,7 +174,7 @@ class MainActivity : Activity() {
                 return
             }
 
-            renderDashboard()
+            scheduleDashboardRender(delayMs = 0L)
             simTickerHandler.postDelayed(this, 350L)
         }
     }
@@ -207,23 +221,55 @@ class MainActivity : Activity() {
 
     private data class CsvViewerRow(
         val time: String,
+        val wallTimeMs: Long?,
+        val elapsedRealtimeMs: Long?,
         val afr: Float,
         val boost: Float,
         val oilPressure: Float,
         val oilTemp: Float,
     )
 
+    private data class CsvViewerRange(
+        val min: Float,
+        val max: Float,
+    )
+
+    private data class CsvViewerStats(
+        val afr: CsvViewerRange,
+        val boost: CsvViewerRange,
+        val oilPressure: CsvViewerRange,
+        val oilTemp: CsvViewerRange,
+    )
+
     private data class CsvViewerPreview(
         val totalRows: Int,
-        val rows: List<CsvViewerRow>,
+        val graphRows: List<CsvViewerRow>,
         val sourceColumns: String,
+        val firstTime: String,
+        val lastTime: String,
+        val durationText: String,
+        val sampleRateHz: Float,
+        val stats: CsvViewerStats,
     )
+
+    private class CsvRangeAccumulator {
+        private var minValue = Float.NaN
+        private var maxValue = Float.NaN
+
+        fun add(value: Float) {
+            if (!value.isFinite()) return
+            minValue = if (minValue.isNaN()) value else minOf(minValue, value)
+            maxValue = if (maxValue.isNaN()) value else maxOf(maxValue, value)
+        }
+
+        fun toRange(): CsvViewerRange = CsvViewerRange(minValue, maxValue)
+    }
 
     private val simRunnable = object : Runnable {
         override fun run() {
             if (simTestMode != SimTestMode.OFF || dataMode == DataMode.SIM) {
                 SimulationEngine.update(UtcompDecoder.snapshot, simTick++)
-                renderDashboard()
+                scheduleDashboardRender(delayMs = 0L)
                 handler.postDelayed(this, 500)
             }
         }
@@ -1212,11 +1258,7 @@ class MainActivity : Activity() {
     }
 
     private fun readCsvLogPreview(reader: BufferedReader): CsvViewerPreview {
-        val headerLine = reader.readLine() ?: return CsvViewerPreview(
-            totalRows = 0,
-            rows = emptyList(),
-            sourceColumns = "empty file",
-        )
+        val headerLine = reader.readLine() ?: return emptyCsvViewerPreview("empty file")
         val headers = parseCsvLine(headerLine).map { it.trim() }
         val lowerHeaders = headers.map { it.lowercase(Locale.US) }
 
@@ -1225,7 +1267,10 @@ class MainActivity : Activity() {
                 lowerHeaders.indexOf(name.lowercase(Locale.US)).takeIf { it >= 0 }
             } ?: -1
 
-        val timeIndex = indexOfAny("wall_time_iso", "wall_time_ms", "elapsed_realtime_ms")
+        val wallTimeIndex = indexOfAny("wall_time_ms")
+        val isoTimeIndex = indexOfAny("wall_time_iso")
+        val elapsedTimeIndex = indexOfAny("elapsed_realtime_ms")
+        val timeIndex = listOf(isoTimeIndex, wallTimeIndex, elapsedTimeIndex).firstOrNull { it >= 0 } ?: -1
         val afrIndex = indexOfAny("afr1", "adc_in_ch1")
         val boostIndex = indexOfAny("bar1", "adc_in_ch3")
         val oilPressureIndex = indexOfAny("bar2", "adc_in_ch4")
@@ -1239,8 +1284,20 @@ class MainActivity : Activity() {
             "oilT=${headers.getOrNull(oilTempIndex) ?: "?"}",
         ).joinToString(" · ")
 
-        val rows = ArrayDeque<CsvViewerRow>()
+        val graphRows = ArrayList<CsvViewerRow>(CSV_VIEW_GRAPH_MAX_POINTS)
+        var graphStride = 1
         var total = 0
+        var firstTime = ""
+        var lastTime = ""
+        var firstWallTimeMs: Long? = null
+        var lastWallTimeMs: Long? = null
+        var firstElapsedMs: Long? = null
+        var lastElapsedMs: Long? = null
+
+        val afrRange = CsvRangeAccumulator()
+        val boostRange = CsvRangeAccumulator()
+        val oilPressureRange = CsvRangeAccumulator()
+        val oilTempRange = CsvRangeAccumulator()
 
         while (true) {
             val line = reader.readLine() ?: break
@@ -1248,89 +1305,325 @@ class MainActivity : Activity() {
             val fields = parseCsvLine(line)
             total++
 
+            val wallTimeMs = fields.getOrNull(wallTimeIndex).toLongOrNullCompat()
+            val elapsedMs = fields.getOrNull(elapsedTimeIndex).toLongOrNullCompat()
+            val displayTime = compactCsvTime(fields.getOrNull(timeIndex).orEmpty())
+
             val row = CsvViewerRow(
-                time = compactCsvTime(fields.getOrNull(timeIndex).orEmpty()),
+                time = displayTime,
+                wallTimeMs = wallTimeMs,
+                elapsedRealtimeMs = elapsedMs,
                 afr = fields.getOrNull(afrIndex).toFloatOrNan(),
                 boost = fields.getOrNull(boostIndex).toFloatOrNan(),
                 oilPressure = fields.getOrNull(oilPressureIndex).toFloatOrNan(),
                 oilTemp = fields.getOrNull(oilTempIndex).toFloatOrNan(),
             )
-            rows.addLast(row)
-            if (rows.size > CSV_VIEW_MAX_ROWS) rows.removeFirst()
+
+            if (firstTime.isBlank()) firstTime = displayTime
+            lastTime = displayTime
+            if (firstWallTimeMs == null && wallTimeMs != null) firstWallTimeMs = wallTimeMs
+            if (wallTimeMs != null) lastWallTimeMs = wallTimeMs
+            if (firstElapsedMs == null && elapsedMs != null) firstElapsedMs = elapsedMs
+            if (elapsedMs != null) lastElapsedMs = elapsedMs
+
+            afrRange.add(row.afr)
+            boostRange.add(row.boost)
+            oilPressureRange.add(row.oilPressure)
+            oilTempRange.add(row.oilTemp)
+
+            if (total % graphStride == 0) {
+                graphRows += row
+                if (graphRows.size > CSV_VIEW_GRAPH_MAX_POINTS * 2) {
+                    val compacted = graphRows.filterIndexed { index, _ -> index % 2 == 0 }
+                    graphRows.clear()
+                    graphRows.addAll(compacted)
+                    graphStride *= 2
+                }
+            }
+        }
+
+        if (graphRows.size > CSV_VIEW_GRAPH_MAX_POINTS) {
+            val keepEvery = (graphRows.size.toFloat() / CSV_VIEW_GRAPH_MAX_POINTS.toFloat())
+            val compacted = ArrayList<CsvViewerRow>(CSV_VIEW_GRAPH_MAX_POINTS)
+            var next = 0f
+            for (index in graphRows.indices) {
+                if (index + 0.001f >= next) {
+                    compacted += graphRows[index]
+                    next += keepEvery
+                }
+            }
+            graphRows.clear()
+            graphRows.addAll(compacted.take(CSV_VIEW_GRAPH_MAX_POINTS))
+        }
+
+        val durationMs =
+            durationMs(firstWallTimeMs, lastWallTimeMs)
+                ?: durationMs(firstElapsedMs, lastElapsedMs)
+                ?: 0L
+
+        val sampleRate = if (durationMs > 0L && total > 1) {
+            (total - 1).toFloat() / (durationMs.toFloat() / 1000f)
+        } else {
+            Float.NaN
         }
 
         return CsvViewerPreview(
             totalRows = total,
-            rows = rows.toList(),
+            graphRows = graphRows.toList(),
             sourceColumns = sourceColumns,
+            firstTime = firstTime.ifBlank { "—" },
+            lastTime = lastTime.ifBlank { "—" },
+            durationText = formatDuration(durationMs),
+            sampleRateHz = sampleRate,
+            stats = CsvViewerStats(
+                afr = afrRange.toRange(),
+                boost = boostRange.toRange(),
+                oilPressure = oilPressureRange.toRange(),
+                oilTemp = oilTempRange.toRange(),
+            ),
         )
     }
 
+    private fun emptyCsvViewerPreview(sourceColumns: String): CsvViewerPreview =
+        CsvViewerPreview(
+            totalRows = 0,
+            graphRows = emptyList(),
+            sourceColumns = sourceColumns,
+            firstTime = "—",
+            lastTime = "—",
+            durationText = "—",
+            sampleRateHz = Float.NaN,
+            stats = CsvViewerStats(
+                afr = CsvViewerRange(Float.NaN, Float.NaN),
+                boost = CsvViewerRange(Float.NaN, Float.NaN),
+                oilPressure = CsvViewerRange(Float.NaN, Float.NaN),
+                oilTemp = CsvViewerRange(Float.NaN, Float.NaN),
+            ),
+        )
+
     private fun showCsvLogPreviewDialog(title: String, preview: CsvViewerPreview) {
-        val body = buildCsvLogPreviewText(preview)
-        val textView = TextView(this).apply {
-            text = body
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.MONOSPACE
-            setTextIsSelectable(true)
-            setPadding(18, 14, 18, 14)
-        }
-
-        val verticalScroll = ScrollView(this).apply {
-            addView(textView, ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ))
-        }
-        val horizontalScroll = android.widget.HorizontalScrollView(this).apply {
-            addView(verticalScroll, ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ))
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle("CSV viewer · $title")
-            .setView(horizontalScroll)
-            .setPositiveButton("Close", null)
-            .show()
-    }
-
-    private fun buildCsvLogPreviewText(preview: CsvViewerPreview): String {
-        val rows = preview.rows
-        return buildString {
-            appendLine("rows=${preview.totalRows} showing=${rows.size} max=$CSV_VIEW_MAX_ROWS")
-            appendLine(preview.sourceColumns)
-            appendLine()
-            appendLine("AFR   ${rangeText(rows.map { it.afr }, decimals = 2)}")
-            appendLine("Boost ${rangeText(rows.map { it.boost }, decimals = 2)} BAR")
-            appendLine("OilP  ${rangeText(rows.map { it.oilPressure }, decimals = 2)} BAR")
-            appendLine("OilT  ${rangeText(rows.map { it.oilTemp }, decimals = 1)} °C")
-            appendLine()
-            appendLine(String.format(Locale.US, "%-12s %7s %9s %9s %9s", "time", "AFR", "boost", "oilP", "oilT"))
-            appendLine(String.format(Locale.US, "%-12s %7s %9s %9s %9s", "", "", "BAR", "BAR", "°C"))
-            appendLine("-----------------------------------------------------")
-            rows.forEach { row ->
-                appendLine(String.format(
-                    Locale.US,
-                    "%-12s %7s %9s %9s %9s",
-                    row.time.takeLast(12),
-                    row.afr.formatOrDash(2),
-                    row.boost.formatOrDash(2),
-                    row.oilPressure.formatOrDash(2),
-                    row.oilTemp.formatOrDash(1),
-                ))
+        val padding = csvViewerDp(12)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(padding, padding, padding, padding)
+            minimumHeight = (resources.displayMetrics.heightPixels * 0.86f).toInt()
+            background = GradientDrawable().apply {
+                setColor(Color.rgb(8, 10, 14))
+                cornerRadius = 0f
             }
         }
+
+        val titleText = TextView(this).apply {
+            text = title
+            textSize = 15f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.rgb(238, 240, 246))
+            isSingleLine = false
+        }
+        root.addView(titleText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        val metaText = TextView(this).apply {
+            text = buildString {
+                append("rows=${preview.totalRows}")
+                append(" · graph=${preview.graphRows.size}")
+                append(" · ${preview.durationText}")
+                if (preview.sampleRateHz.isFinite()) {
+                    append(" · ${preview.sampleRateHz.formatOrDash(1)} Hz")
+                }
+                append("\n")
+                append("${preview.firstTime.takeLast(12)} → ${preview.lastTime.takeLast(12)}")
+                append("\n")
+                append(preview.sourceColumns)
+            }
+            textSize = 11f
+            setTextColor(Color.rgb(170, 178, 190))
+            setPadding(0, csvViewerDp(4), 0, csvViewerDp(8))
+        }
+        root.addView(metaText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        val summaryRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        summaryRow.addView(csvSummaryCard("AFR", preview.stats.afr, 2, ""), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        summaryRow.addView(csvSummaryCard("Boost", preview.stats.boost, 2, "bar"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        summaryRow.addView(csvSummaryCard("Oil P", preview.stats.oilPressure, 2, "bar"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        summaryRow.addView(csvSummaryCard("Oil T", preview.stats.oilTemp, 1, "°C"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(summaryRow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        val markers = csvGraphWarningMarkers()
+        val markerText = TextView(this).apply {
+            text = if (markers.isEmpty()) {
+                "No active warning/critical markers configured for these graph channels."
+            } else {
+                "Markers: " + markers.joinToString(" · ") { marker ->
+                    "${marker.seriesLabel} ${marker.label}"
+                }
+            }
+            textSize = 10.5f
+            setTextColor(Color.rgb(170, 178, 190))
+            setPadding(0, csvViewerDp(7), 0, 0)
+        }
+        root.addView(markerText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        val graph = CsvLogGraphView(this).apply {
+            setRows(preview.graphRows.map { row ->
+                CsvLogGraphPoint(
+                    time = row.time.takeLast(12),
+                    afr = row.afr,
+                    boost = row.boost,
+                    oilPressure = row.oilPressure,
+                    oilTemp = row.oilTemp,
+                )
+            })
+            setMarkers(markers)
+        }
+        root.addView(graph, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            csvViewerDp(560),
+        ).apply {
+            topMargin = csvViewerDp(10)
+            bottomMargin = csvViewerDp(10)
+        })
+
+        val outerScroll = ScrollView(this).apply {
+            isFillViewport = true
+            setBackgroundColor(Color.rgb(8, 10, 14))
+            addView(root, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("CSV viewer")
+            .setView(outerScroll)
+            .setPositiveButton("Close", null)
+            .show()
+
+        dialog.window?.decorView?.setPadding(0, 0, 0, 0)
+        dialog.window?.setLayout(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        )
     }
 
-    private fun rangeText(values: List<Float>, decimals: Int): String {
-        val valid = values.filter { it.isFinite() }
-        if (valid.isEmpty()) return "min=-- max=--"
-        val min = valid.minOrNull() ?: return "min=-- max=--"
-        val max = valid.maxOrNull() ?: return "min=-- max=--"
-        return "min=${min.formatOrDash(decimals)} max=${max.formatOrDash(decimals)}"
+    private fun csvGraphWarningMarkers(): List<CsvLogGraphMarker> {
+        val currentBoxes = currentPageConfig().boxes
+        val allBoxes = currentBoxes + dashboardPages.flatMap { it.boxes }
+
+        fun boxFor(sensor: DashboardSensor): DashboardBoxConfig? =
+            currentBoxes.firstOrNull { it.sensor == sensor }
+                ?: allBoxes.firstOrNull { it.sensor == sensor }
+
+        fun Float.markerText(decimals: Int): String =
+            if (isFinite()) String.format(Locale.US, "%.${decimals}f", this) else "--"
+
+        fun addMarkers(
+            target: MutableList<CsvLogGraphMarker>,
+            seriesLabel: String,
+            box: DashboardBoxConfig?,
+            decimals: Int,
+            lowSuffix: String = "",
+        ) {
+            if (box == null) return
+
+            if (box.warningLow.isFinite()) {
+                target += CsvLogGraphMarker(
+                    seriesLabel = seriesLabel,
+                    value = box.warningLow,
+                    label = "W≤${box.warningLow.markerText(decimals)}$lowSuffix",
+                    color = box.warningColor,
+                )
+            }
+            if (box.criticalLow.isFinite()) {
+                target += CsvLogGraphMarker(
+                    seriesLabel = seriesLabel,
+                    value = box.criticalLow,
+                    label = "C≤${box.criticalLow.markerText(decimals)}$lowSuffix",
+                    color = box.criticalColor,
+                )
+            }
+            if (box.warningHigh.isFinite()) {
+                target += CsvLogGraphMarker(
+                    seriesLabel = seriesLabel,
+                    value = box.warningHigh,
+                    label = "W≥${box.warningHigh.markerText(decimals)}",
+                    color = box.warningColor,
+                )
+            }
+            if (box.criticalHigh.isFinite()) {
+                target += CsvLogGraphMarker(
+                    seriesLabel = seriesLabel,
+                    value = box.criticalHigh,
+                    label = "C≥${box.criticalHigh.markerText(decimals)}",
+                    color = box.criticalColor,
+                )
+            }
+        }
+
+        val markers = mutableListOf<CsvLogGraphMarker>()
+        addMarkers(markers, "AFR", boxFor(DashboardSensor.AFR), decimals = 2)
+        addMarkers(markers, "Boost", boxFor(DashboardSensor.BOOST), decimals = 2)
+
+        val oilPressureBox = boxFor(DashboardSensor.OIL_PRESSURE)
+        val oilPressureSuffix = if (
+            oilPressureBox != null &&
+            oilPressureBox.oilPressureBoostAlarm &&
+            oilPressureBox.oilPressureBoostArmBar.isFinite()
+        ) {
+            "@${oilPressureBox.oilPressureBoostArmBar.markerText(2)}b"
+        } else {
+            ""
+        }
+        addMarkers(markers, "Oil P", oilPressureBox, decimals = 2, lowSuffix = oilPressureSuffix)
+
+        addMarkers(markers, "Oil T", boxFor(DashboardSensor.OIL_TEMP), decimals = 1)
+        return markers
+    }
+
+    private fun csvSummaryCard(label: String, range: CsvViewerRange, decimals: Int, suffix: String): TextView =
+        TextView(this).apply {
+            text = buildString {
+                appendLine(label)
+                append(range.min.formatOrDash(decimals))
+                append(" → ")
+                append(range.max.formatOrDash(decimals))
+                if (suffix.isNotBlank()) append(" $suffix")
+            }
+            textSize = 10.5f
+            setTextColor(Color.rgb(234, 236, 242))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(csvViewerDp(5), csvViewerDp(7), csvViewerDp(5), csvViewerDp(7))
+            background = GradientDrawable().apply {
+                setColor(Color.rgb(18, 21, 28))
+                cornerRadius = csvViewerDp(9).toFloat()
+                setStroke(1, Color.rgb(50, 56, 68))
+            }
+        }
+
+    private fun csvViewerDp(value: Int): Int =
+        (value.toFloat() * resources.displayMetrics.density + 0.5f).toInt()
+
+    private fun durationMs(startMs: Long?, endMs: Long?): Long? =
+        if (startMs != null && endMs != null && endMs >= startMs) {
+            endMs - startMs
+        } else {
+            null
+        }
+
+    private fun formatDuration(ms: Long): String {
+        if (ms <= 0L) return "—"
+        val totalSeconds = ms / 1000L
+        val minutes = totalSeconds / 60L
+        val seconds = totalSeconds % 60L
+        val hours = minutes / 60L
+        val minutePart = minutes % 60L
+        return if (hours > 0L) {
+            String.format(Locale.US, "%dh %02dm %02ds", hours, minutePart, seconds)
+        } else {
+            String.format(Locale.US, "%dm %02ds", minutes, seconds)
+        }
     }
 
     private fun compactCsvTime(raw: String): String {
@@ -1372,6 +1665,9 @@ class MainActivity : Activity() {
 
     private fun String?.toFloatOrNan(): Float =
         this?.trim()?.trim('"')?.toFloatOrNull() ?: Float.NaN
+
+    private fun String?.toLongOrNullCompat(): Long? =
+        this?.trim()?.trim('"')?.toLongOrNull()
 
     private fun Float.formatOrDash(decimals: Int): String =
         if (isFinite()) String.format(Locale.US, "%.${decimals}f", this) else "--"
@@ -1631,6 +1927,29 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             DashboardSensor.TIME -> snapshot
         }
 
+    private fun markDashboardTouchActive() {
+        dashboardTouchActive = true
+        dashboardTouchReleasedAtMs = 0L
+    }
+
+    private fun markDashboardTouchFinished() {
+        dashboardTouchActive = false
+        dashboardTouchReleasedAtMs = SystemClock.uptimeMillis()
+
+        if (dashboardRenderDeferredByTouch) {
+            scheduleDashboardRender(DASHBOARD_TOUCH_DEFER_RETRY_MS)
+        }
+    }
+
+    private fun shouldDeferDashboardRenderForTouch(): Boolean {
+        if (dashboardTouchActive) return true
+
+        val releasedAt = dashboardTouchReleasedAtMs
+        if (releasedAt <= 0L) return false
+
+        return SystemClock.uptimeMillis() - releasedAt < DASHBOARD_TOUCH_RENDER_GRACE_MS
+    }
+
     private fun scheduleDashboardRender(delayMs: Long = DASHBOARD_RENDER_MS) {
         if (!::dashboardRoot.isInitialized) return
         if (dashboardRenderPending) return
@@ -1642,6 +1961,7 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
     private fun renderDashboardNow() {
         dashboardRenderHandler.removeCallbacks(dashboardRenderRunnable)
         dashboardRenderPending = false
+        dashboardRenderDeferredByTouch = false
         renderDashboard()
     }
 
@@ -3769,14 +4089,15 @@ card
                 val unitGapPx = (4f * safeValueScale).toInt().coerceAtLeast(1)
                 val minMaxTextSize = 11.5f * safeValueScale
                 val minMaxPaddingY = (2f * safeValueScale).toInt().coerceAtLeast(2)
-                val minMaxWidthPx = (54f * safeValueScale).toInt().coerceAtLeast(46)
-                val minMaxGapPx = (10f * safeValueScale).coerceAtLeast(4f)
+                val minMaxWidthPx = (58f * safeValueScale).toInt().coerceAtLeast(50)
+                val minMaxCornerInsetPx = (5f * safeValueScale).coerceAtLeast(4f)
                 val valueOffsetX = 0f
                 val valueOffsetY = 0f
 
                 var iconView: View? = null
                 var unitTextView: TextView? = null
-                var statBoxView: View? = null
+                var maxStatView: TextView? = null
+                var minStatView: TextView? = null
 
                 val valueLine = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -3940,22 +4261,19 @@ card
                         it.y = targetBottom - it.height + iconBottomOffsetPx
                     }
 
-                    statBoxView?.let { statBox ->
-                        if (statBox.visibility == View.GONE || statBox.width <= 0 || statBox.height <= 0) return@let
+                    val statRight = width - minMaxCornerInsetPx
+                    val statLeft = (statRight - minMaxWidthPx).coerceAtLeast(minMaxCornerInsetPx)
 
-                        val rightEdge = width - 4f
-                        val leftEdge = 4f
-                        val rightCandidate = groupLeft + groupWidth + minMaxGapPx
-                        val leftCandidate = groupLeft - minMaxGapPx - statBox.width
-                        val statLeft = when {
-                            rightCandidate + statBox.width <= rightEdge -> rightCandidate
-                            leftCandidate >= leftEdge -> leftCandidate
-                            else -> (rightEdge - statBox.width).coerceAtLeast(leftEdge)
-                        }
+                    maxStatView?.let { maxView ->
+                        if (maxView.visibility == View.GONE || maxView.width <= 0 || maxView.height <= 0) return@let
+                        maxView.x = statLeft
+                        maxView.y = minMaxCornerInsetPx
+                    }
 
-                        // Keep min/max vertically tied to the same value-centered axis.
-                        statBox.x = statLeft
-                        statBox.y = (height / 2f) - (statBox.height / 2f)
+                    minStatView?.let { minView ->
+                        if (minView.visibility == View.GONE || minView.width <= 0 || minView.height <= 0) return@let
+                        minView.x = statLeft
+                        minView.y = (height - minMaxCornerInsetPx - minView.height).coerceAtLeast(minMaxCornerInsetPx)
                     }
                 }
 
@@ -3976,15 +4294,8 @@ card
                 }
 
                 val showStats = stats != null && minMaxKey != null && shouldShowMinMax(minMaxKey)
-                val statBox = LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    gravity = Gravity.CENTER
-                    visibility = if (showStats) View.VISIBLE else View.GONE
-                    setPadding(0, minMaxPaddingY, 0, minMaxPaddingY)
-                }
-                statBoxView = statBox
 
-                statBox.addView(TextView(this@MainActivity).apply {
+                val maxStat = TextView(this@MainActivity).apply {
                     text = if (showStats) fmt(stats!!.max, "") else ""
                     textSize = minMaxTextSize
                     setTextColor(maxColor)
@@ -3992,13 +4303,16 @@ card
                     textAlignment = View.TEXT_ALIGNMENT_CENTER
                     typeface = Typeface.DEFAULT_BOLD
                     includeFontPadding = false
+                    visibility = if (showStats) View.VISIBLE else View.GONE
                     setPadding(0, minMaxPaddingY, 0, minMaxPaddingY)
-                }, LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                }
+                maxStatView = maxStat
+                addView(maxStat, FrameLayout.LayoutParams(
+                    minMaxWidthPx,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
                 ))
 
-                statBox.addView(TextView(this@MainActivity).apply {
+                val minStat = TextView(this@MainActivity).apply {
                     text = if (showStats) fmt(stats!!.min, "") else ""
                     textSize = minMaxTextSize
                     setTextColor(minColor)
@@ -4006,17 +4320,19 @@ card
                     textAlignment = View.TEXT_ALIGNMENT_CENTER
                     typeface = Typeface.DEFAULT_BOLD
                     includeFontPadding = false
+                    visibility = if (showStats) View.VISIBLE else View.GONE
                     setPadding(0, minMaxPaddingY, 0, minMaxPaddingY)
-                }, LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ))
-
-                addView(statBox, FrameLayout.LayoutParams(
+                }
+                minStatView = minStat
+                addView(minStat, FrameLayout.LayoutParams(
                     minMaxWidthPx,
                     FrameLayout.LayoutParams.WRAP_CONTENT,
                 ))
-                statBox.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+
+                maxStat.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                    alignSimpleContent()
+                }
+                minStat.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
                     alignSimpleContent()
                 }
                 post {
