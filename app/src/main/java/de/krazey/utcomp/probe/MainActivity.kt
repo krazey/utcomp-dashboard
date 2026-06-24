@@ -196,7 +196,6 @@ class MainActivity : Activity() {
     private var showSourceLine = true
     private val minMaxBySensor = LinkedHashMap<String, MinMax>()
     private val smoothedValuesByBox = LinkedHashMap<String, Float>()
-    private val visualSmoothedValues = LinkedHashMap<String, VisualSmoothedValue>()
     private var minMaxDisplayMode = MinMaxMode.ON_TAP
     private var activeMinMaxCard: String? = null
     private var minMaxHideRunnable: Runnable? = null
@@ -204,10 +203,6 @@ class MainActivity : Activity() {
     private data class MinMax(
         var min: Float = Float.NaN,
         var max: Float = Float.NaN,
-    )
-
-    private data class VisualSmoothedValue(
-        var value: Float = Float.NaN,
     )
 
     private data class CsvViewerRow(
@@ -1831,30 +1826,6 @@ card
         return smoothed
     }
 
-    private fun visualSmoothedValue(key: String, target: Float, alpha: Float): Float {
-        if (target.isNaN() || target.isInfinite()) {
-            visualSmoothedValues.remove(key)
-            return target
-        }
-
-        val safeAlpha = alpha.coerceIn(0.01f, 1.0f)
-        if (safeAlpha >= 0.999f || simTestMode != SimTestMode.OFF) {
-            visualSmoothedValues[key] = VisualSmoothedValue(target)
-            return target
-        }
-
-        val state = visualSmoothedValues[key]
-        val previous = state?.value
-        val smoothed = if (previous == null || previous.isNaN() || previous.isInfinite()) {
-            target
-        } else {
-            previous + (target - previous) * safeAlpha
-        }
-
-        visualSmoothedValues[key] = VisualSmoothedValue(smoothed)
-        return smoothed
-    }
-
     private fun smoothedValueKey(boxIndex: Int, box: DashboardBoxConfig): String =
         "${page.ordinal}:$boxIndex:${box.sensor.name}"
 
@@ -2558,8 +2529,6 @@ card
         val afr = shownAfr ?: Float.NaN
         val oilPressure = shownOilPressure ?: Float.NaN
         val oilTemp = shownOilTemp ?: Float.NaN
-        val visualBoost = visualSmoothedValue("ralliart:boostNeedle", boost, 0.18f)
-        val visualAfr = visualSmoothedValue("ralliart:afrMarker", afr, 0.22f)
 
         val (targetMin, targetMax) = afrTargetRangeForBoost(boost)
         val afrColor = when {
@@ -2852,7 +2821,7 @@ card
         root.addView(RalliartBoostNeedleView(this).apply {
             minValue = -1.0f
             maxValue = 2.0f
-            currentValue = visualBoost.coerceIn(-1.0f, 2.0f)
+            currentValue = boost.coerceIn(-1.0f, 2.0f)
             warningValue = 2.0f
             showDebugGuides = false
         }, lp(boostNeedleBox))
@@ -2883,10 +2852,10 @@ card
             val barMax = 20.0f
             val startFrac = ((targetMin - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
             val endFrac = ((targetMax - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
-            val valueFrac = if (visualAfr.isNaN() || visualAfr.isInfinite()) {
+            val valueFrac = if (afr.isNaN() || afr.isInfinite()) {
                 0f
             } else {
-                ((visualAfr - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
+                ((afr - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
             }
 
             val bandStart = (total * startFrac).toInt()
