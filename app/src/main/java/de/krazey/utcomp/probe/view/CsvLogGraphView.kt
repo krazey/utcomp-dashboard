@@ -1,5 +1,6 @@
 package de.krazey.utcomp.probe.view
 
+import de.krazey.utcomp.probe.util.fixed
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
@@ -8,7 +9,6 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.view.MotionEvent
 import android.view.View
-import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -381,7 +381,7 @@ class CsvLogGraphView(context: Context) : View(context) {
         smallTextPaint.textAlign = Paint.Align.LEFT
         smallTextPaint.color = Color.rgb(176, 184, 198)
         canvas.drawText(
-            "scroll vertically · tap/drag cursor · 2-finger X zoom · double-tap reset · x${String.format(Locale.US, "%.1f", xZoom)}",
+            "scroll vertically · tap/drag cursor · 2-finger X zoom · double-tap reset · x${xZoom.fixed(1)}",
             plotLeft,
             24f,
             smallTextPaint,
@@ -629,7 +629,7 @@ class CsvLogGraphView(context: Context) : View(context) {
             "Oil T" -> 1
             else -> 2
         }
-        val number = String.format(Locale.US, "%.${decimals}f", value)
+        val number = value.fixed(decimals)
         return if (series.unit.isBlank()) number else "$number ${series.unit}"
     }
 }

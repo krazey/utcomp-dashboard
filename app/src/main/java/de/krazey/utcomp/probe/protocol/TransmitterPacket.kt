@@ -3,13 +3,13 @@ package de.krazey.utcomp.probe.protocol
 import de.krazey.utcomp.probe.util.hex
 
 /** Protocol-level packet, independent of USB/Bluetooth framing. */
-@Suppress("unused")
+@Suppress("ArrayInDataClass", "unused")
 data class TransmitterPacket(
     val cmd: TransmitterConstants.Command,
     val pid: Int,
     val source: TransmitterConstants.Source,
     val ack: TransmitterConstants.Ack,
-    val data: List<Byte> = emptyList(),
+    val data: ByteArray = ByteArray(0),
 ) {
     val dataLength: Int get() = data.size
     val pidMsb: Byte get() = ((pid ushr 8) and 0xff).toByte()
@@ -29,7 +29,7 @@ data class TransmitterPacket(
 
         fun transfer(
             pid: Int,
-            data: List<Byte>,
+            data: ByteArray,
             source: TransmitterConstants.Source = TransmitterConstants.Source.HOST,
             ack: TransmitterConstants.Ack = TransmitterConstants.Ack.NACK,
         ): TransmitterPacket = TransmitterPacket(
@@ -40,7 +40,10 @@ data class TransmitterPacket(
             data = data,
         )
 
-        fun command(cmd: TransmitterConstants.Command, data: List<Byte> = emptyList()): TransmitterPacket =
+        fun command(
+            cmd: TransmitterConstants.Command,
+            data: ByteArray = ByteArray(0),
+        ): TransmitterPacket =
             TransmitterPacket(cmd, 0, TransmitterConstants.Source.HOST, TransmitterConstants.Ack.NACK, data)
     }
 }

@@ -14,34 +14,45 @@ import android.os.Build
 import de.krazey.utcomp.probe.protocol.TransmitterPacket
 import de.krazey.utcomp.probe.protocol.TransmitterPacketParser
 import de.krazey.utcomp.probe.protocol.UsbPacket
-import de.krazey.utcomp.probe.utcomp.UtcompDecoder
 import de.krazey.utcomp.probe.utcomp.UtcompDataSnapshot
+import de.krazey.utcomp.probe.utcomp.UtcompDecoder
 import de.krazey.utcomp.probe.util.hex
 import java.io.Closeable
+import java.util.Arrays
 import java.util.concurrent.LinkedBlockingQueue
 import kotlin.concurrent.thread
 
 class UtcompUsbTransport(
     private val context: Context,
-    private val uiLog: (String) -> Unit,
+    private val log: (String) -> Unit,
+    private val onConnectionChanged: (Boolean) -> Unit = {},
     private val onDecodedSnapshot: (UtcompDataSnapshot) -> Unit = {},
 ) : Closeable {
     companion object {
-        const val TAG = "UTCOMPProbe"
+        const val TAG = "UTCOMPDashboard"
         const val VID = 1003
         const val PID = 52131
+
+        private const val TX_QUEUE_CAPACITY = 256
+        private const val USB_TRANSFER_TIMEOUT_MS = 100
     }
 
     private val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     private val permissionAction = "${context.packageName}.USB_PERMISSION"
-    private val txQueue = LinkedBlockingQueue<UsbPacket>()
+    private val txQueue = LinkedBlockingQueue<UsbPacket>(TX_QUEUE_CAPACITY)
+
+    @Volatile var verboseLogging = false
 
     @Volatile private var running = false
+    @Volatile private var sessionId = 0L
+    private var registered = false
     private var device: UsbDevice? = null
     private var usbInterface: UsbInterface? = null
     private var readEndpoint: UsbEndpoint? = null
     private var writeEndpoint: UsbEndpoint? = null
     private var connection: UsbDeviceConnection? = null
+    private var readThread: Thread? = null
+    private var writeThread: Thread? = null
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
@@ -57,10 +68,12 @@ class UtcompUsbTransport(
                     logLine("USB permission result: granted=$granted device=${dev?.deviceName}")
                     if (granted && dev != null) connect(dev)
                 }
+
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
                     logLine("USB attached")
                     requestPermissionAndConnect()
                 }
+
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     logLine("USB detached")
                     close()
@@ -69,7 +82,10 @@ class UtcompUsbTransport(
         }
     }
 
+    @Synchronized
     fun register() {
+        if (registered) return
+
         val filter = IntentFilter().apply {
             addAction(permissionAction)
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
@@ -81,38 +97,46 @@ class UtcompUsbTransport(
             @Suppress("DEPRECATION")
             context.registerReceiver(receiver, filter)
         }
+        registered = true
         logLine("USB receiver registered")
     }
 
+    @Synchronized
     fun unregister() {
+        if (!registered) return
         runCatching { context.unregisterReceiver(receiver) }
+        registered = false
         logLine("USB receiver unregistered")
     }
 
-    fun findDevice(): UsbDevice? {
-        val devices = manager.deviceList.values.toList()
-        if (devices.isEmpty()) {
-            logLine("No USB host devices visible to Android. Check OTG/host mode and cable.")
-        } else {
-            logLine("Visible USB devices:")
-            devices.forEach { logLine("  ${describeDevice(it)}") }
+    fun findDevice(logDiscovery: Boolean = true): UsbDevice? {
+        val devices = manager.deviceList.values
+        if (logDiscovery) {
+            if (devices.isEmpty()) {
+                logLine("No USB host devices visible to Android. Check OTG/host mode and cable.")
+            } else {
+                logLine("Visible USB devices:")
+                devices.forEach { logLine("  ${describeDevice(it)}") }
+            }
         }
 
         val dev = devices.firstOrNull { it.vendorId == VID && it.productId == PID }
-        if (dev == null) {
-            logLine("UTCOMP USB device not found. Looking for VID=$VID PID=$PID.")
-        } else {
-            logLine("UTCOMP USB device found: ${describeDevice(dev)}")
-            logInterfaces(dev)
+        if (logDiscovery) {
+            if (dev == null) {
+                logLine("UTCOMP USB device not found. Looking for VID=$VID PID=$PID.")
+            } else {
+                logLine("UTCOMP USB device found: ${describeDevice(dev)}")
+                logInterfaces(dev)
+            }
         }
         return dev
     }
 
-    fun requestPermissionAndConnect() {
-        val dev = findDevice() ?: return
+    fun requestPermissionAndConnect(logDiscovery: Boolean = true) {
+        val dev = findDevice(logDiscovery) ?: return
         device = dev
         if (manager.hasPermission(dev)) {
-            logLine("USB permission already granted")
+            if (logDiscovery) logLine("USB permission already granted")
             connect(dev)
             return
         }
@@ -122,33 +146,39 @@ class UtcompUsbTransport(
         manager.requestPermission(dev, intent)
     }
 
+    @Synchronized
     fun connect(dev: UsbDevice? = device ?: findDevice()) {
         if (dev == null) {
             logLine("USB connect requested but no matching device is available")
             return
         }
 
-        if (connection != null && device?.deviceName == dev.deviceName) {
-            logLine("USB already connected to ${dev.deviceName}, ignoring duplicate connect")
+        if (running && connection != null && device?.deviceName == dev.deviceName) {
+            verboseLog { "USB already connected to ${dev.deviceName}, ignoring duplicate connect" }
             return
         }
 
-        close()
+        closeLocked(notify = true)
 
         try {
             logLine("Opening USB device: ${describeDevice(dev)}")
             logInterfaces(dev)
 
             val intf = dev.getInterface(0)
-            val readEp = findEndpoint(intf, android.hardware.usb.UsbConstants.USB_DIR_IN) ?: intf.getEndpoint(0)
-            val writeEp = findEndpoint(intf, android.hardware.usb.UsbConstants.USB_DIR_OUT) ?: intf.getEndpoint(1)
+            val readEp = findEndpoint(intf, android.hardware.usb.UsbConstants.USB_DIR_IN)
+                ?: intf.getEndpoint(0)
+            val writeEp = findEndpoint(intf, android.hardware.usb.UsbConstants.USB_DIR_OUT)
+                ?: intf.getEndpoint(1)
 
-            logLine("Using interface 0, read=${describeEndpoint(readEp)}, write=${describeEndpoint(writeEp)}")
+            logLine(
+                "Using interface 0, read=${describeEndpoint(readEp)}, " +
+                    "write=${describeEndpoint(writeEp)}",
+            )
 
             val conn = openAndClaim(dev, intf)
             if (conn == null) {
                 logLine("USB claim failed. If kernel log shows CLAIMINTERFACE ret=-16, the interface is busy.")
-                logLine("Try: force-stop/uninstall original UTCOMP app, reconnect the USB device, then press USB connect again.")
+                logLine("Try: force-stop/uninstall the original UTCOMP app, reconnect USB, then connect again.")
                 return
             }
 
@@ -157,12 +187,16 @@ class UtcompUsbTransport(
             readEndpoint = readEp
             writeEndpoint = writeEp
             connection = conn
+            txQueue.clear()
             running = true
+            val activeSession = ++sessionId
             logLine("USB connected")
-            startReadLoop()
-            startWriteLoop()
+            onConnectionChanged(true)
+            startReadLoop(conn, readEp, activeSession)
+            startWriteLoop(conn, writeEp, activeSession)
         } catch (t: Throwable) {
             logLine("USB connect failed: ${t.stackTraceToString()}")
+            closeLocked(notify = true)
         }
     }
 
@@ -198,102 +232,172 @@ class UtcompUsbTransport(
     }
 
     fun write(packet: UsbPacket) {
-        txQueue.offer(packet)
-        logLine("queued ${packet}")
+        if (!running) {
+            verboseLog { "Ignoring USB write while disconnected: $packet" }
+            return
+        }
+
+        if (!txQueue.offer(packet)) {
+            logLine("USB write queue full; dropping pid=0x%04X".format(packet.pid))
+            return
+        }
+        verboseLog { "queued $packet" }
     }
 
     fun write(packet: TransmitterPacket) {
-        TransmitterPacketParser.toUsbPackets(packet).forEach { write(it) }
+        TransmitterPacketParser.toUsbPackets(packet).forEach(::write)
     }
 
-    private fun startReadLoop() {
-        val conn = connection ?: return
-        val ep = readEndpoint ?: return
-        thread(name = "utcomp-usb-read", isDaemon = true) {
-            val buf = ByteArray(UsbPacket.REPORT_SIZE)
-            while (running) {
+    private fun startReadLoop(
+        conn: UsbDeviceConnection,
+        ep: UsbEndpoint,
+        activeSession: Long,
+    ) {
+        readThread = thread(name = "utcomp-usb-read", isDaemon = true) {
+            val buffer = ByteArray(UsbPacket.REPORT_SIZE)
+            val transferLength = ep.maxPacketSize.coerceIn(1, UsbPacket.REPORT_SIZE)
+
+            while (isSessionActive(activeSession)) {
                 try {
-                    buf.fill(0)
-                    val read = conn.bulkTransfer(ep, buf, ep.maxPacketSize.coerceAtMost(UsbPacket.REPORT_SIZE), 100)
-                    if (read > 0) {
-                        val report = buf.copyOf(UsbPacket.REPORT_SIZE)
-                        logLine("USB raw[$read]: ${report.hex(64)}")
-                        val usb = UsbPacket.parse(report)
-                        logLine(usb.toString())
-                        val txp = TransmitterPacketParser.fromUsb(usb)
-                        if (txp != null) {
-                            logLine(txp.toString())
-                            val decodedLines = UtcompDecoder.apply(txp)
-                            decodedLines.forEach { decoded -> logLine(decoded) }
-                            if (decodedLines.isNotEmpty()) {
-                                onDecodedSnapshot(UtcompDecoder.snapshot.copy())
-                            }
-                        }
+                    val read = conn.bulkTransfer(
+                        ep,
+                        buffer,
+                        transferLength,
+                        USB_TRANSFER_TIMEOUT_MS,
+                    )
+                    if (read <= 0) continue
+
+                    if (read < buffer.size) {
+                        Arrays.fill(buffer, read, buffer.size, 0.toByte())
+                    }
+                    verboseLog { "USB raw[$read]: ${buffer.hex(read)}" }
+
+                    val usb = UsbPacket.parse(buffer)
+                    verboseLog { usb.toString() }
+                    val txp = TransmitterPacketParser.fromUsb(usb) ?: continue
+                    verboseLog { txp.toString() }
+
+                    val debugLog = if (verboseLogging) {
+                        { line: String -> logLine("DECODE $line") }
+                    } else {
+                        null
+                    }
+                    if (UtcompDecoder.apply(txp, debugLog)) {
+                        onDecodedSnapshot(UtcompDecoder.snapshot)
                     }
                 } catch (t: Throwable) {
-                    if (running) logLine("USB read failed: ${t.stackTraceToString()}")
+                    if (isSessionActive(activeSession)) {
+                        logLine("USB read failed: ${t.stackTraceToString()}")
+                    }
                     break
                 }
             }
-            logLine("USB read loop stopped")
+            if (isSessionActive(activeSession)) closeSession(activeSession)
+            verboseLog { "USB read loop stopped" }
         }
     }
 
-    private fun startWriteLoop() {
-        val conn = connection ?: return
-        val ep = writeEndpoint ?: return
-        thread(name = "utcomp-usb-write", isDaemon = true) {
-            while (running) {
+    private fun startWriteLoop(
+        conn: UsbDeviceConnection,
+        ep: UsbEndpoint,
+        activeSession: Long,
+    ) {
+        writeThread = thread(name = "utcomp-usb-write", isDaemon = true) {
+            while (isSessionActive(activeSession)) {
                 try {
                     val packet = txQueue.take()
+                    if (!isSessionActive(activeSession)) break
+
                     val bytes = packet.toReport()
-                    val written = conn.bulkTransfer(ep, bytes, bytes.size, 100)
-                    logLine("USB write[$written]: ${bytes.hex(64)}")
-                    if (written < 0) close()
-                } catch (t: InterruptedException) {
+                    val written = conn.bulkTransfer(
+                        ep,
+                        bytes,
+                        bytes.size,
+                        USB_TRANSFER_TIMEOUT_MS,
+                    )
+                    verboseLog { "USB write[$written]: ${bytes.hex(64)}" }
+                    if (written < 0) {
+                        closeSession(activeSession)
+                        break
+                    }
+                } catch (_: InterruptedException) {
                     break
                 } catch (t: Throwable) {
-                    if (running) logLine("USB write failed: ${t.stackTraceToString()}")
+                    if (isSessionActive(activeSession)) {
+                        logLine("USB write failed: ${t.stackTraceToString()}")
+                    }
                     break
                 }
             }
-            logLine("USB write loop stopped")
+            if (isSessionActive(activeSession)) closeSession(activeSession)
+            verboseLog { "USB write loop stopped" }
         }
     }
 
+    private fun isSessionActive(activeSession: Long): Boolean =
+        running && sessionId == activeSession
+
+    @Synchronized
+    private fun closeSession(activeSession: Long) {
+        if (sessionId != activeSession) return
+        closeLocked(notify = true)
+    }
+
+    @Synchronized
     override fun close() {
-        val hadConnection = connection != null
+        closeLocked(notify = true)
+    }
+
+    private fun closeLocked(notify: Boolean) {
+        val hadConnection = connection != null || running
         running = false
+        sessionId++
         txQueue.clear()
+
+        val currentThread = Thread.currentThread()
+        if (writeThread !== currentThread) writeThread?.interrupt()
+        writeThread = null
+        readThread = null
+
         runCatching { connection?.releaseInterface(usbInterface) }
         runCatching { connection?.close() }
         connection = null
         usbInterface = null
         readEndpoint = null
         writeEndpoint = null
-        if (hadConnection) logLine("USB closed")
+
+        if (hadConnection) {
+            logLine("USB closed")
+            if (notify) onConnectionChanged(false)
+        }
     }
 
     private fun findEndpoint(intf: UsbInterface, direction: Int): UsbEndpoint? {
-        for (i in 0 until intf.endpointCount) {
-            val ep = intf.getEndpoint(i)
-            if (ep.direction == direction) return ep
+        for (index in 0 until intf.endpointCount) {
+            val endpoint = intf.getEndpoint(index)
+            if (endpoint.direction == direction) return endpoint
         }
         return null
     }
 
     private fun logInterfaces(dev: UsbDevice) {
-        for (i in 0 until dev.interfaceCount) {
-            val intf = dev.getInterface(i)
-            logLine("  interface[$i]: class=${intf.interfaceClass} subclass=${intf.interfaceSubclass} protocol=${intf.interfaceProtocol} endpoints=${intf.endpointCount}")
-            for (e in 0 until intf.endpointCount) {
-                logLine("    endpoint[$e]: ${describeEndpoint(intf.getEndpoint(e))}")
+        for (index in 0 until dev.interfaceCount) {
+            val intf = dev.getInterface(index)
+            logLine(
+                "  interface[$index]: class=${intf.interfaceClass} " +
+                    "subclass=${intf.interfaceSubclass} protocol=${intf.interfaceProtocol} " +
+                    "endpoints=${intf.endpointCount}",
+            )
+            for (endpointIndex in 0 until intf.endpointCount) {
+                logLine("    endpoint[$endpointIndex]: ${describeEndpoint(intf.getEndpoint(endpointIndex))}")
             }
         }
     }
 
     private fun describeDevice(dev: UsbDevice): String =
-        "name=${dev.deviceName} vid=${dev.vendorId} pid=${dev.productId} product=${dev.productName} manufacturer=${dev.manufacturerName} interfaces=${dev.interfaceCount}"
+        "name=${dev.deviceName} vid=${dev.vendorId} pid=${dev.productId} " +
+            "product=${dev.productName} manufacturer=${dev.manufacturerName} " +
+            "interfaces=${dev.interfaceCount}"
 
     private fun describeEndpoint(ep: UsbEndpoint): String =
         "addr=${ep.address} dir=${directionName(ep.direction)} type=${ep.type} max=${ep.maxPacketSize}"
@@ -305,7 +409,11 @@ class UtcompUsbTransport(
             else -> direction.toString()
         }
 
+    private inline fun verboseLog(message: () -> String) {
+        if (verboseLogging) logLine(message())
+    }
+
     private fun logLine(line: String) {
-        uiLog(line)
+        log(line)
     }
 }

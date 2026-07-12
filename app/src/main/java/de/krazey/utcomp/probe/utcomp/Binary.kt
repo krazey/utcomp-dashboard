@@ -1,8 +1,6 @@
 package de.krazey.utcomp.probe.utcomp
 
 import kotlin.math.pow
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import kotlin.math.roundToInt
 
 internal fun ByteArray.u8(offset: Int): Int =
@@ -12,14 +10,18 @@ internal fun ByteArray.u16le(offset: Int): Int =
     u8(offset) or (u8(offset + 1) shl 8)
 
 internal fun ByteArray.u32le(offset: Int): Long =
-    (u8(offset).toLong()) or
+    u8(offset).toLong() or
         (u8(offset + 1).toLong() shl 8) or
         (u8(offset + 2).toLong() shl 16) or
         (u8(offset + 3).toLong() shl 24)
 
 internal fun ByteArray.f32le(offset: Int): Float {
-    if (offset + 4 > size) return Float.NaN
-    return ByteBuffer.wrap(this, offset, 4).order(ByteOrder.LITTLE_ENDIAN).float
+    if (offset < 0 || offset + Float.SIZE_BYTES > size) return Float.NaN
+    val bits = u8(offset) or
+        (u8(offset + 1) shl 8) or
+        (u8(offset + 2) shl 16) or
+        (u8(offset + 3) shl 24)
+    return Float.fromBits(bits)
 }
 
 internal fun Float.pretty(digits: Int = 2): String {

@@ -48,19 +48,19 @@ import de.krazey.utcomp.probe.utcomp.UtcompDataSnapshot
 import de.krazey.utcomp.probe.utcomp.UtcompDecoder
 import de.krazey.utcomp.probe.utcomp.UtcompDeviceConfig
 import de.krazey.utcomp.probe.utcomp.pretty
-import de.krazey.utcomp.probe.view.PerformanceGaugeView
-import de.krazey.utcomp.probe.view.RalliartBoostGaugeView
 import de.krazey.utcomp.probe.view.RalliartBoostNeedleView
 import de.krazey.utcomp.probe.view.RalliartAfrDebugBarView
 import de.krazey.utcomp.probe.view.CsvLogGraphMarker
 import de.krazey.utcomp.probe.view.CsvLogGraphPoint
 import de.krazey.utcomp.probe.view.CsvLogGraphView
+import de.krazey.utcomp.probe.util.fixed
 import java.io.BufferedReader
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.LinkedHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : Activity() {
     private class ClickableLinearLayout(context: Context) : LinearLayout(context) {
@@ -82,7 +82,26 @@ class MainActivity : Activity() {
         private const val CSV_VIEW_GRAPH_MAX_POINTS = 1600
         private const val DASHBOARD_DOUBLE_TAP_MS = 320L
         private const val DASHBOARD_SWIPE_CLICK_SUPPRESS_MS = 280L
-        const val TAG = "UTCOMPProbe"
+
+        private const val RALLIART_CANVAS_WIDTH = 1024
+        private const val RALLIART_CANVAS_HEIGHT = 600
+        private val RALLIART_HEADER_STATUS_BOX = intArrayOf(670, 18, 332, 24)
+        private val RALLIART_BOOST_HIT_BOX = intArrayOf(32, 70, 472, 472)
+        private val RALLIART_BOOST_VALUE_BOX = intArrayOf(120, 266, 310, 92)
+        private val RALLIART_BOOST_NEEDLE_BOX = intArrayOf(49, 87, 452, 452)
+        private val RALLIART_BOOST_MIN_MAX_BOX = intArrayOf(334, 392, 68, 58)
+        private val RALLIART_AFR_HIT_BOX = intArrayOf(538, 76, 494, 250)
+        private val RALLIART_AFR_VALUE_BOX = intArrayOf(652, 138, 236, 82)
+        private val RALLIART_AFR_DEBUG_GUIDE_BOX = intArrayOf(571, 240, 395, 52)
+        private val RALLIART_AFR_LIVE_BAR_BOX = intArrayOf(571, 254, 395, 18)
+        private val RALLIART_OIL_PRESSURE_HIT_BOX = intArrayOf(548, 325, 214, 197)
+        private val RALLIART_OIL_PRESSURE_VALUE_BOX = intArrayOf(580, 392, 148, 74)
+        private val RALLIART_OIL_PRESSURE_MIN_MAX_BOX = intArrayOf(700, 468, 56, 46)
+        private val RALLIART_OIL_TEMP_HIT_BOX = intArrayOf(774, 325, 214, 197)
+        private val RALLIART_OIL_TEMP_VALUE_BOX = intArrayOf(800, 392, 162, 76)
+        private val RALLIART_OIL_TEMP_MIN_MAX_BOX = intArrayOf(926, 468, 56, 46)
+
+        const val TAG = "UTCOMPDashboard"
     }
 
     private enum class DataMode { USB, SIM }
@@ -117,12 +136,18 @@ class MainActivity : Activity() {
     private var dataLogTreeUri: Uri? = null
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    private val clockFmt = SimpleDateFormat("HH:mm", Locale.US)
     private val handler = Handler(Looper.getMainLooper())
     private var dataMode = DataMode.USB
     private var simTestMode = SimTestMode.OFF
     private val simTickerHandler = Handler(Looper.getMainLooper())
     private val autoUsbHandler = Handler(Looper.getMainLooper())
     private val dashboardRenderHandler = Handler(Looper.getMainLooper())
+    private val decodedRenderPosted = AtomicBoolean(false)
+    private val decodedRenderRunnable = Runnable {
+        decodedRenderPosted.set(false)
+        scheduleDashboardRender()
+    }
     private var dashboardRenderPending = false
     private var dashboardRenderDeferredByTouch = false
     private var dashboardTouchActive = false
@@ -148,7 +173,7 @@ class MainActivity : Activity() {
             }
 
             if (!connected) {
-                runCatching { usb.requestPermissionAndConnect() }
+                runCatching { usb.requestPermissionAndConnect(logDiscovery = false) }
                 autoUsbHandler.postDelayed(this, USB_RECONNECT_MS)
                 return
             }
@@ -218,6 +243,100 @@ class MainActivity : Activity() {
         var min: Float = Float.NaN,
         var max: Float = Float.NaN,
     )
+
+    private data class RalliartLayoutKey(
+        val page: Page,
+        val config: DashboardPageConfig,
+    )
+
+    private data class RalliartMinMaxViews(
+        val container: LinearLayout,
+        val maxText: TextView,
+        val minText: TextView,
+    )
+
+    private class RalliartDashboardBinding(
+        val key: RalliartLayoutKey,
+        val root: FrameLayout,
+        val headerText: TextView,
+        val boostValueText: TextView,
+        val boostNeedle: RalliartBoostNeedleView,
+        val boostMinMax: RalliartMinMaxViews?,
+        val afrValueText: TextView,
+        val afrOverlay: FrameLayout,
+        val afrTargetBand: View,
+        val afrMarker: View,
+        val oilPressureAlarmFill: View,
+        val oilPressureValueText: TextView,
+        val oilPressureMinMax: RalliartMinMaxViews?,
+        val oilTempAlarmFill: View,
+        val oilTempValueText: TextView,
+        val oilTempMinMax: RalliartMinMaxViews?,
+    ) {
+        var afr = Float.NaN
+        var afrTargetMin = 12.8f
+        var afrTargetMax = 14.2f
+
+        fun updateAfrOverlay() {
+            val total = afrOverlay.width
+            if (total <= 0) return
+
+            val barMin = 10.0f
+            val barMax = 20.0f
+            val startFraction = ((afrTargetMin - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
+            val endFraction = ((afrTargetMax - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
+            val valueFraction = if (afr.isFinite()) {
+                ((afr - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
+            } else {
+                0f
+            }
+
+            val bandStart = (total * startFraction).toInt()
+            val bandEnd = (total * endFraction).toInt()
+            afrTargetBand.layoutParams = FrameLayout.LayoutParams(
+                (bandEnd - bandStart).coerceAtLeast(6),
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ).apply {
+                leftMargin = bandStart
+            }
+
+            val markerLeft = ((total * valueFraction).toInt() - 4)
+                .coerceIn(0, (total - 8).coerceAtLeast(0))
+            afrMarker.layoutParams = FrameLayout.LayoutParams(
+                8,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ).apply {
+                leftMargin = markerLeft
+            }
+        }
+    }
+
+    private var ralliartBinding: RalliartDashboardBinding? = null
+
+    private data class SimpleLayoutKey(
+        val page: Page,
+        val config: DashboardPageConfig,
+    )
+
+    private data class SimpleCardBinding(
+        val boxIndex: Int,
+        val box: DashboardBoxConfig,
+        val card: LinearLayout,
+        val background: GradientDrawable,
+        val valueText: TextView,
+        val unitText: TextView?,
+        val maxText: TextView?,
+        val minText: TextView?,
+        val minMaxKey: String?,
+    )
+
+    private data class SimpleDashboardBinding(
+        val key: SimpleLayoutKey,
+        val root: LinearLayout,
+        val cards: List<SimpleCardBinding>,
+    )
+
+    private var simpleBinding: SimpleDashboardBinding? = null
 
     private data class CsvViewerRow(
         val time: String,
@@ -291,7 +410,12 @@ class MainActivity : Activity() {
         dataMode = DataMode.USB
         simTestMode = SimTestMode.OFF
         csvLogger = UtcompCsvLogger(this, ::appendLog)
-        usb = UtcompUsbTransport(this, ::appendLog, ::onDecodedSnapshot)
+        usb = UtcompUsbTransport(
+            context = this,
+            log = ::appendLog,
+            onConnectionChanged = ::onUsbConnectionChanged,
+            onDecodedSnapshot = ::onDecodedSnapshot,
+        )
         buildUi()
         usb.register()
         startUsbAutoConnect()
@@ -349,6 +473,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         dashboardRenderHandler.removeCallbacks(dashboardRenderRunnable)
+        dashboardRenderHandler.removeCallbacks(decodedRenderRunnable)
+        decodedRenderPosted.set(false)
         dashboardRenderPending = false
         saveDashboardPrefs()
         stopUsbAutoConnect()
@@ -1154,9 +1280,20 @@ class MainActivity : Activity() {
     }
 
 
+    private fun onUsbConnectionChanged(isConnected: Boolean) {
+        runOnUiThread {
+            if (connected == isConnected) return@runOnUiThread
+            connected = isConnected
+            renderDashboardNow()
+        }
+    }
+
     private fun onDecodedSnapshot(snapshot: UtcompDataSnapshot) {
         if (::csvLogger.isInitialized) {
             csvLogger.offer(snapshot, source = "usb")
+        }
+        if (decodedRenderPosted.compareAndSet(false, true)) {
+            dashboardRenderHandler.post(decodedRenderRunnable)
         }
     }
 
@@ -1516,7 +1653,7 @@ class MainActivity : Activity() {
                 ?: allBoxes.firstOrNull { it.sensor == sensor }
 
         fun Float.markerText(decimals: Int): String =
-            if (isFinite()) String.format(Locale.US, "%.${decimals}f", this) else "--"
+            fixed(decimals)
 
         fun addMarkers(
             target: MutableList<CsvLogGraphMarker>,
@@ -1670,7 +1807,7 @@ class MainActivity : Activity() {
         this?.trim()?.trim('"')?.toLongOrNull()
 
     private fun Float.formatOrDash(decimals: Int): String =
-        if (isFinite()) String.format(Locale.US, "%.${decimals}f", this) else "--"
+        fixed(decimals)
 
     private fun startCsvLoggingInternal() {
         runCatching {
@@ -1794,7 +1931,8 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
                 line.startsWith("USB TX DATA") ||
                 line.startsWith("USB STATUS") ||
                 line.startsWith("USB write[") ||
-                line.startsWith("queued UsbPacket") ||
+                line.startsWith("queued ") ||
+                line.startsWith("TXP ") ||
                 line.startsWith("DECODE ")
 
         if (highFrequencyLine) {
@@ -1803,33 +1941,10 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             Log.i(TAG, line)
         }
 
-        val updatesConnectionState =
-            line.contains("USB connected") ||
-                line.contains("USB closed") ||
-                line.contains("USB detached")
-
-        val updatesDashboard = line.startsWith("DECODE ")
-
-        if (!updatesConnectionState && !updatesDashboard && highFrequencyLine) {
-            return
-        }
+        if (highFrequencyLine) return
 
         runOnUiThread {
             if (!::logText.isInitialized || !::logScroll.isInitialized) return@runOnUiThread
-
-            when {
-                line.contains("USB connected") -> {
-                    connected = true
-                    renderDashboardNow()
-                }
-                line.contains("USB closed") || line.contains("USB detached") -> {
-                    connected = false
-                    renderDashboardNow()
-                }
-                line.startsWith("DECODE ") -> scheduleDashboardRender()
-            }
-
-            if (highFrequencyLine) return@runOnUiThread
 
             val stamp = timeFmt.format(Date())
             val newEntry = "$stamp  $line\n"
@@ -1978,6 +2093,7 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         updateSimModeButton()
 
         val showDebugLog = controlsVisible || uiMode == UiMode.DEBUG
+        if (::usb.isInitialized) usb.verboseLogging = showDebugLog
         if (::logTitleText.isInitialized) logTitleText.visibility = if (showDebugLog) View.VISIBLE else View.GONE
         if (::logScroll.isInitialized) logScroll.visibility = if (showDebugLog) View.VISIBLE else View.GONE
         if (::statusText.isInitialized) statusText.visibility = if (showDebugLog) View.VISIBLE else View.GONE
@@ -2001,102 +2117,19 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             if (s.firmware != "?") append("  •  fw ${s.firmware}")
         }
 
-        dashboardRoot.removeAllViews()
-
         when (uiMode) {
-            UiMode.FANCY -> renderFancy(renderSnapshot)
-            UiMode.SIMPLE -> renderSimple(renderSnapshot)
-            UiMode.DEBUG -> renderDebug(renderSnapshot)
-        }
-    }
-
-    private fun renderConfiguredPage(
-        pageConfig: DashboardPageConfig,
-        snapshot: UtcompDataSnapshot,
-        simple: Boolean,
-    ) {
-        val cards = pageConfig.boxes
-            .mapIndexed { index, box -> index to box }
-            .sortedWith(compareBy<Pair<Int, DashboardBoxConfig>> { it.second.row }.thenBy { it.second.column })
-            .map { (boxIndex, box) ->
-                val card = if (simple) {
-                    simpleConfigCard(boxIndex, box, snapshot)
-                } else {
-                    fancyConfigCard(boxIndex, box, snapshot)
-                }
-
-                if (editMode) {
-                    card.alpha = 0.92f
-                }
-                attachDashboardBoxActions(card, boxIndex, minMaxKeyForBox(box, snapshot))
-card
+            UiMode.FANCY -> {
+                simpleBinding = null
+                renderFancy(renderSnapshot)
             }
-
-        addPresetGrid(pageConfig.rows, pageConfig.columns, cards)
-    }
-
-    private fun fancyConfigCard(boxIndex: Int, box: DashboardBoxConfig, snapshot: UtcompDataSnapshot): LinearLayout {
-        val sensor = box.sensor
-        val rawValue = sensor.readValue(snapshot)
-        val displayValue = displayValueForBox(box, boxIndex, rawValue)
-        val valueForGauge = displayValue ?: rawValue ?: 0f
-        val suffix = if (sensor.unit.isBlank()) "" else sensor.unit.lowercase(Locale.US)
-        val alarmLevel = alarmLevelFor(box, rawValue, snapshot)
-        val card = when (sensor) {
-            DashboardSensor.TIME -> compactCard(sensor.label, SimpleDateFormat("HH:mm", Locale.US).format(Date()), sourceSubtitleFor(sensor))
-            DashboardSensor.BATTERY,
-            DashboardSensor.OUTSIDE_TEMP,
-            DashboardSensor.INSIDE_TEMP -> compactCard(
-                sensor.label,
-                formatBoxValue(valueForGauge, box.decimalPlaces) + if (sensor.unit.isBlank()) "" else " ${sensor.unit}",
-                sourceSubtitleFor(sensor),
-            )
-            else -> fancyCard(
-                sensor.label,
-                valueForGauge,
-                suffix,
-                box.scaleMin,
-                box.scaleMax,
-                sourceSubtitleFor(sensor),
-            )
+            UiMode.SIMPLE -> renderSimple(renderSnapshot)
+            UiMode.DEBUG -> {
+                ralliartBinding = null
+                simpleBinding = null
+                dashboardRoot.removeAllViews()
+                renderDebug(renderSnapshot)
+            }
         }
-
-        card.background = roundedBg(boxBackgroundColor(box, alarmLevel), 18f)
-        return card
-    }
-
-    private fun simpleConfigCard(boxIndex: Int, box: DashboardBoxConfig, snapshot: UtcompDataSnapshot): LinearLayout {
-        val sensor = box.sensor
-        val rawValue = sensor.readValue(snapshot)
-        val displayValue = displayValueForBox(box, boxIndex, rawValue)
-        val valueText = if (sensor == DashboardSensor.TIME) {
-            SimpleDateFormat("HH:mm", Locale.US).format(Date())
-        } else {
-            formatBoxValue(displayValue ?: rawValue, box.decimalPlaces)
-        }
-
-        val minMaxKey = if (sensor == DashboardSensor.TIME || rawValue == null || !box.showMinMax) null else sensor.label
-        val alarmLevel = alarmLevelFor(box, rawValue, snapshot)
-        val effectiveValueColor = boxValueColor(box, alarmLevel)
-        return simpleGridCard(
-            fallbackIcon = fallbackIconFor(sensor),
-            iconResourceName = sensor.iconResourceName,
-            label = sensor.label,
-            value = valueText,
-            unit = if (box.showUnit) sensor.unit else "",
-            minMaxKey = minMaxKey,
-            rawValue = rawValue,
-            valueScale = box.valueScale,
-            iconScale = box.iconScale,
-            iconValueGapScale = box.iconValueGapScale,
-            backgroundColor = boxBackgroundColor(box, alarmLevel),
-            foregroundColor = effectiveValueColor,
-            unitColor = if (alarmLevel == BoxAlarmLevel.NORMAL) box.unitColor else effectiveValueColor,
-            minColor = box.minColor,
-            maxColor = box.maxColor,
-            showIcon = box.showIcon && sensor != DashboardSensor.TIME,
-            splitValueDigits = box.splitValueDigits,
-        )
     }
 
     private data class NamedColor(
@@ -2149,12 +2182,8 @@ card
     private fun smoothedValueKey(boxIndex: Int, box: DashboardBoxConfig): String =
         "${page.ordinal}:$boxIndex:${box.sensor.name}"
 
-    private fun formatBoxValue(value: Float?, decimals: Int): String {
-        val safeValue = value ?: return "--"
-        if (safeValue.isNaN() || safeValue.isInfinite()) return "--"
-        val places = decimals.coerceIn(0, 2)
-        return "%.${places}f".format(Locale.US, safeValue)
-    }
+    private fun formatBoxValue(value: Float?, decimals: Int): String =
+        value?.fixed(decimals.coerceIn(0, 2)) ?: "--"
 
     private fun styledValueText(valueText: String, split: Boolean): CharSequence {
         if (!split) return valueText
@@ -2420,7 +2449,7 @@ card
     }
 
     private fun trimFloat(value: Float): String =
-        if (value % 1.0f == 0.0f) value.toInt().toString() else "%.1f".format(Locale.US, value)
+        if (value % 1.0f == 0.0f) value.toInt().toString() else value.fixed(1)
 
     private fun colorName(color: Int): String =
         allNamedColors().firstOrNull { namedColor -> namedColor.color == color }?.name
@@ -2840,10 +2869,17 @@ card
         val oilPressureSlot = fancySensorSlot(DashboardSensor.OIL_PRESSURE)
         val oilTempSlot = fancySensorSlot(DashboardSensor.OIL_TEMP)
 
+        val binding = ensureRalliartBinding(
+            boostSlot = boostSlot,
+            afrSlot = afrSlot,
+            oilPressureSlot = oilPressureSlot,
+            oilTempSlot = oilTempSlot,
+        )
+
         val (_, shownBoost) = fancyDisplayValue(boostSlot, snapshot)
         val (_, shownAfr) = fancyDisplayValue(afrSlot, snapshot)
-        val (_, shownOilPressure) = fancyDisplayValue(oilPressureSlot, snapshot)
-        val (_, shownOilTemp) = fancyDisplayValue(oilTempSlot, snapshot)
+        val (rawOilPressure, shownOilPressure) = fancyDisplayValue(oilPressureSlot, snapshot)
+        val (rawOilTemp, shownOilTemp) = fancyDisplayValue(oilTempSlot, snapshot)
 
         val boost = shownBoost ?: Float.NaN
         val afr = shownAfr ?: Float.NaN
@@ -2852,157 +2888,112 @@ card
 
         val (targetMin, targetMax) = afrTargetRangeForBoost(boost)
         val afrColor = when {
-            afr.isNaN() -> Color.rgb(218, 222, 228)
+            !afr.isFinite() -> Color.rgb(218, 222, 228)
             afr in targetMin..targetMax -> Color.rgb(102, 214, 132)
             afr >= targetMin - 0.45f && afr <= targetMax + 0.45f -> Color.rgb(255, 188, 72)
             else -> Color.rgb(255, 98, 98)
         }
 
-        val overBoost = !boost.isNaN() && boost > 2.0f
-        val boostColor = if (overBoost) Color.rgb(255, 196, 72) else boostSlot.box.valueColor
+        val boostColor = if (boost.isFinite() && boost > 2.0f) {
+            Color.rgb(255, 196, 72)
+        } else {
+            boostSlot.box.valueColor
+        }
 
-        val oilPressureAlarm = alarmLevelFor(oilPressureSlot.box, oilPressure, snapshot)
+        val oilPressureAlarm = alarmLevelFor(oilPressureSlot.box, rawOilPressure, snapshot)
         val oilPressureColor = boxValueColor(oilPressureSlot.box, oilPressureAlarm)
-
-        val oilTempAlarm = alarmLevelFor(oilTempSlot.box, oilTemp, snapshot)
+        val oilTempAlarm = alarmLevelFor(oilTempSlot.box, rawOilTemp, snapshot)
         val oilTempColor = if (oilTempAlarm == BoxAlarmLevel.NORMAL) {
             Color.rgb(255, 226, 226)
         } else {
             boxValueColor(oilTempSlot.box, oilTempAlarm)
         }
 
-        fun lp(left: Int, top: Int, width: Int, height: Int): FrameLayout.LayoutParams =
-            FrameLayout.LayoutParams(width, height).apply {
-                leftMargin = left
-                topMargin = top
-            }
+        val outside = formatTopValue(snapshot.temperatureDsA, "°C")
+        val inside = formatTopValue(snapshot.temperatureDsB, "°C")
+        val battery = formatTopValue(snapshot.adcInValCh0, " V")
+        binding.headerText.text = "OUT $outside   |   IN $inside   |   $battery   |   ${clockFmt.format(Date())}"
 
-        fun lp(box: IntArray): FrameLayout.LayoutParams =
-            lp(box[0], box[1], box[2], box[3])
-
-        fun clearRalliartViewportPadding() {
-            dashboardRoot.apply {
-                setPadding(0, 0, 0, 0)
-                clipToPadding = false
-                clipChildren = false
-                gravity = Gravity.NO_GRAVITY
-                minimumWidth = 1024
-                minimumHeight = 600
-            }
-
-            var parentView: android.view.ViewParent? = dashboardRoot.parent
-            repeat(6) {
-                val group = parentView as? ViewGroup ?: return@repeat
-                group.setPadding(0, 0, 0, 0)
-                group.clipToPadding = false
-                group.clipChildren = false
-                parentView = group.parent
-            }
-        }
-
-        fun addHitZone(root: FrameLayout, left: Int, top: Int, width: Int, height: Int, slot: FancySensorSlot, minMaxKey: String?) {
-            val hit = ClickableLinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(0, 0, 0, 0)
-                installDashboardSwipeHandler()
-            }
-            attachFancyCardActions(hit, slot, minMaxKey)
-            root.addView(hit, lp(left, top, width, height))
-        }
-
-        fun addValue(
-            root: FrameLayout,
-            left: Int,
-            top: Int,
-            width: Int,
-            height: Int,
-            value: Float,
-            slot: FancySensorSlot,
-            color: Int,
-            size: Float,
-            gravity: Int = Gravity.CENTER,
-        ) {
-            root.addView(TextView(this).apply {
-                text = styledValueText(formatBoxValue(value, slot.box.decimalPlaces), slot.box.splitValueDigits)
-                textSize = size
-                includeFontPadding = false
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(color)
-                this.gravity = gravity
-            }, lp(left, top, width, height))
-        }
-
-        fun addValue(
-            root: FrameLayout,
-            box: IntArray,
-            value: Float,
-            slot: FancySensorSlot,
-            color: Int,
-            size: Float,
-            gravity: Int = Gravity.CENTER,
-        ) {
-            addValue(root, box[0], box[1], box[2], box[3], value, slot, color, size, gravity)
-        }
-
-        fun formatTopValue(value: Float, suffix: String): String =
-            if (value.isNaN() || value.isInfinite()) {
-                "--$suffix"
-            } else {
-                String.format(Locale.US, "%.1f%s", value, suffix)
-            }
-
-        val outside = formatTopValue(snapshot.temperatureDsA ?: Float.NaN, "°C")
-        val inside = formatTopValue(snapshot.temperatureDsB ?: Float.NaN, "°C")
-        val battery = formatTopValue(snapshot.adcInValCh0 ?: Float.NaN, " V")
-        val time = SimpleDateFormat("HH:mm", Locale.US).format(Date())
-
-        val ralliartCanvasWidth = 1024
-        val ralliartCanvasHeight = 600
-
-        // Ralliart overlay tuning, all values use the fixed 1024×600 background coordinate system.
-        //
-        // Box format:
-        //   intArrayOf(LEFT, TOP, WIDTH, HEIGHT)
-        //
-        // Set this to false after alignment is done.
-        val showRalliartLayoutGuides = false
-
-        val ralliartHeaderStatusBox = intArrayOf(670, 18, 332, 24)
-
-        val boostHitBox = intArrayOf(32, 70, 472, 472)
-        val boostValueBox = intArrayOf(120, 266, 310, 92)
-        val boostNeedleBox = intArrayOf(49, 87, 452, 452)
-        val boostMinMaxBox = intArrayOf(
-            boostHitBox[0] + boostHitBox[2] - 170,
-            boostHitBox[1] + boostHitBox[3] - 150,
-            68,
-            58,
+        updateRalliartValue(binding.boostValueText, boost, boostSlot, boostColor)
+        binding.boostNeedle.currentValue = boost.coerceIn(-1.0f, 2.0f)
+        updateRalliartMinMax(
+            views = binding.boostMinMax,
+            key = boostSlot.sensor.label,
+            value = boost,
+            slot = boostSlot,
         )
 
-        val afrHitBox = intArrayOf(538, 76, 494, 250)
-        val afrValueBox = intArrayOf(652, 138, 236, 82)
-        val afrDebugGuideBox = intArrayOf(571, 240, 395, 52)
-        val afrLiveBarBox = intArrayOf(571, 254, 395, 18)
+        updateRalliartValue(binding.afrValueText, afr, afrSlot, afrColor)
+        (binding.afrMarker.background as? GradientDrawable)?.setColor(afrColor)
+        binding.afr = afr
+        binding.afrTargetMin = targetMin
+        binding.afrTargetMax = targetMax
+        binding.updateAfrOverlay()
 
-        val oilPressureHitBox = intArrayOf(548, 325, 214, 197)
-        val oilPressureValueBox = intArrayOf(580, 392, 148, 74)
-
-        val oilTempHitBox = intArrayOf(774, 325, 214, 197)
-        val oilTempValueBox = intArrayOf(800, 392, 162, 76)
-
-        val oilPressureMinMaxBox = intArrayOf(
-            oilPressureHitBox[0] + oilPressureHitBox[2] - 62,
-            oilPressureHitBox[1] + oilPressureHitBox[3] - 54,
-            56,
-            46,
+        updateRalliartAlarmFill(
+            binding.oilPressureAlarmFill,
+            ralliartAlarmOverlayColor(oilPressureSlot.box, oilPressureAlarm),
         )
-        val oilTempMinMaxBox = intArrayOf(
-            oilTempHitBox[0] + oilTempHitBox[2] - 62,
-            oilTempHitBox[1] + oilTempHitBox[3] - 54,
-            56,
-            46,
+        updateRalliartValue(
+            binding.oilPressureValueText,
+            oilPressure,
+            oilPressureSlot,
+            oilPressureColor,
+        )
+        updateRalliartMinMax(
+            views = binding.oilPressureMinMax,
+            key = oilPressureSlot.sensor.label,
+            value = oilPressure,
+            slot = oilPressureSlot,
         )
 
+        updateRalliartAlarmFill(
+            binding.oilTempAlarmFill,
+            ralliartAlarmOverlayColor(oilTempSlot.box, oilTempAlarm),
+        )
+        updateRalliartValue(binding.oilTempValueText, oilTemp, oilTempSlot, oilTempColor)
+        updateRalliartMinMax(
+            views = binding.oilTempMinMax,
+            key = oilTempSlot.sensor.label,
+            value = oilTemp,
+            slot = oilTempSlot,
+        )
+    }
+
+    private fun ensureRalliartBinding(
+        boostSlot: FancySensorSlot,
+        afrSlot: FancySensorSlot,
+        oilPressureSlot: FancySensorSlot,
+        oilTempSlot: FancySensorSlot,
+    ): RalliartDashboardBinding {
+        val key = RalliartLayoutKey(page, currentPageConfig())
+        ralliartBinding?.let { current ->
+            if (current.key == key && current.root.parent === dashboardRoot) return current
+        }
+
+        val binding = buildRalliartDashboard(
+            key = key,
+            boostSlot = boostSlot,
+            afrSlot = afrSlot,
+            oilPressureSlot = oilPressureSlot,
+            oilTempSlot = oilTempSlot,
+        )
+        dashboardRoot.removeAllViews()
+        dashboardRoot.addView(
+            binding.root,
+            LinearLayout.LayoutParams(RALLIART_CANVAS_WIDTH, RALLIART_CANVAS_HEIGHT),
+        )
+        ralliartBinding = binding
+        return binding
+    }
+
+    private fun buildRalliartDashboard(
+        key: RalliartLayoutKey,
+        boostSlot: FancySensorSlot,
+        afrSlot: FancySensorSlot,
+        oilPressureSlot: FancySensorSlot,
+        oilTempSlot: FancySensorSlot,
+    ): RalliartDashboardBinding {
         clearRalliartViewportPadding()
 
         val root = FrameLayout(this).apply {
@@ -3012,231 +3003,275 @@ card
             clipChildren = false
         }
 
-        fun addRalliartDebugBox(box: IntArray, label: String, color: Int = Color.argb(190, 0, 255, 255)) {
-            if (!showRalliartLayoutGuides) return
-
-            root.addView(TextView(this).apply {
-                text = label
-                textSize = 10f
-                includeFontPadding = false
-                setTextColor(color)
-                gravity = Gravity.TOP or Gravity.START
-                setPadding(3, 2, 3, 2)
-                background = GradientDrawable().apply {
-                    setColor(Color.TRANSPARENT)
-                    setStroke(2, color)
-                }
-                isClickable = false
-                isFocusable = false
-            }, lp(box))
+        val oilPressureAlarmFill = createRalliartAlarmFill().also {
+            root.addView(it, ralliartLayoutParams(RALLIART_OIL_PRESSURE_HIT_BOX))
+        }
+        val oilTempAlarmFill = createRalliartAlarmFill().also {
+            root.addView(it, ralliartLayoutParams(RALLIART_OIL_TEMP_HIT_BOX))
         }
 
-
-        fun ralliartAlarmOverlayColor(box: DashboardBoxConfig, alarmLevel: BoxAlarmLevel): Int? {
-            if (!box.alarmColorsBackground) return null
-
-            val source = when (alarmLevel) {
-                BoxAlarmLevel.CRITICAL -> box.criticalColor
-                BoxAlarmLevel.WARNING -> box.warningColor
-                BoxAlarmLevel.NORMAL -> return null
-            }
-
-            return Color.argb(
-                210,
-                Color.red(source),
-                Color.green(source),
-                Color.blue(source),
-            )
-        }
-
-        fun addRalliartAlarmFill(
-            root: FrameLayout,
-            box: IntArray,
-            alarmLevel: BoxAlarmLevel,
-            config: DashboardBoxConfig,
-        ) {
-            val overlayColor = ralliartAlarmOverlayColor(config, alarmLevel) ?: return
-
-            root.addView(View(this).apply {
-                background = GradientDrawable().apply {
-                    setColor(overlayColor)
-                    cornerRadius = 8f
-                    setStroke(0, Color.TRANSPARENT)
-                }
-                isClickable = false
-                isFocusable = false
-            }, lp(box))
-        }
-
-        fun addRalliartMinMax(
-            root: FrameLayout,
-            box: IntArray,
-            key: String,
-            value: Float,
-            slot: FancySensorSlot,
-        ) {
-            if (!slot.box.showMinMax) return
-            if (value.isNaN() || value.isInfinite()) return
-
-            val stats = trackMinMax(key, value)
-            if (!shouldShowMinMax(key)) return
-
-            val statBox = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
-                setPadding(0, 2, 0, 2)
-                isClickable = false
-                isFocusable = false
-            }
-
-            statBox.addView(TextView(this).apply {
-                text = formatBoxValue(stats.max, slot.box.decimalPlaces)
-                textSize = 16f
-                setTextColor(slot.box.maxColor)
-                gravity = Gravity.CENTER
-                textAlignment = View.TEXT_ALIGNMENT_CENTER
-                typeface = Typeface.DEFAULT_BOLD
-                includeFontPadding = false
-            }, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ))
-
-            statBox.addView(TextView(this).apply {
-                text = formatBoxValue(stats.min, slot.box.decimalPlaces)
-                textSize = 16f
-                setTextColor(slot.box.minColor)
-                gravity = Gravity.CENTER
-                textAlignment = View.TEXT_ALIGNMENT_CENTER
-                typeface = Typeface.DEFAULT_BOLD
-                includeFontPadding = false
-            }, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ))
-
-            root.addView(statBox, lp(box))
-        }
-
-        addRalliartAlarmFill(root, oilPressureHitBox, oilPressureAlarm, oilPressureSlot.box)
-        addRalliartAlarmFill(root, oilTempHitBox, oilTempAlarm, oilTempSlot.box)
-
-        root.addView(TextView(this).apply {
-            text = "OUT $outside   |   IN $inside   |   $battery   |   $time"
+        val headerText = TextView(this).apply {
             textSize = 16f
             includeFontPadding = false
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.END or Gravity.CENTER_VERTICAL
             isSingleLine = true
             setTextColor(Color.rgb(236, 238, 244))
-        }, lp(ralliartHeaderStatusBox))
+        }.also { root.addView(it, ralliartLayoutParams(RALLIART_HEADER_STATUS_BOX)) }
 
-        addHitZone(root, boostHitBox[0], boostHitBox[1], boostHitBox[2], boostHitBox[3], boostSlot, boostSlot.sensor.label)
-        addHitZone(root, afrHitBox[0], afrHitBox[1], afrHitBox[2], afrHitBox[3], afrSlot, if (afrSlot.box.showMinMax) afrSlot.sensor.label else null)
-        addHitZone(root, oilPressureHitBox[0], oilPressureHitBox[1], oilPressureHitBox[2], oilPressureHitBox[3], oilPressureSlot, oilPressureSlot.sensor.label)
-        addHitZone(root, oilTempHitBox[0], oilTempHitBox[1], oilTempHitBox[2], oilTempHitBox[3], oilTempSlot, oilTempSlot.sensor.label)
+        addRalliartHitZone(root, RALLIART_BOOST_HIT_BOX, boostSlot, boostSlot.sensor.label)
+        addRalliartHitZone(
+            root,
+            RALLIART_AFR_HIT_BOX,
+            afrSlot,
+            if (afrSlot.box.showMinMax) afrSlot.sensor.label else null,
+        )
+        addRalliartHitZone(
+            root,
+            RALLIART_OIL_PRESSURE_HIT_BOX,
+            oilPressureSlot,
+            oilPressureSlot.sensor.label,
+        )
+        addRalliartHitZone(
+            root,
+            RALLIART_OIL_TEMP_HIT_BOX,
+            oilTempSlot,
+            oilTempSlot.sensor.label,
+        )
 
-        addValue(root, boostValueBox, boost, boostSlot, boostColor, 70f)
-
-        root.addView(RalliartBoostNeedleView(this).apply {
+        val boostValueText = createRalliartValueText(70f).also {
+            root.addView(it, ralliartLayoutParams(RALLIART_BOOST_VALUE_BOX))
+        }
+        val boostNeedle = RalliartBoostNeedleView(this).apply {
             minValue = -1.0f
             maxValue = 2.0f
-            currentValue = boost.coerceIn(-1.0f, 2.0f)
             warningValue = 2.0f
             showDebugGuides = false
-        }, lp(boostNeedleBox))
+        }.also { root.addView(it, ralliartLayoutParams(RALLIART_BOOST_NEEDLE_BOX)) }
+        val boostMinMax = createRalliartMinMaxViews(boostSlot).also { views ->
+            if (views != null) root.addView(views.container, ralliartLayoutParams(RALLIART_BOOST_MIN_MAX_BOX))
+        }
 
-        addRalliartMinMax(root, boostMinMaxBox, boostSlot.sensor.label, boost, boostSlot)
-
-        addValue(root, afrValueBox, afr, afrSlot, afrColor, 66f, Gravity.CENTER)
+        val afrValueText = createRalliartValueText(66f).also {
+            root.addView(it, ralliartLayoutParams(RALLIART_AFR_VALUE_BOX))
+        }
+        root.addView(RalliartAfrDebugBarView(this).apply {
+            minValue = 10.0f
+            maxValue = 20.0f
+            showDebugGuides = false
+        }, ralliartLayoutParams(RALLIART_AFR_DEBUG_GUIDE_BOX))
 
         val afrOverlay = FrameLayout(this)
-        val targetBand = View(this).apply {
+        val afrTargetBand = View(this).apply {
             background = GradientDrawable().apply {
                 setColor(Color.argb(150, 76, 170, 88))
                 cornerRadius = 4f
             }
         }
-        val marker = View(this).apply {
+        val afrMarker = View(this).apply {
             background = GradientDrawable().apply {
-                setColor(afrColor)
+                setColor(Color.rgb(218, 222, 228))
                 cornerRadius = 5f
             }
         }
-        afrOverlay.addView(targetBand, FrameLayout.LayoutParams(4, FrameLayout.LayoutParams.MATCH_PARENT))
-        afrOverlay.addView(marker, FrameLayout.LayoutParams(8, FrameLayout.LayoutParams.MATCH_PARENT))
+        afrOverlay.addView(afrTargetBand, FrameLayout.LayoutParams(4, FrameLayout.LayoutParams.MATCH_PARENT))
+        afrOverlay.addView(afrMarker, FrameLayout.LayoutParams(8, FrameLayout.LayoutParams.MATCH_PARENT))
+        root.addView(afrOverlay, ralliartLayoutParams(RALLIART_AFR_LIVE_BAR_BOX))
 
-        fun updateAfrBarOverlay() {
-            val total = afrOverlay.width.coerceAtLeast(1)
-            val barMin = 10.0f
-            val barMax = 20.0f
-            val startFrac = ((targetMin - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
-            val endFrac = ((targetMax - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
-            val valueFrac = if (afr.isNaN() || afr.isInfinite()) {
-                0f
-            } else {
-                ((afr - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
-            }
-
-            val bandStart = (total * startFrac).toInt()
-            val bandEnd = (total * endFrac).toInt()
-            targetBand.layoutParams = FrameLayout.LayoutParams(
-                (bandEnd - bandStart).coerceAtLeast(6),
-                FrameLayout.LayoutParams.MATCH_PARENT,
-            ).apply {
-                leftMargin = bandStart
-            }
-
-            val markerLeft = ((total * valueFrac).toInt() - 4).coerceIn(0, (total - 8).coerceAtLeast(0))
-            marker.layoutParams = FrameLayout.LayoutParams(
-                8,
-                FrameLayout.LayoutParams.MATCH_PARENT,
-            ).apply {
-                leftMargin = markerLeft
+        val oilPressureValueText = createRalliartValueText(58f).also {
+            root.addView(it, ralliartLayoutParams(RALLIART_OIL_PRESSURE_VALUE_BOX))
+        }
+        val oilPressureMinMax = createRalliartMinMaxViews(oilPressureSlot).also { views ->
+            if (views != null) {
+                root.addView(views.container, ralliartLayoutParams(RALLIART_OIL_PRESSURE_MIN_MAX_BOX))
             }
         }
 
-        root.addView(RalliartAfrDebugBarView(this).apply {
-            minValue = 10.0f
-            maxValue = 20.0f
-            showDebugGuides = false
-        }, lp(afrDebugGuideBox))
-
-        root.addView(afrOverlay, lp(afrLiveBarBox))
-        afrOverlay.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            updateAfrBarOverlay()
+        val oilTempValueText = createRalliartValueText(58f).also {
+            root.addView(it, ralliartLayoutParams(RALLIART_OIL_TEMP_VALUE_BOX))
         }
-        afrOverlay.post {
-            updateAfrBarOverlay()
+        val oilTempMinMax = createRalliartMinMaxViews(oilTempSlot).also { views ->
+            if (views != null) root.addView(views.container, ralliartLayoutParams(RALLIART_OIL_TEMP_MIN_MAX_BOX))
         }
 
-        addValue(root, oilPressureValueBox, oilPressure, oilPressureSlot, oilPressureColor, 58f)
-        addValue(root, oilTempValueBox, oilTemp, oilTempSlot, oilTempColor, 58f)
-
-        addRalliartMinMax(root, oilPressureMinMaxBox, oilPressureSlot.sensor.label, oilPressure, oilPressureSlot)
-        addRalliartMinMax(root, oilTempMinMaxBox, oilTempSlot.sensor.label, oilTemp, oilTempSlot)
-
-        addRalliartDebugBox(ralliartHeaderStatusBox, "header", Color.argb(170, 255, 180, 0))
-        addRalliartDebugBox(boostValueBox, "boost value", Color.argb(170, 255, 180, 0))
-        addRalliartDebugBox(boostNeedleBox, "boost needle", Color.argb(170, 0, 255, 255))
-        addRalliartDebugBox(boostMinMaxBox, "boost min/max", Color.argb(170, 80, 170, 255))
-        addRalliartDebugBox(afrValueBox, "afr value", Color.argb(170, 255, 180, 0))
-        addRalliartDebugBox(afrDebugGuideBox, "afr guide", Color.argb(170, 0, 255, 255))
-        addRalliartDebugBox(afrLiveBarBox, "afr live", Color.argb(170, 80, 255, 120))
-        addRalliartDebugBox(oilPressureValueBox, "oil pressure", Color.argb(170, 255, 180, 0))
-        addRalliartDebugBox(oilPressureMinMaxBox, "oil p min/max", Color.argb(170, 80, 170, 255))
-        addRalliartDebugBox(oilTempValueBox, "oil temp", Color.argb(170, 255, 180, 0))
-        addRalliartDebugBox(oilTempMinMaxBox, "oil t min/max", Color.argb(170, 80, 170, 255))
-
-        dashboardRoot.addView(
-            root,
-            LinearLayout.LayoutParams(
-                ralliartCanvasWidth,
-                ralliartCanvasHeight,
-            ),
+        val binding = RalliartDashboardBinding(
+            key = key,
+            root = root,
+            headerText = headerText,
+            boostValueText = boostValueText,
+            boostNeedle = boostNeedle,
+            boostMinMax = boostMinMax,
+            afrValueText = afrValueText,
+            afrOverlay = afrOverlay,
+            afrTargetBand = afrTargetBand,
+            afrMarker = afrMarker,
+            oilPressureAlarmFill = oilPressureAlarmFill,
+            oilPressureValueText = oilPressureValueText,
+            oilPressureMinMax = oilPressureMinMax,
+            oilTempAlarmFill = oilTempAlarmFill,
+            oilTempValueText = oilTempValueText,
+            oilTempMinMax = oilTempMinMax,
         )
+        afrOverlay.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            binding.updateAfrOverlay()
+        }
+        return binding
     }
 
+    private fun clearRalliartViewportPadding() {
+        dashboardRoot.apply {
+            setPadding(0, 0, 0, 0)
+            clipToPadding = false
+            clipChildren = false
+            gravity = Gravity.NO_GRAVITY
+            minimumWidth = RALLIART_CANVAS_WIDTH
+            minimumHeight = RALLIART_CANVAS_HEIGHT
+        }
+
+        var parentView: android.view.ViewParent? = dashboardRoot.parent
+        repeat(6) {
+            val group = parentView as? ViewGroup ?: return@repeat
+            group.setPadding(0, 0, 0, 0)
+            group.clipToPadding = false
+            group.clipChildren = false
+            parentView = group.parent
+        }
+    }
+
+    private fun addRalliartHitZone(
+        root: FrameLayout,
+        box: IntArray,
+        slot: FancySensorSlot,
+        minMaxKey: String?,
+    ) {
+        val hitZone = ClickableLinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, 0)
+            installDashboardSwipeHandler()
+        }
+        attachFancyCardActions(hitZone, slot, minMaxKey)
+        root.addView(hitZone, ralliartLayoutParams(box))
+    }
+
+    private fun createRalliartValueText(size: Float): TextView =
+        TextView(this).apply {
+            textSize = size
+            includeFontPadding = false
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+
+    private fun createRalliartAlarmFill(): View =
+        View(this).apply {
+            background = GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                cornerRadius = 8f
+            }
+            visibility = View.GONE
+            isClickable = false
+            isFocusable = false
+        }
+
+    private fun createRalliartMinMaxViews(slot: FancySensorSlot): RalliartMinMaxViews? {
+        if (!slot.box.showMinMax) return null
+
+        val maxText = TextView(this).apply {
+            textSize = 16f
+            setTextColor(slot.box.maxColor)
+            gravity = Gravity.CENTER
+            textAlignment = View.TEXT_ALIGNMENT_CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            includeFontPadding = false
+        }
+        val minText = TextView(this).apply {
+            textSize = 16f
+            setTextColor(slot.box.minColor)
+            gravity = Gravity.CENTER
+            textAlignment = View.TEXT_ALIGNMENT_CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            includeFontPadding = false
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(0, 2, 0, 2)
+            isClickable = false
+            isFocusable = false
+            visibility = View.GONE
+            addView(maxText, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ))
+            addView(minText, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+        return RalliartMinMaxViews(container, maxText, minText)
+    }
+
+    private fun updateRalliartValue(
+        textView: TextView,
+        value: Float,
+        slot: FancySensorSlot,
+        color: Int,
+    ) {
+        val text = styledValueText(
+            formatBoxValue(value, slot.box.decimalPlaces),
+            slot.box.splitValueDigits,
+        )
+        if (!android.text.TextUtils.equals(textView.text, text)) textView.text = text
+        if (textView.currentTextColor != color) textView.setTextColor(color)
+    }
+
+    private fun updateRalliartMinMax(
+        views: RalliartMinMaxViews?,
+        key: String,
+        value: Float,
+        slot: FancySensorSlot,
+    ) {
+        if (views == null || !value.isFinite()) {
+            views?.container?.visibility = View.GONE
+            return
+        }
+
+        val stats = trackMinMax(key, value)
+        val visible = shouldShowMinMax(key)
+        views.container.visibility = if (visible) View.VISIBLE else View.GONE
+        if (!visible) return
+
+        val maxText = formatBoxValue(stats.max, slot.box.decimalPlaces)
+        val minText = formatBoxValue(stats.min, slot.box.decimalPlaces)
+        if (views.maxText.text.toString() != maxText) views.maxText.text = maxText
+        if (views.minText.text.toString() != minText) views.minText.text = minText
+    }
+
+    private fun updateRalliartAlarmFill(view: View, color: Int?) {
+        view.visibility = if (color == null) View.GONE else View.VISIBLE
+        if (color != null) (view.background as? GradientDrawable)?.setColor(color)
+    }
+
+    private fun ralliartAlarmOverlayColor(
+        box: DashboardBoxConfig,
+        alarmLevel: BoxAlarmLevel,
+    ): Int? {
+        if (!box.alarmColorsBackground) return null
+        val source = when (alarmLevel) {
+            BoxAlarmLevel.CRITICAL -> box.criticalColor
+            BoxAlarmLevel.WARNING -> box.warningColor
+            BoxAlarmLevel.NORMAL -> return null
+        }
+        return Color.argb(210, Color.red(source), Color.green(source), Color.blue(source))
+    }
+
+    private fun formatTopValue(value: Float, suffix: String): String =
+        if (value.isFinite()) formatBoxValue(value, 1) + suffix else "--$suffix"
+
+    private fun ralliartLayoutParams(box: IntArray): FrameLayout.LayoutParams =
+        FrameLayout.LayoutParams(box[2], box[3]).apply {
+            leftMargin = box[0]
+            topMargin = box[1]
+        }
 
 
 
@@ -3281,387 +3316,6 @@ card
         }
     }
 
-    private fun buildRalliartFancyHeader(snapshot: UtcompDataSnapshot): LinearLayout {
-        val outside = formatBoxValue(snapshot.temperatureDsA, 1)
-        val inside = formatBoxValue(snapshot.temperatureDsB, 1)
-        val battery = formatBoxValue(snapshot.adcInValCh0, 1)
-        val time = SimpleDateFormat("HH:mm", Locale.US).format(Date())
-
-        return ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(6, 0, 6, 4)
-            installDashboardSwipeHandler()
-
-            val row = ClickableLinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-
-            val brand = ClickableLinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-
-            brand.addView(TextView(this@MainActivity).apply {
-                text = "RALLI"
-                textSize = 16f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(Color.rgb(236, 238, 242))
-            })
-
-            brand.addView(TextView(this@MainActivity).apply {
-                text = "▌▌▌"
-                textSize = 15f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(Color.rgb(220, 34, 42))
-                setPadding(4, 0, 4, 0)
-            })
-
-            brand.addView(TextView(this@MainActivity).apply {
-                text = "ART"
-                textSize = 16f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(Color.rgb(236, 238, 242))
-            })
-
-            row.addView(
-                brand,
-                LinearLayout.LayoutParams(
-                    0,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    1f,
-                ),
-            )
-
-            row.addView(TextView(this@MainActivity).apply {
-                text = "OUT ${outside}°C   IN ${inside}°C   ${battery} V   ${time}"
-                textSize = 12f
-                typeface = Typeface.DEFAULT_BOLD
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                setTextColor(Color.rgb(218, 222, 230))
-            }, LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                2f,
-            ))
-
-            addView(
-                row,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    30,
-                ),
-            )
-
-            addView(View(this@MainActivity).apply {
-                setBackgroundColor(Color.rgb(170, 28, 36))
-                alpha = 0.88f
-            }, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                2,
-            ))
-        }
-    }
-
-    private fun ralliartDashboardBackground(): GradientDrawable =
-        GradientDrawable(
-            GradientDrawable.Orientation.TL_BR,
-            intArrayOf(
-                Color.rgb(4, 5, 8),
-                Color.rgb(12, 14, 20),
-                Color.rgb(20, 12, 14),
-                Color.rgb(6, 7, 10),
-            ),
-        ).apply {
-            cornerRadius = 0f
-        }
-
-    private fun ralliartCardBackground(color: Int): GradientDrawable =
-        GradientDrawable().apply {
-            setColor(Color.argb(0, Color.red(color), Color.green(color), Color.blue(color)))
-            cornerRadius = 24f
-            setStroke(0, Color.TRANSPARENT)
-        }
-
-    private fun ralliartStatusBadge(label: String, color: Int, textColor: Int = Color.BLACK): TextView =
-        TextView(this).apply {
-            text = label
-            textSize = 10f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setTextColor(textColor)
-            setPadding(8, 2, 8, 2)
-            background = GradientDrawable().apply {
-                setColor(color)
-                cornerRadius = 14f
-            }
-        }
-
-    private fun afrStatusLabel(afr: Float, targetMin: Float, targetMax: Float): Pair<String, Int>? =
-        when {
-            afr.isNaN() || afr.isInfinite() -> null
-            afr < targetMin - 0.55f -> "RICH" to Color.rgb(92, 170, 255)
-            afr > targetMax + 0.55f -> "LEAN" to Color.rgb(255, 72, 72)
-            afr < targetMin || afr > targetMax -> "EDGE" to Color.rgb(255, 170, 48)
-            else -> "OK" to Color.rgb(102, 214, 132)
-        }
-
-    private fun alarmBadgeLabel(level: BoxAlarmLevel): Pair<String, Int>? =
-        when (level) {
-            BoxAlarmLevel.CRITICAL -> "CRIT" to Color.rgb(255, 72, 72)
-            BoxAlarmLevel.WARNING -> "WARN" to Color.rgb(255, 170, 48)
-            BoxAlarmLevel.NORMAL -> null
-        }
-
-    private fun buildFancyBoostCard(slot: FancySensorSlot, snapshot: UtcompDataSnapshot): LinearLayout {
-        val (rawValue, shownValue) = fancyDisplayValue(slot, snapshot)
-        val boost = shownValue ?: Float.NaN
-        val stats = trackMinMax(slot.sensor.label, rawValue ?: boost)
-        val showStats = slot.box.showMinMax && shouldShowMinMax(slot.sensor.label)
-
-        val normalBg = Color.rgb(15, 17, 22)
-        val overBoost = !boost.isNaN() && boost > 2.0f
-        val valueColor = if (overBoost) Color.rgb(255, 196, 72) else slot.box.valueColor
-
-        val card = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(18, 16, 18, 14)
-            background = ralliartCardBackground(normalBg)
-        }
-        attachFancyCardActions(card, slot, slot.sensor.label)
-
-        val header = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-
-        val titleWrap = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val iconRes = iconDrawableResourceId(slot.sensor.iconResourceName)
-        if (iconRes != 0) {
-            titleWrap.addView(ImageView(this).apply {
-                setImageResource(iconRes)
-                alpha = 0.0f
-            }, LinearLayout.LayoutParams(34, 34).apply {
-                rightMargin = 10
-            })
-        }
-        titleWrap.addView(TextView(this).apply {
-            text = "BOOST"
-            alpha = 0.0f
-            textSize = 17f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(230, 232, 238))
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-
-        header.addView(titleWrap, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        if (overBoost) {
-            header.addView(ralliartStatusBadge("OVERBOOST", Color.rgb(255, 196, 72)), LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply {
-                rightMargin = 8
-            })
-        }
-        header.addView(TextView(this).apply {
-            text = if (showStats) {
-                "MAX " + formatBoxValue(stats.max, 1) + "\nMIN " + formatBoxValue(stats.min, 1)
-            } else {
-                ""
-            }
-            gravity = Gravity.END
-            textSize = 11f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(168, 176, 190))
-        })
-        card.addView(header, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        val valueRow = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.BOTTOM or Gravity.START
-        }
-
-        valueRow.addView(TextView(this).apply {
-            text = styledValueText(formatBoxValue(boost, slot.box.decimalPlaces), slot.box.splitValueDigits)
-            textSize = 56f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(valueColor)
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-
-        valueRow.addView(TextView(this).apply {
-            text = "BAR"
-            alpha = 0.0f
-            textSize = 18f
-            setTextColor(Color.rgb(208, 214, 224))
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = 12
-            rightMargin = 2
-        })
-
-        card.addView(valueRow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        card.addView(RalliartBoostGaugeView(this).apply {
-            minValue = -1.0f
-            maxValue = 2.0f
-            currentValue = boost.coerceIn(-1.0f, 2.0f)
-            warningValue = 2.0f
-            criticalValue = Float.NaN
-            centerZero = true
-            accentColor = Color.rgb(220, 64, 64)
-        }, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            topMargin = 8
-            bottomMargin = 8
-        })
-        return card
-    }
-
-    private fun buildFancyAfrCard(slot: FancySensorSlot, boostSlot: FancySensorSlot, snapshot: UtcompDataSnapshot): LinearLayout {
-        val (rawAfr, shownAfr) = fancyDisplayValue(slot, snapshot)
-        val (_, shownBoost) = fancyDisplayValue(boostSlot, snapshot)
-        val afr = shownAfr ?: Float.NaN
-        val boost = shownBoost ?: 0f
-
-        val (targetMin, targetMax) = afrTargetRangeForBoost(boost)
-        val afrStatus = afrStatusLabel(afr, targetMin, targetMax)
-        val afrColor = afrStatus?.second ?: Color.rgb(218, 222, 228)
-
-        val card = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(18, 16, 18, 14)
-            background = ralliartCardBackground(Color.rgb(15, 17, 22))
-        }
-        attachFancyCardActions(card, slot, if (slot.box.showMinMax) slot.sensor.label else null)
-
-        val header = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-
-        val iconRes = iconDrawableResourceId(slot.sensor.iconResourceName)
-        if (iconRes != 0) {
-            header.addView(ImageView(this).apply {
-                setImageResource(iconRes)
-                alpha = 0.0f
-            }, LinearLayout.LayoutParams(32, 32).apply {
-                rightMargin = 10
-            })
-        }
-        header.addView(TextView(this).apply {
-            text = "AFR"
-            alpha = 0.0f
-            textSize = 17f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(230, 232, 238))
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-
-        afrStatus?.let { (label, color) ->
-            header.addView(ralliartStatusBadge(label, color), LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ))
-        }
-
-        card.addView(header, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        val valueRow = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.BOTTOM or Gravity.START
-        }
-
-        valueRow.addView(TextView(this).apply {
-            text = styledValueText(formatBoxValue(afr, slot.box.decimalPlaces), slot.box.splitValueDigits)
-            textSize = 42f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(afrColor)
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-
-        card.addView(valueRow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        val barShell = FrameLayout(this).apply {
-            background = GradientDrawable().apply {
-                setColor(Color.rgb(28, 31, 38))
-                cornerRadius = 14f
-                setStroke(2, Color.rgb(56, 60, 70))
-            }
-        }
-
-        val targetBand = View(this).apply {
-            background = GradientDrawable().apply {
-                setColor(Color.rgb(58, 130, 76))
-                cornerRadius = 10f
-            }
-        }
-
-        val marker = View(this).apply {
-            background = GradientDrawable().apply {
-                setColor(afrColor)
-                cornerRadius = 6f
-            }
-        }
-
-        barShell.addView(targetBand, FrameLayout.LayoutParams(4, FrameLayout.LayoutParams.MATCH_PARENT))
-        barShell.addView(marker, FrameLayout.LayoutParams(8, FrameLayout.LayoutParams.MATCH_PARENT))
-
-        barShell.post {
-            val total = barShell.width.coerceAtLeast(1)
-            val barMin = 9.0f
-            val barMax = 17.0f
-            val startFrac = ((targetMin - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
-            val endFrac = ((targetMax - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
-            val valueFrac = ((afr - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
-
-            val bandStart = (total * startFrac).toInt()
-            val bandEnd = (total * endFrac).toInt()
-            targetBand.layoutParams = FrameLayout.LayoutParams(
-                (bandEnd - bandStart).coerceAtLeast(6),
-                FrameLayout.LayoutParams.MATCH_PARENT,
-            ).apply {
-                leftMargin = bandStart
-            }
-
-            val markerLeft = ((total * valueFrac).toInt() - 4).coerceIn(0, (total - 8).coerceAtLeast(0))
-            marker.layoutParams = FrameLayout.LayoutParams(
-                8,
-                FrameLayout.LayoutParams.MATCH_PARENT,
-            ).apply {
-                leftMargin = markerLeft
-            }
-        }
-
-        card.addView(barShell, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            26,
-        ).apply {
-            topMargin = 10
-            bottomMargin = 8
-        })
-
-        val marks = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        listOf("9", "11", "13", "15", "17").forEachIndexed { index, label ->
-            marks.addView(TextView(this).apply {
-                text = label
-                textSize = 11f
-                gravity = when (index) {
-                    0 -> Gravity.START
-                    4 -> Gravity.END
-                    else -> Gravity.CENTER_HORIZONTAL
-                }
-                setTextColor(Color.rgb(152, 160, 172))
-            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        }
-        card.addView(marks, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        return card
-    }
-
     private fun lerpFloat(start: Float, end: Float, fraction: Float): Float =
         start + (end - start) * fraction.coerceIn(0f, 1f)
 
@@ -3688,102 +3342,24 @@ card
         }
     }
 
-    private fun buildFancyOilCard(slot: FancySensorSlot, snapshot: UtcompDataSnapshot, redTone: Boolean): LinearLayout {
-        val (rawValue, shownValue) = fancyDisplayValue(slot, snapshot)
-        val shown = shownValue ?: Float.NaN
-        val alarmLevel = alarmLevelFor(slot.box, rawValue, snapshot)
-        val backgroundColor = if (redTone && alarmLevel == BoxAlarmLevel.NORMAL) {
-            Color.rgb(23, 20, 24)
-        } else {
-            boxBackgroundColor(slot.box, alarmLevel)
-        }
-        val valueColor = if (alarmLevel == BoxAlarmLevel.NORMAL) {
-            if (redTone) Color.rgb(255, 226, 226) else slot.box.valueColor
-        } else {
-            boxValueColor(slot.box, alarmLevel)
-        }
-        val stats = trackMinMax(slot.sensor.label, rawValue ?: shown)
-        val showStats = slot.box.showMinMax && shouldShowMinMax(slot.sensor.label)
-
-        val card = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(16, 14, 16, 12)
-            background = ralliartCardBackground(backgroundColor)
-        }
-        attachFancyCardActions(card, slot, slot.sensor.label)
-
-        val header = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-
-        val iconRes = iconDrawableResourceId(slot.sensor.iconResourceName)
-        if (iconRes != 0) {
-            header.addView(ImageView(this).apply {
-                setImageResource(iconRes)
-                alpha = 0.0f
-            }, LinearLayout.LayoutParams(28, 28).apply {
-                rightMargin = 8
-            })
-        }
-        header.addView(TextView(this).apply {
-            text = slot.sensor.label.uppercase(Locale.US)
-            alpha = 0.0f
-            textSize = 15f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(230, 232, 238))
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        alarmBadgeLabel(alarmLevel)?.let { (label, color) ->
-            header.addView(ralliartStatusBadge(label, color), LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply {
-                rightMargin = 6
-            })
-        }
-        header.addView(TextView(this).apply {
-            text = if (showStats) {
-                "MAX " + formatBoxValue(stats.max, slot.box.decimalPlaces) + "\nMIN " + formatBoxValue(stats.min, slot.box.decimalPlaces)
-            } else {
-                ""
-            }
-            gravity = Gravity.END
-            textSize = 10f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(168, 176, 190))
-        })
-        card.addView(header, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        val valueRow = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.BOTTOM or Gravity.START
-        }
-        valueRow.addView(TextView(this).apply {
-            text = styledValueText(formatBoxValue(shown, slot.box.decimalPlaces), slot.box.splitValueDigits)
-            textSize = 36f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(valueColor)
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        valueRow.addView(TextView(this).apply {
-            text = slot.sensor.unit
-            alpha = 0.0f
-            textSize = 16f
-            setTextColor(if (alarmLevel == BoxAlarmLevel.NORMAL) slot.box.unitColor else valueColor)
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = 8
-        })
-        card.addView(valueRow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        return card
+    private fun renderSimple(snapshot: UtcompDataSnapshot) {
+        val binding = ensureSimpleDashboardBinding()
+        binding.cards.forEach { updateSimpleCard(it, snapshot) }
     }
 
-    private fun renderSimple(s: UtcompDataSnapshot) {
+    private fun ensureSimpleDashboardBinding(): SimpleDashboardBinding {
+        val pageConfig = currentPageConfig()
+        val key = SimpleLayoutKey(page, pageConfig)
+        simpleBinding?.let { current ->
+            if (current.key == key && current.root.parent === dashboardRoot) return current
+        }
+
         dashboardRoot.apply {
             setBackgroundColor(Color.BLACK)
             setPadding(0, 0, 0, 0)
             clipToPadding = false
             clipChildren = false
+            gravity = Gravity.NO_GRAVITY
         }
 
         var parentView: android.view.ViewParent? = dashboardRoot.parent
@@ -3796,7 +3372,405 @@ card
             parentView = group.parent
         }
 
-        renderConfiguredPage(currentPageConfig(), s, simple = true)
+        val cardBindings = pageConfig.boxes
+            .mapIndexed { index, box -> index to box }
+            .sortedWith(
+                compareBy<Pair<Int, DashboardBoxConfig>> { it.second.row }
+                    .thenBy { it.second.column },
+            )
+            .map { (boxIndex, box) -> buildSimpleCard(boxIndex, box) }
+
+        val root = buildSimpleGrid(pageConfig.rows, pageConfig.columns, cardBindings.map { it.card })
+        dashboardRoot.removeAllViews()
+        dashboardRoot.addView(
+            root,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+
+        ralliartBinding = null
+        return SimpleDashboardBinding(key, root, cardBindings).also { simpleBinding = it }
+    }
+
+    private fun buildSimpleGrid(
+        rows: Int,
+        columns: Int,
+        cards: List<LinearLayout>,
+    ): LinearLayout {
+        val safeRows = rows.coerceAtLeast(1)
+        val safeColumns = columns.coerceAtLeast(1)
+        val totalCells = safeRows * safeColumns
+        val cells = cards.take(totalCells)
+
+        return ClickableLinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, 0)
+            setBackgroundColor(Color.BLACK)
+
+            for (rowIndex in 0 until safeRows) {
+                val row = ClickableLinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    setPadding(0, 0, 0, 0)
+                    setBackgroundColor(Color.BLACK)
+                }
+
+                for (columnIndex in 0 until safeColumns) {
+                    val index = rowIndex * safeColumns + columnIndex
+                    val cell = cells.getOrNull(index) ?: ClickableLinearLayout(this@MainActivity)
+                    cell.minimumWidth = 0
+                    cell.minimumHeight = 0
+                    cell.installDashboardSwipeHandler()
+                    row.addView(
+                        cell,
+                        LinearLayout.LayoutParams(
+                            0,
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            1f,
+                        ).apply {
+                            setMargins(6, 6, 6, 6)
+                        },
+                    )
+                }
+
+                addView(
+                    row,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f,
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun buildSimpleCard(
+        boxIndex: Int,
+        box: DashboardBoxConfig,
+    ): SimpleCardBinding {
+        val sensor = box.sensor
+        val minMaxKey = if (sensor == DashboardSensor.TIME || !box.showMinMax) null else sensor.label
+        val background = GradientDrawable().apply {
+            setColor(box.backgroundColor)
+            cornerRadius = 0f
+            setStroke(2, Color.rgb(255, 110, 36))
+        }
+        val card = ClickableLinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            contentDescription = sensor.label
+            this.background = background
+            setPadding(8, 4, 8, 4)
+            clipToPadding = false
+            clipChildren = false
+        }
+
+        val safeValueScale = box.valueScale.coerceIn(0.25f, 4.0f)
+        val safeIconScale = box.iconScale.coerceIn(0.25f, 4.0f)
+        val safeIconValueGapScale = box.iconValueGapScale.coerceIn(0.25f, 4.0f)
+        val iconSize = (40f * safeIconScale).toInt().coerceAtLeast(18)
+        val iconGapPx = (8f * safeValueScale * safeIconValueGapScale).coerceAtLeast(2f)
+        val unitGapPx = (4f * safeValueScale).toInt().coerceAtLeast(1)
+        val minMaxTextSize = 11.5f * safeValueScale
+        val minMaxPaddingY = (2f * safeValueScale).toInt().coerceAtLeast(2)
+        val minMaxWidthPx = (58f * safeValueScale).toInt().coerceAtLeast(50)
+        val minMaxCornerInsetPx = (5f * safeValueScale).coerceAtLeast(4f)
+
+        var iconView: View? = null
+        var unitTextView: TextView? = null
+        var maxStatView: TextView? = null
+        var minStatView: TextView? = null
+
+        val content = FrameLayout(this).apply {
+            clipToPadding = false
+            clipChildren = false
+        }
+        val valueLine = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            isBaselineAligned = false
+            clipToPadding = false
+            clipChildren = false
+        }
+        val valueTextView = TextView(this).apply {
+            text = "--"
+            textSize = 29f * safeValueScale
+            setTextColor(box.valueColor)
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            textAlignment = View.TEXT_ALIGNMENT_CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            includeFontPadding = false
+        }
+        valueLine.addView(
+            valueTextView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { gravity = Gravity.BOTTOM },
+        )
+
+        if (box.showUnit && sensor.unit.isNotBlank()) {
+            unitTextView = TextView(this).apply {
+                text = sensor.unit
+                textSize = 10.5f * safeValueScale
+                setTextColor(box.unitColor)
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                textAlignment = View.TEXT_ALIGNMENT_CENTER
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
+                includeFontPadding = false
+            }.also { unitText ->
+                valueLine.addView(
+                    unitText,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ).apply {
+                        gravity = Gravity.BOTTOM
+                        leftMargin = unitGapPx
+                    },
+                )
+            }
+        }
+
+        content.addView(
+            valueLine,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER,
+            ),
+        )
+
+        if (box.showIcon && sensor != DashboardSensor.TIME) {
+            val iconResource = iconDrawableResourceId(sensor.iconResourceName)
+            iconView = if (iconResource != 0) {
+                ImageView(this).apply {
+                    setImageResource(iconResource)
+                    adjustViewBounds = true
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    alpha = 0.95f
+                }
+            } else {
+                val fallbackIcon = fallbackIconFor(sensor)
+                TextView(this).apply {
+                    text = fallbackIcon
+                    textSize = if (fallbackIcon.length > 2) {
+                        13f * safeIconScale
+                    } else {
+                        22f * safeIconScale
+                    }
+                    gravity = Gravity.CENTER
+                    textAlignment = View.TEXT_ALIGNMENT_CENTER
+                    setTextColor(box.unitColor)
+                    typeface = Typeface.DEFAULT_BOLD
+                    includeFontPadding = false
+                }
+            }
+            content.addView(iconView, FrameLayout.LayoutParams(iconSize, iconSize))
+        }
+
+        if (minMaxKey != null) {
+            maxStatView = TextView(this).apply {
+                textSize = minMaxTextSize
+                setTextColor(box.maxColor)
+                gravity = Gravity.CENTER
+                textAlignment = View.TEXT_ALIGNMENT_CENTER
+                typeface = Typeface.DEFAULT_BOLD
+                includeFontPadding = false
+                visibility = View.GONE
+                setPadding(0, minMaxPaddingY, 0, minMaxPaddingY)
+            }
+            minStatView = TextView(this).apply {
+                textSize = minMaxTextSize
+                setTextColor(box.minColor)
+                gravity = Gravity.CENTER
+                textAlignment = View.TEXT_ALIGNMENT_CENTER
+                typeface = Typeface.DEFAULT_BOLD
+                includeFontPadding = false
+                visibility = View.GONE
+                setPadding(0, minMaxPaddingY, 0, minMaxPaddingY)
+            }
+            content.addView(
+                maxStatView,
+                FrameLayout.LayoutParams(
+                    minMaxWidthPx,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            content.addView(
+                minStatView,
+                FrameLayout.LayoutParams(
+                    minMaxWidthPx,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+
+        val valueBounds = android.graphics.RectF()
+        val unitBounds = android.graphics.RectF()
+        val scratchBounds = android.graphics.Rect()
+
+        fun textInkBounds(textView: TextView, out: android.graphics.RectF) {
+            val baseline = textView.baseline
+            val rawText = textView.text?.toString().orEmpty()
+            if (textView.height <= 0 || baseline < 0 || rawText.isEmpty()) {
+                out.set(
+                    textView.left.toFloat(),
+                    textView.top.toFloat(),
+                    textView.right.toFloat(),
+                    textView.bottom.toFloat(),
+                )
+                return
+            }
+
+            textView.paint.getTextBounds(rawText, 0, rawText.length, scratchBounds)
+            out.set(
+                textView.left + scratchBounds.left.toFloat(),
+                textView.top + baseline + scratchBounds.top.toFloat(),
+                textView.left + scratchBounds.right.toFloat(),
+                textView.top + baseline + scratchBounds.bottom.toFloat(),
+            )
+        }
+
+        fun alignSimpleContent() {
+            if (content.width <= 0 || content.height <= 0 || valueLine.width <= 0 ||
+                valueLine.height <= 0 || valueTextView.height <= 0
+            ) return
+
+            valueLine.translationX = 0f
+            valueLine.translationY = 0f
+            valueTextView.translationY = 0f
+            unitTextView?.translationY = 0f
+
+            val icon = iconView
+            val iconBlockWidth = if (icon != null && icon.width > 0) {
+                icon.width.toFloat() + iconGapPx
+            } else {
+                0f
+            }
+            val groupWidth = iconBlockWidth + valueLine.width
+            val groupLeft = (content.width - groupWidth) / 2f
+            textInkBounds(valueTextView, valueBounds)
+            val valueLineTop = content.height / 2f - (valueBounds.top + valueBounds.bottom) / 2f
+            valueLine.x = groupLeft + iconBlockWidth
+            valueLine.y = valueLineTop
+            val targetBottom = valueLine.y + valueBounds.bottom
+
+            unitTextView?.let { unitText ->
+                if (unitText.height > 0) {
+                    textInkBounds(unitText, unitBounds)
+                    unitText.translationY = targetBottom - (valueLine.y + unitBounds.bottom)
+                }
+            }
+
+            icon?.let {
+                if (it.width > 0 && it.height > 0) {
+                    it.x = groupLeft
+                    it.y = targetBottom - it.height
+                }
+            }
+
+            val statRight = content.width - minMaxCornerInsetPx
+            val statLeft = (statRight - minMaxWidthPx).coerceAtLeast(minMaxCornerInsetPx)
+            maxStatView?.let { maxView ->
+                if (maxView.visibility != View.GONE && maxView.width > 0 && maxView.height > 0) {
+                    maxView.x = statLeft
+                    maxView.y = minMaxCornerInsetPx
+                }
+            }
+            minStatView?.let { minView ->
+                if (minView.visibility != View.GONE && minView.width > 0 && minView.height > 0) {
+                    minView.x = statLeft
+                    minView.y = (content.height - minMaxCornerInsetPx - minView.height)
+                        .coerceAtLeast(minMaxCornerInsetPx)
+                }
+            }
+        }
+
+        val alignListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            alignSimpleContent()
+        }
+        content.addOnLayoutChangeListener(alignListener)
+        valueLine.addOnLayoutChangeListener(alignListener)
+        valueTextView.addOnLayoutChangeListener(alignListener)
+        unitTextView?.addOnLayoutChangeListener(alignListener)
+        iconView?.addOnLayoutChangeListener(alignListener)
+        maxStatView?.addOnLayoutChangeListener(alignListener)
+        minStatView?.addOnLayoutChangeListener(alignListener)
+        content.post { alignSimpleContent() }
+
+        card.addView(
+            content,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            ),
+        )
+        attachDashboardBoxActions(card, boxIndex, minMaxKey)
+
+        return SimpleCardBinding(
+            boxIndex = boxIndex,
+            box = box,
+            card = card,
+            background = background,
+            valueText = valueTextView,
+            unitText = unitTextView,
+            maxText = maxStatView,
+            minText = minStatView,
+            minMaxKey = minMaxKey,
+        )
+    }
+
+    private fun updateSimpleCard(
+        binding: SimpleCardBinding,
+        snapshot: UtcompDataSnapshot,
+    ) {
+        val box = binding.box
+        val sensor = box.sensor
+        val rawValue = sensor.readValue(snapshot)
+        val displayValue = displayValueForBox(box, binding.boxIndex, rawValue)
+        val formattedValue = if (sensor == DashboardSensor.TIME) {
+            clockFmt.format(Date())
+        } else {
+            formatBoxValue(displayValue ?: rawValue, box.decimalPlaces)
+        }
+
+        if (binding.valueText.text.toString() != formattedValue) {
+            binding.valueText.text = styledValueText(formattedValue, box.splitValueDigits)
+        }
+
+        val alarmLevel = alarmLevelFor(box, rawValue, snapshot)
+        val valueColor = boxValueColor(box, alarmLevel)
+        binding.background.setColor(boxBackgroundColor(box, alarmLevel))
+        if (binding.valueText.currentTextColor != valueColor) {
+            binding.valueText.setTextColor(valueColor)
+        }
+        val effectiveUnitColor = if (alarmLevel == BoxAlarmLevel.NORMAL) box.unitColor else valueColor
+        binding.unitText?.let { unitText ->
+            if (unitText.currentTextColor != effectiveUnitColor) unitText.setTextColor(effectiveUnitColor)
+        }
+        binding.card.alpha = if (editMode) 0.92f else 1.0f
+
+        val minMaxKey = binding.minMaxKey
+        val value = rawValue
+        val stats = if (minMaxKey != null && value != null && value.isFinite()) {
+            trackMinMax(minMaxKey, value)
+        } else {
+            null
+        }
+        val showStats = stats != null && minMaxKey != null && shouldShowMinMax(minMaxKey)
+        binding.maxText?.visibility = if (showStats) View.VISIBLE else View.GONE
+        binding.minText?.visibility = if (showStats) View.VISIBLE else View.GONE
+        if (showStats && stats != null) {
+            val maxText = formatBoxValue(stats.max, box.decimalPlaces)
+            val minText = formatBoxValue(stats.min, box.decimalPlaces)
+            if (binding.maxText?.text?.toString() != maxText) binding.maxText?.text = maxText
+            if (binding.minText?.text?.toString() != minText) binding.minText?.text = minText
+        }
     }
 
     private fun renderDebug(s: UtcompDataSnapshot) {
@@ -3829,169 +3803,6 @@ card
             }
     }
 
-    private fun addPresetGrid(rows: Int, columns: Int, cards: List<LinearLayout>) {
-        val safeRows = rows.coerceAtLeast(1)
-        val safeColumns = columns.coerceAtLeast(1)
-        val totalCells = safeRows * safeColumns
-        val cells = cards.take(totalCells)
-
-        val outer = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, 0)
-            setBackgroundColor(Color.BLACK)
-        }
-
-        for (rowIndex in 0 until safeRows) {
-            val row = ClickableLinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-                setPadding(0, 0, 0, 0)
-                setBackgroundColor(Color.BLACK)
-            }
-
-            for (columnIndex in 0 until safeColumns) {
-                val index = rowIndex * safeColumns + columnIndex
-                val cell = cells.getOrNull(index) ?: emptyGridCell()
-
-                cell.minimumWidth = 0
-                cell.minimumHeight = 0
-                cell.installDashboardSwipeHandler()
-
-                row.addView(
-                    cell,
-                    LinearLayout.LayoutParams(
-                        0,
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        1f,
-                    ).apply {
-                        setMargins(6, 6, 6, 6)
-                    },
-                )
-            }
-
-            outer.addView(
-                row,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    0,
-                    1f,
-                ),
-            )
-        }
-
-        dashboardRoot.addView(
-            outer,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.MATCH_PARENT,
-            ),
-        )
-    }
-
-
-    private fun emptyGridCell(): LinearLayout =
-        ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-
-    private fun fancyCard(
-        title: String,
-        value: Float,
-        unit: String,
-        min: Float,
-        maxValue: Float,
-        subtitle: String,
-    ): LinearLayout {
-        val stats = trackMinMax(title, value)
-        val card = baseCard().apply {
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { showMinMaxInline(title) }
-            setOnLongClickListener {
-                resetMinMax(title)
-                true
-            }
-        }
-        card.addView(TextView(this).apply {
-            text = title
-            textSize = 14f
-            setTextColor(Color.rgb(190, 198, 210))
-            typeface = Typeface.DEFAULT_BOLD
-        })
-
-        val valueSuffix = if (unit.isEmpty()) "" else "$unit"
-        val valueRow = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-
-        valueRow.addView(TextView(this).apply {
-            text = fmt(value, valueSuffix)
-            textSize = 28f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-
-        valueRow.addView(TextView(this).apply {
-            text = if (shouldShowMinMax(title)) {
-                "min ${fmt(stats.min, valueSuffix)}\nmax ${fmt(stats.max, valueSuffix)}"
-            } else {
-                ""
-            }
-            textSize = 10f
-            setTextColor(Color.rgb(120, 210, 255))
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.END
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-
-        card.addView(valueRow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        card.addView(PerformanceGaugeView(this).apply {
-            minValue = min
-            this.maxValue = maxValue
-            currentValue = value
-            centerZero = title == "Boost"
-            accentColor = when (title) {
-                "Boost" -> Color.rgb(0, 210, 255)
-                "AFR" -> Color.rgb(140, 110, 255)
-                "Oil pressure" -> Color.rgb(255, 190, 60)
-                "Oil temp" -> Color.rgb(255, 90, 60)
-                else -> Color.rgb(0, 210, 255)
-            }
-        }, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        if (showSourceLine && subtitle.isNotBlank()) {
-            card.addView(TextView(this).apply {
-                text = subtitle
-                textSize = 11f
-                setTextColor(Color.rgb(130, 140, 155))
-            })
-        }
-
-        return card
-    }
-
-    private fun compactCard(title: String, value: String, subtitle: String): LinearLayout {
-        val card = baseCard()
-        card.addView(TextView(this).apply {
-            text = title
-            textSize = 13f
-            setTextColor(Color.rgb(190, 198, 210))
-        })
-        card.addView(TextView(this).apply {
-            text = value
-            textSize = 22f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-        })
-        card.addView(TextView(this).apply {
-            text = subtitle
-            textSize = 11f
-            setTextColor(Color.rgb(130, 140, 155))
-        })
-        return card
-    }
-
     private fun iconDrawableResourceId(resourceName: String?): Int =
         when (resourceName) {
             "ic_utcomp_battery_48dp" -> R.drawable.ic_rcomp_accu_48dp
@@ -4021,337 +3832,6 @@ card
 
 
 
-
-    private fun simpleGridCard(
-        fallbackIcon: String,
-        iconResourceName: String?,
-        label: String,
-        value: String,
-        unit: String,
-        minMaxKey: String?,
-        rawValue: Float?,
-        valueScale: Float = 1.0f,
-        iconScale: Float = 1.0f,
-        iconValueGapScale: Float = 1.0f,
-        backgroundColor: Int = Color.BLACK,
-        foregroundColor: Int = Color.WHITE,
-        unitColor: Int = Color.rgb(210, 216, 225),
-        minColor: Int = Color.rgb(80, 170, 255),
-        maxColor: Int = Color.rgb(255, 72, 72),
-        showIcon: Boolean = true,
-        splitValueDigits: Boolean = true,
-    ): LinearLayout =
-        ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            contentDescription = label
-            background = GradientDrawable().apply {
-                setColor(backgroundColor)
-                cornerRadius = 0f
-                setStroke(2, Color.rgb(255, 110, 36))
-            }
-            setPadding(8, 4, 8, 4)
-            clipToPadding = false
-            clipChildren = false
-
-            val stats = if (minMaxKey != null && rawValue != null) {
-                trackMinMax(minMaxKey, rawValue)
-            } else {
-                null
-            }
-
-            if (stats != null && minMaxKey != null) {
-                isClickable = true
-                isFocusable = true
-                setOnClickListener { showMinMaxInline(minMaxKey) }
-                setOnLongClickListener {
-                    resetMinMax(minMaxKey)
-                    true
-                }
-            }
-
-            addView(FrameLayout(this@MainActivity).apply {
-                clipToPadding = false
-                clipChildren = false
-
-                val safeValueScale = valueScale.coerceIn(0.25f, 4.0f)
-                val safeIconScale = iconScale.coerceIn(0.25f, 4.0f)
-                val safeIconValueGapScale = iconValueGapScale.coerceIn(0.25f, 4.0f)
-
-                // Simple-mode layout model:
-                // - valueLine is a single measured horizontal row (value + unit)
-                // - the full icon + gap + valueLine group is centered horizontally
-                // - the value glyph ink center is centered vertically in the box
-                // - value, unit, and icon are aligned by actual text ink bottom, not font-box bottom
-                val iconSize = (40f * safeIconScale).toInt().coerceAtLeast(18)
-                val iconGapPx = (8f * safeValueScale * safeIconValueGapScale).coerceAtLeast(2f)
-                val iconBottomOffsetPx = 0f
-                val unitGapPx = (4f * safeValueScale).toInt().coerceAtLeast(1)
-                val minMaxTextSize = 11.5f * safeValueScale
-                val minMaxPaddingY = (2f * safeValueScale).toInt().coerceAtLeast(2)
-                val minMaxWidthPx = (58f * safeValueScale).toInt().coerceAtLeast(50)
-                val minMaxCornerInsetPx = (5f * safeValueScale).coerceAtLeast(4f)
-                val valueOffsetX = 0f
-                val valueOffsetY = 0f
-
-                var iconView: View? = null
-                var unitTextView: TextView? = null
-                var maxStatView: TextView? = null
-                var minStatView: TextView? = null
-
-                val valueLine = LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                    isBaselineAligned = false
-                    clipToPadding = false
-                    clipChildren = false
-                    translationX = valueOffsetX
-                    translationY = valueOffsetY
-                }
-
-                val valueTextView = TextView(this@MainActivity).apply {
-                    text = styledValueText(value, splitValueDigits)
-                    textSize = 29f * safeValueScale
-                    setTextColor(foregroundColor)
-                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                    textAlignment = View.TEXT_ALIGNMENT_CENTER
-                    typeface = Typeface.DEFAULT_BOLD
-                    includeFontPadding = false
-                }
-
-                valueLine.addView(valueTextView, LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ).apply {
-                    gravity = Gravity.BOTTOM
-                })
-
-                if (unit.isNotBlank()) {
-                    val unitText = TextView(this@MainActivity).apply {
-                        text = unit
-                        textSize = 10.5f * safeValueScale
-                        setTextColor(unitColor)
-                        gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                        textAlignment = View.TEXT_ALIGNMENT_CENTER
-                        typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
-                        includeFontPadding = false
-                    }
-                    unitTextView = unitText
-                    valueLine.addView(unitText, LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                    ).apply {
-                        gravity = Gravity.BOTTOM
-                        leftMargin = unitGapPx
-                    })
-                }
-
-                addView(valueLine, FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.CENTER,
-                ))
-
-                if (showIcon) {
-                    val iconResId = iconDrawableResourceId(iconResourceName ?: "")
-                    val icon = if (iconResId != 0) {
-                        ImageView(this@MainActivity).apply {
-                            setImageResource(iconResId)
-                            adjustViewBounds = true
-                            scaleType = ImageView.ScaleType.FIT_CENTER
-                            alpha = 0.95f
-                        }
-                    } else {
-                        TextView(this@MainActivity).apply {
-                            text = fallbackIcon
-                            textSize = if (fallbackIcon.length > 2) 13f * safeIconScale else 22f * safeIconScale
-                            gravity = Gravity.CENTER
-                            textAlignment = View.TEXT_ALIGNMENT_CENTER
-                            setTextColor(unitColor)
-                            typeface = Typeface.DEFAULT_BOLD
-                            includeFontPadding = false
-                        }
-                    }
-
-                    iconView = icon
-                    addView(icon, FrameLayout.LayoutParams(iconSize, iconSize))
-                }
-
-                fun textInkBoundsInValueLine(textView: TextView): android.graphics.RectF {
-                    val baseline = textView.baseline
-                    if (textView.height <= 0 || baseline < 0) {
-                        return android.graphics.RectF(
-                            textView.left.toFloat(),
-                            textView.top.toFloat(),
-                            textView.right.toFloat(),
-                            textView.bottom.toFloat(),
-                        )
-                    }
-
-                    val rawText = textView.text?.toString().orEmpty()
-                    if (rawText.isEmpty()) {
-                        return android.graphics.RectF(
-                            textView.left.toFloat(),
-                            textView.top.toFloat(),
-                            textView.right.toFloat(),
-                            textView.bottom.toFloat(),
-                        )
-                    }
-
-                    // fontMetrics only tells us where the font box ends. Digits usually draw
-                    // inside that box. getTextBounds() gives the actual ink relative to baseline.
-                    val inkBounds = android.graphics.Rect()
-                    textView.paint.getTextBounds(rawText, 0, rawText.length, inkBounds)
-
-                    return android.graphics.RectF(
-                        textView.left + inkBounds.left.toFloat(),
-                        textView.top + baseline + inkBounds.top.toFloat(),
-                        textView.left + inkBounds.right.toFloat(),
-                        textView.top + baseline + inkBounds.bottom.toFloat(),
-                    )
-                }
-
-                fun alignSimpleContent() {
-                    if (width <= 0 || height <= 0 || valueLine.width <= 0 ||
-                        valueLine.height <= 0 || valueTextView.height <= 0
-                    ) return
-
-                    // Reset first so repeated layout passes do not compound the correction.
-                    valueLine.translationX = 0f
-                    valueLine.translationY = 0f
-                    valueTextView.translationY = 0f
-                    unitTextView?.translationY = 0f
-
-                    val icon = iconView
-                    val iconBlockWidth = if (icon != null && icon.width > 0) {
-                        icon.width.toFloat() + iconGapPx
-                    } else {
-                        0f
-                    }
-
-                    val groupWidth = iconBlockWidth + valueLine.width
-                    val groupLeft = (width - groupWidth) / 2f
-                    val valueLineLeft = groupLeft + iconBlockWidth
-
-                    // Vertical centering is based only on the main value glyph, not the icon,
-                    // unit, or min/max block. This keeps the number visually centered in the box.
-                    val valueInkBounds = textInkBoundsInValueLine(valueTextView)
-                    val valueInkCenterInLine = (valueInkBounds.top + valueInkBounds.bottom) / 2f
-                    val valueLineTop = (height / 2f) - valueInkCenterInLine
-                    valueLine.x = valueLineLeft
-                    valueLine.y = valueLineTop
-
-                    val targetBottom = valueLine.y + valueInkBounds.bottom
-
-                    // Shift the unit glyph until its real ink bottom shares the value bottom.
-                    unitTextView?.let { unitText ->
-                        if (unitText.height > 0) {
-                            val unitBottom = valueLine.y + textInkBoundsInValueLine(unitText).bottom
-                            unitText.translationY = targetBottom - unitBottom
-                        }
-                    }
-
-                    icon?.let {
-                        if (it.width <= 0 || it.height <= 0) return@let
-
-                        // Fixed pattern:
-                        // full group centered horizontally
-                        // icon.BOTTOM = value glyph bottom
-                        it.x = groupLeft
-                        it.y = targetBottom - it.height + iconBottomOffsetPx
-                    }
-
-                    val statRight = width - minMaxCornerInsetPx
-                    val statLeft = (statRight - minMaxWidthPx).coerceAtLeast(minMaxCornerInsetPx)
-
-                    maxStatView?.let { maxView ->
-                        if (maxView.visibility == View.GONE || maxView.width <= 0 || maxView.height <= 0) return@let
-                        maxView.x = statLeft
-                        maxView.y = minMaxCornerInsetPx
-                    }
-
-                    minStatView?.let { minView ->
-                        if (minView.visibility == View.GONE || minView.width <= 0 || minView.height <= 0) return@let
-                        minView.x = statLeft
-                        minView.y = (height - minMaxCornerInsetPx - minView.height).coerceAtLeast(minMaxCornerInsetPx)
-                    }
-                }
-
-                addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                    alignSimpleContent()
-                }
-                valueLine.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                    alignSimpleContent()
-                }
-                valueTextView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                    alignSimpleContent()
-                }
-                unitTextView?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                    alignSimpleContent()
-                }
-                iconView?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                    alignSimpleContent()
-                }
-
-                val showStats = stats != null && minMaxKey != null && shouldShowMinMax(minMaxKey)
-
-                val maxStat = TextView(this@MainActivity).apply {
-                    text = if (showStats) fmt(stats!!.max, "") else ""
-                    textSize = minMaxTextSize
-                    setTextColor(maxColor)
-                    gravity = Gravity.CENTER
-                    textAlignment = View.TEXT_ALIGNMENT_CENTER
-                    typeface = Typeface.DEFAULT_BOLD
-                    includeFontPadding = false
-                    visibility = if (showStats) View.VISIBLE else View.GONE
-                    setPadding(0, minMaxPaddingY, 0, minMaxPaddingY)
-                }
-                maxStatView = maxStat
-                addView(maxStat, FrameLayout.LayoutParams(
-                    minMaxWidthPx,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                ))
-
-                val minStat = TextView(this@MainActivity).apply {
-                    text = if (showStats) fmt(stats!!.min, "") else ""
-                    textSize = minMaxTextSize
-                    setTextColor(minColor)
-                    gravity = Gravity.CENTER
-                    textAlignment = View.TEXT_ALIGNMENT_CENTER
-                    typeface = Typeface.DEFAULT_BOLD
-                    includeFontPadding = false
-                    visibility = if (showStats) View.VISIBLE else View.GONE
-                    setPadding(0, minMaxPaddingY, 0, minMaxPaddingY)
-                }
-                minStatView = minStat
-                addView(minStat, FrameLayout.LayoutParams(
-                    minMaxWidthPx,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                ))
-
-                maxStat.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                    alignSimpleContent()
-                }
-                minStat.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                    alignSimpleContent()
-                }
-                post {
-                    alignSimpleContent()
-                }
-            }, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f,
-            ))
-        }
-
-
-    private fun baseCard(): LinearLayout =
-        ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(14, 12, 14, 12)
-            background = roundedBg(Color.rgb(16, 20, 30), 22f)
-        }
 
     private fun roundedBg(color: Int, radius: Float): GradientDrawable =
         GradientDrawable().apply {

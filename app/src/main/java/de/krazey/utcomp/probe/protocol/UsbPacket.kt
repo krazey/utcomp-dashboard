@@ -15,11 +15,12 @@ data class UsbPacket(
     val ack: Int = 0,
     val length: Int = 0,
     val split: Int = 0,
-    val data: List<Byte> = emptyList(),
+    val data: ByteArray = ByteArray(0),
     private val rawReport: ByteArray = ByteArray(REPORT_SIZE),
 ) {
     enum class DataSplit(val id: Int) {
         NONE(0), BUFFER_START(1), BUFFER_IN_PROGRESS(2), STOP(3);
+
         companion object {
             fun fromId(id: Int): DataSplit = entries.firstOrNull { it.id == id } ?: NONE
         }
@@ -65,7 +66,7 @@ data class UsbPacket(
                         ack = report[4].u8(),
                         length = length,
                         split = report[15].u8(),
-                        data = report.copyOfRange(16, 64).toList(),
+                        data = report.copyOfRange(16, REPORT_SIZE),
                         rawReport = report,
                     )
                 }
@@ -76,14 +77,22 @@ data class UsbPacket(
                 )
                 else -> UsbPacket(
                     cmd = cmd,
-                    data = report.copyOfRange(1, REPORT_SIZE).toList(),
+                    data = report.copyOfRange(1, REPORT_SIZE),
                     rawReport = report,
                 )
             }
         }
 
-        fun transferData(pid: Int, ack: Int, length: Int, split: Int, txData: List<Byte>): UsbPacket {
-            require(txData.size <= DATA_LENGTH) { "USB packet payload may not exceed $DATA_LENGTH bytes" }
+        fun transferData(
+            pid: Int,
+            ack: Int,
+            length: Int,
+            split: Int,
+            txData: ByteArray,
+        ): UsbPacket {
+            require(txData.size <= DATA_LENGTH) {
+                "USB packet payload may not exceed $DATA_LENGTH bytes"
+            }
             val report = ByteArray(REPORT_SIZE)
             report[0] = CMD_TRANSFER_DATA.toByte()
             report[1] = ((pid ushr 8) and 0xff).toByte()
@@ -95,7 +104,7 @@ data class UsbPacket(
             report[7] = ((length ushr 8) and 0xff).toByte()
             report[8] = (length and 0xff).toByte()
             report[15] = (split and 0xff).toByte()
-            txData.forEachIndexed { index, b -> report[16 + index] = b }
+            txData.copyInto(report, destinationOffset = 16)
             return parse(report)
         }
 
@@ -108,10 +117,14 @@ data class UsbPacket(
             return parse(report)
         }
 
-        fun command(cmd: Int, values: List<Byte> = emptyList()): UsbPacket {
+        fun command(cmd: Int, values: ByteArray = ByteArray(0)): UsbPacket {
             val report = ByteArray(REPORT_SIZE)
             report[0] = (cmd and 0xff).toByte()
-            values.take(REPORT_SIZE - 1).forEachIndexed { index, b -> report[index + 1] = b }
+            values.copyInto(
+                destination = report,
+                destinationOffset = 1,
+                endIndex = values.size.coerceAtMost(REPORT_SIZE - 1),
+            )
             return parse(report)
         }
     }

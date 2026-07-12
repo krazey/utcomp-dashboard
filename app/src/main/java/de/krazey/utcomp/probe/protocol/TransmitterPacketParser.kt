@@ -1,34 +1,37 @@
 package de.krazey.utcomp.probe.protocol
 
+import java.io.ByteArrayOutputStream
+
 /** Native Kotlin port of the USB path from RCOMP.Communication.TransmitterPacketParser. */
 object TransmitterPacketParser {
-    private val splitData = mutableListOf<Byte>()
+    private val splitData = ByteArrayOutputStream()
 
     var splitProgress: Int = -1
         private set
 
+    @Synchronized
     fun fromUsb(usb: UsbPacket): TransmitterPacket? {
         val ack = TransmitterConstants.Ack.fromId(usb.ack)
         val source = TransmitterConstants.Source.fromId(usb.direction)
 
         if (usb.split == UsbPacket.DataSplit.NONE.id) {
-            splitData.clear()
+            splitData.reset()
             splitProgress = -1
             return TransmitterPacket.transfer(usb.pid, usb.data, source, ack)
         }
 
         return when (UsbPacket.DataSplit.fromId(usb.split)) {
             UsbPacket.DataSplit.BUFFER_START -> {
-                splitData.clear()
-                splitData += usb.data
+                splitData.reset()
+                splitData.write(usb.data)
                 splitProgress = 0
                 null
             }
 
             UsbPacket.DataSplit.BUFFER_IN_PROGRESS -> {
-                splitData += usb.data
+                splitData.write(usb.data)
                 splitProgress = if (usb.length > 0) {
-                    (splitData.size * 100 / usb.length).coerceIn(0, 99)
+                    (splitData.size() * 100 / usb.length).coerceIn(0, 99)
                 } else {
                     0
                 }
@@ -36,21 +39,23 @@ object TransmitterPacketParser {
             }
 
             UsbPacket.DataSplit.STOP -> {
-                splitData += usb.data
+                splitData.write(usb.data)
                 splitProgress = 100
-                if (usb.length > 0 && splitData.size >= usb.length) {
-                    TransmitterPacket.transfer(usb.pid, splitData.take(usb.length), source, ack)
+                val completed = splitData.toByteArray()
+                val data = if (usb.length > 0 && completed.size >= usb.length) {
+                    completed.copyOf(usb.length)
                 } else {
-                    TransmitterPacket.transfer(usb.pid, splitData.toList(), source, ack)
+                    completed
                 }
+                TransmitterPacket.transfer(usb.pid, data, source, ack)
             }
 
             UsbPacket.DataSplit.NONE -> null
         }
     }
 
-    fun toUsbPackets(packet: TransmitterPacket): List<UsbPacket> {
-        return when (packet.cmd) {
+    fun toUsbPackets(packet: TransmitterPacket): List<UsbPacket> =
+        when (packet.cmd) {
             TransmitterConstants.Command.TRANSFER_DATA -> {
                 if (packet.dataLength <= UsbPacket.DATA_LENGTH) {
                     listOf(
@@ -75,10 +80,10 @@ object TransmitterPacketParser {
                 listOf(UsbPacket.command(packet.cmd.id, packet.data))
             }
         }
-    }
 
     private fun splitToUsbPackets(packet: TransmitterPacket): List<UsbPacket> {
-        val out = mutableListOf<UsbPacket>()
+        val packetCount = (packet.dataLength + UsbPacket.DATA_LENGTH - 1) / UsbPacket.DATA_LENGTH
+        val out = ArrayList<UsbPacket>(packetCount)
         var remaining = packet.dataLength
         var offset = 0
 
@@ -95,7 +100,7 @@ object TransmitterPacketParser {
                 ack = packet.ack.id,
                 length = packet.dataLength,
                 split = split,
-                txData = packet.data.subList(offset, offset + take),
+                txData = packet.data.copyOfRange(offset, offset + take),
             )
 
             offset += take

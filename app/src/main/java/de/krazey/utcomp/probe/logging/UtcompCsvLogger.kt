@@ -213,6 +213,7 @@ class UtcompCsvLogger(
     private fun runWriter(writer: BufferedWriter, target: String) {
         try {
             writer.use { out ->
+                val isoTimeFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US)
                 out.write(HEADER)
                 out.newLine()
 
@@ -226,6 +227,7 @@ class UtcompCsvLogger(
                         elapsedRealtimeNanos = sample.elapsedRealtimeNanos,
                         source = sample.source,
                         s = sample.snapshot,
+                        isoTimeFormat = isoTimeFormat,
                     ))
                     out.newLine()
                     writtenRows++
@@ -252,95 +254,119 @@ class UtcompCsvLogger(
         elapsedRealtimeNanos: Long,
         source: String,
         s: UtcompDataSnapshot,
-    ): String =
-        listOf(
-            seq.toString(),
-            wallTimeMs.toString(),
-            csv(isoTime(wallTimeMs)),
-            elapsedRealtimeMs.toString(),
-            elapsedRealtimeNanos.toString(),
-            csv(source),
-            csv(s.firmware),
-            s.utcompPro.toString(),
-            f(s.temperatureDsA),
-            f(s.temperatureDsB),
-            f(s.temperatureDsC),
-            f(s.temperatureDsD),
-            f(s.temperatureNtc1),
-            f(s.temperatureNtc2),
-            f(s.temperatureNtc3),
-            f(s.temperatureOutside),
-            f(s.temperatureInside),
-            f(s.temperatureEngine),
-            f(s.temperatureOil),
-            f(s.temperatureUser1),
-            f(s.temperatureUser2),
-            s.vssSpeed1s.toString(),
-            s.vssSpeed200ms.toString(),
-            f(s.distance),
-            f(s.distanceDt),
-            s.vssImp1s.toString(),
-            s.vssImp200ms.toString(),
-            s.vssImp180s.toString(),
-            s.vssImpPbTotal.toString(),
-            s.vssImpLpgTotal.toString(),
-            f(s.consumptionAvg),
-            f(s.consumptionCur),
-            f(s.fuelLeftPb),
-            f(s.fuelLeftLpg),
-            s.fuelTypeCurrent.toString(),
-            f(s.tripCplPb),
-            f(s.tripCplLpg),
-            f(s.tripCpkm),
-            f(s.injectionTime1s),
-            f(s.injectionTime180s),
-            f(s.injectionTimePbTotal),
-            f(s.injectionTimeLpgTotal),
-            f(s.adcInValCh0),
-            f(s.adcInValCh1),
-            f(s.adcInValCh2),
-            f(s.adcInValCh3),
-            f(s.adcInValCh4),
-            f(s.adcInValCh5),
-            f(s.adcInValCh6),
-            f(s.adcInValCh7),
-            s.vref.toString(),
-            s.loggerFlashAddrCur.toString(),
-            s.digOutUserState.toString(),
-            s.gearNo.toString(),
-            f(s.bar1),
-            f(s.bar2),
-            f(s.bar3),
-            f(s.afr1),
-            f(s.afr2),
-            s.egt1.toString(),
-            s.egt2.toString(),
-            s.egt3.toString(),
-            s.egt4.toString(),
-            s.egt5.toString(),
-            s.egt6.toString(),
-            s.rpm.toString(),
-            s.tripTravelTime1s.toString(),
-            s.ignitionTime1s.toString(),
-            f(s.tripCons),
-            f(s.tripDist),
-            f(s.tripQty),
-            f(s.tripCost),
-            f(s.tripVavg),
-            s.vmax.toString(),
-        ).joinToString(",")
+        isoTimeFormat: SimpleDateFormat,
+    ): String = buildString(768) {
+        csvField(seq)
+        csvField(wallTimeMs)
+        csvQuotedField(isoTimeFormat.format(Date(wallTimeMs)))
+        csvField(elapsedRealtimeMs)
+        csvField(elapsedRealtimeNanos)
+        csvQuotedField(source)
+        csvQuotedField(s.firmware)
+        csvField(s.utcompPro)
+        csvField(s.temperatureDsA)
+        csvField(s.temperatureDsB)
+        csvField(s.temperatureDsC)
+        csvField(s.temperatureDsD)
+        csvField(s.temperatureNtc1)
+        csvField(s.temperatureNtc2)
+        csvField(s.temperatureNtc3)
+        csvField(s.temperatureOutside)
+        csvField(s.temperatureInside)
+        csvField(s.temperatureEngine)
+        csvField(s.temperatureOil)
+        csvField(s.temperatureUser1)
+        csvField(s.temperatureUser2)
+        csvField(s.vssSpeed1s)
+        csvField(s.vssSpeed200ms)
+        csvField(s.distance)
+        csvField(s.distanceDt)
+        csvField(s.vssImp1s)
+        csvField(s.vssImp200ms)
+        csvField(s.vssImp180s)
+        csvField(s.vssImpPbTotal)
+        csvField(s.vssImpLpgTotal)
+        csvField(s.consumptionAvg)
+        csvField(s.consumptionCur)
+        csvField(s.fuelLeftPb)
+        csvField(s.fuelLeftLpg)
+        csvField(s.fuelTypeCurrent)
+        csvField(s.tripCplPb)
+        csvField(s.tripCplLpg)
+        csvField(s.tripCpkm)
+        csvField(s.injectionTime1s)
+        csvField(s.injectionTime180s)
+        csvField(s.injectionTimePbTotal)
+        csvField(s.injectionTimeLpgTotal)
+        csvField(s.adcInValCh0)
+        csvField(s.adcInValCh1)
+        csvField(s.adcInValCh2)
+        csvField(s.adcInValCh3)
+        csvField(s.adcInValCh4)
+        csvField(s.adcInValCh5)
+        csvField(s.adcInValCh6)
+        csvField(s.adcInValCh7)
+        csvField(s.vref)
+        csvField(s.loggerFlashAddrCur)
+        csvField(s.digOutUserState)
+        csvField(s.gearNo)
+        csvField(s.bar1)
+        csvField(s.bar2)
+        csvField(s.bar3)
+        csvField(s.afr1)
+        csvField(s.afr2)
+        csvField(s.egt1)
+        csvField(s.egt2)
+        csvField(s.egt3)
+        csvField(s.egt4)
+        csvField(s.egt5)
+        csvField(s.egt6)
+        csvField(s.rpm)
+        csvField(s.tripTravelTime1s)
+        csvField(s.ignitionTime1s)
+        csvField(s.tripCons)
+        csvField(s.tripDist)
+        csvField(s.tripQty)
+        csvField(s.tripCost)
+        csvField(s.tripVavg)
+        csvField(s.vmax)
+    }
+
+    private fun StringBuilder.csvSeparator() {
+        if (isNotEmpty()) append(',')
+    }
+
+    private fun StringBuilder.csvField(value: Long) {
+        csvSeparator()
+        append(value)
+    }
+
+    private fun StringBuilder.csvField(value: Int) {
+        csvSeparator()
+        append(value)
+    }
+
+    private fun StringBuilder.csvField(value: Float) {
+        csvSeparator()
+        append(value)
+    }
+
+    private fun StringBuilder.csvField(value: Boolean) {
+        csvSeparator()
+        append(value)
+    }
+
+    private fun StringBuilder.csvQuotedField(value: String) {
+        csvSeparator()
+        append('"')
+        value.forEach { character ->
+            if (character == '"') append('"')
+            append(character)
+        }
+        append('"')
+    }
 
     private fun makeFileName(): String =
         "utcomp_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.csv"
 
-    private fun isoTime(ms: Long): String =
-        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US).format(Date(ms))
-
-    private fun f(value: Float): String =
-        if (value.isNaN()) "NaN" else java.lang.Float.toString(value)
-
-    private fun csv(value: String): String {
-        val escaped = value.replace("\"", "\"\"")
-        return "\"$escaped\""
-    }
 }
