@@ -1,6 +1,6 @@
-package de.krazey.utcomp.probe.protocol
+package de.krazey.utcomp.dashboard.protocol
 
-import de.krazey.utcomp.probe.util.hex
+import de.krazey.utcomp.dashboard.util.hex
 
 /** Protocol-level packet, independent of USB/Bluetooth framing. */
 @Suppress("ArrayInDataClass", "unused")

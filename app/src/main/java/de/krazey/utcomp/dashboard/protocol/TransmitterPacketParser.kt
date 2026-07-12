@@ -1,4 +1,4 @@
-package de.krazey.utcomp.probe.protocol
+package de.krazey.utcomp.dashboard.protocol
 
 import java.io.ByteArrayOutputStream
 

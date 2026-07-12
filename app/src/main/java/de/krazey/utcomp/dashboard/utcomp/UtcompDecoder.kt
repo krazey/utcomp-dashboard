@@ -1,7 +1,7 @@
-package de.krazey.utcomp.probe.utcomp
+package de.krazey.utcomp.dashboard.utcomp
 
-import de.krazey.utcomp.probe.protocol.TransmitterConstants
-import de.krazey.utcomp.probe.protocol.TransmitterPacket
+import de.krazey.utcomp.dashboard.protocol.TransmitterConstants
+import de.krazey.utcomp.dashboard.protocol.TransmitterPacket
 
 /** Decodes live UTCOMP protocol packets into the shared dashboard snapshot. */
 object UtcompDecoder {

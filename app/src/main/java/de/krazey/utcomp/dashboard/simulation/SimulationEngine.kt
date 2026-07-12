@@ -1,6 +1,6 @@
-package de.krazey.utcomp.probe.simulation
+package de.krazey.utcomp.dashboard.simulation
 
-import de.krazey.utcomp.probe.utcomp.UtcompDataSnapshot
+import de.krazey.utcomp.dashboard.utcomp.UtcompDataSnapshot
 import kotlin.math.PI
 import kotlin.math.max
 import kotlin.math.sin

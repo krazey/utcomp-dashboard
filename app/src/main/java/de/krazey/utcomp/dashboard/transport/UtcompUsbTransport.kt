@@ -1,4 +1,4 @@
-package de.krazey.utcomp.probe.transport
+package de.krazey.utcomp.dashboard.transport
 
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -11,12 +11,12 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
-import de.krazey.utcomp.probe.protocol.TransmitterPacket
-import de.krazey.utcomp.probe.protocol.TransmitterPacketParser
-import de.krazey.utcomp.probe.protocol.UsbPacket
-import de.krazey.utcomp.probe.utcomp.UtcompDataSnapshot
-import de.krazey.utcomp.probe.utcomp.UtcompDecoder
-import de.krazey.utcomp.probe.util.hex
+import de.krazey.utcomp.dashboard.protocol.TransmitterPacket
+import de.krazey.utcomp.dashboard.protocol.TransmitterPacketParser
+import de.krazey.utcomp.dashboard.protocol.UsbPacket
+import de.krazey.utcomp.dashboard.utcomp.UtcompDataSnapshot
+import de.krazey.utcomp.dashboard.utcomp.UtcompDecoder
+import de.krazey.utcomp.dashboard.util.hex
 import java.io.Closeable
 import java.util.Arrays
 import java.util.concurrent.LinkedBlockingQueue

@@ -1,6 +1,6 @@
-package de.krazey.utcomp.probe.utcomp
+package de.krazey.utcomp.dashboard.utcomp
 
-import de.krazey.utcomp.probe.dashboard.DashboardSensor
+import de.krazey.utcomp.dashboard.dashboard.DashboardSensor
 
 /**
  * Runtime configuration read from UTCOMP settings packets.

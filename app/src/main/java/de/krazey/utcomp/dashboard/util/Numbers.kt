@@ -1,4 +1,4 @@
-package de.krazey.utcomp.probe.util
+package de.krazey.utcomp.dashboard.util
 
 import kotlin.math.abs
 import kotlin.math.roundToLong

@@ -1,4 +1,4 @@
-package de.krazey.utcomp.probe.utcomp
+package de.krazey.utcomp.dashboard.utcomp
 
 /**
  * User-specific UTCOMP sensor mapping for Mathias' car.

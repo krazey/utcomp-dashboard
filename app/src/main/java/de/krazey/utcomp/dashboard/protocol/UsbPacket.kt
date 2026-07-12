@@ -1,7 +1,7 @@
-package de.krazey.utcomp.probe.protocol
+package de.krazey.utcomp.dashboard.protocol
 
-import de.krazey.utcomp.probe.util.hex
-import de.krazey.utcomp.probe.util.u8
+import de.krazey.utcomp.dashboard.util.hex
+import de.krazey.utcomp.dashboard.util.u8
 
 /**
  * Native Kotlin port of the decompiled RCOMP.Communication.UsbPacket.

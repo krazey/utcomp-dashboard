@@ -1,10 +1,10 @@
-package de.krazey.utcomp.probe.logging
+package de.krazey.utcomp.dashboard.logging
 
 import android.content.Context
 import android.net.Uri
 import android.os.SystemClock
 import android.provider.DocumentsContract
-import de.krazey.utcomp.probe.utcomp.UtcompDataSnapshot
+import de.krazey.utcomp.dashboard.utcomp.UtcompDataSnapshot
 import java.io.BufferedWriter
 import java.io.Closeable
 import java.io.File

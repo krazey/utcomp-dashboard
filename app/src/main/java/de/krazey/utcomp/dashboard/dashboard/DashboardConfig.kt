@@ -1,6 +1,6 @@
-package de.krazey.utcomp.probe.dashboard
+package de.krazey.utcomp.dashboard.dashboard
 
-import de.krazey.utcomp.probe.utcomp.UtcompDataSnapshot
+import de.krazey.utcomp.dashboard.utcomp.UtcompDataSnapshot
 
 /**
  * Dashboard configuration model.

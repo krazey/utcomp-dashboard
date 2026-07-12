@@ -18,4 +18,4 @@ for item in SRC.iterdir():
         shutil.copytree(item, target)
     else:
         shutil.copy2(item, target)
-print(f"Copied UTCOMP Kotlin probe project files to {DST}")
+print(f"Copied UTCOMP Dashboard project files to {DST}")

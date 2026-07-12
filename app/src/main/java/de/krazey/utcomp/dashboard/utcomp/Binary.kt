@@ -1,4 +1,4 @@
-package de.krazey.utcomp.probe.utcomp
+package de.krazey.utcomp.dashboard.utcomp
 
 import kotlin.math.pow
 import kotlin.math.roundToInt

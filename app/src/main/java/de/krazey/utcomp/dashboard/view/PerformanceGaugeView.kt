@@ -1,4 +1,4 @@
-package de.krazey.utcomp.probe.view
+package de.krazey.utcomp.dashboard.view
 
 import android.content.Context
 import android.graphics.Canvas

@@ -14,5 +14,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "UtcompKotlinProbe"
+rootProject.name = "UtcompDashboard"
 include(":app")

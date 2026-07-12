@@ -1,4 +1,4 @@
-package de.krazey.utcomp.probe.utcomp
+package de.krazey.utcomp.dashboard.utcomp
 
 data class UtcompDataSnapshot(
     var firmware: String = "?",
