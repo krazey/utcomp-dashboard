@@ -5,12 +5,12 @@ import android.content.Context
 import android.os.Build
 import android.os.SystemClock
 import android.content.SharedPreferences
-import android.widget.FrameLayout
 import android.text.style.RelativeSizeSpan
 import android.text.Spanned
 import android.text.SpannableString
 import de.krazey.utcomp.dashboard.dashboard.DashboardConfigJson
 import de.krazey.utcomp.dashboard.dashboard.DashboardEditorController
+import de.krazey.utcomp.dashboard.dashboard.DashboardPageEditorController
 import de.krazey.utcomp.dashboard.dashboard.DefaultDashboardPages
 import de.krazey.utcomp.dashboard.dashboard.DashboardSensor
 import de.krazey.utcomp.dashboard.dashboard.DashboardPageConfig
@@ -28,16 +28,15 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.widget.Button
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import de.krazey.utcomp.dashboard.protocol.TransmitterConstants
 import de.krazey.utcomp.dashboard.protocol.TransmitterPacket
 import de.krazey.utcomp.dashboard.simulation.SimulationEngine
@@ -46,16 +45,21 @@ import de.krazey.utcomp.dashboard.utcomp.UtcompDataSnapshot
 import de.krazey.utcomp.dashboard.utcomp.UtcompDecoder
 import de.krazey.utcomp.dashboard.utcomp.UtcompDeviceConfig
 import de.krazey.utcomp.dashboard.utcomp.pretty
-import de.krazey.utcomp.dashboard.view.RalliartBoostNeedleView
-import de.krazey.utcomp.dashboard.view.RalliartAfrDebugBarView
+import de.krazey.utcomp.dashboard.dashboard.render.DashboardAlarmLevel
+import de.krazey.utcomp.dashboard.dashboard.render.DashboardMergeVisualState
+import de.krazey.utcomp.dashboard.dashboard.render.DashboardMinMax
+import de.krazey.utcomp.dashboard.dashboard.render.DashboardRenderHost
+import de.krazey.utcomp.dashboard.dashboard.render.RalliartDashboardRenderer
+import de.krazey.utcomp.dashboard.dashboard.render.SimpleDashboardRenderer
 import de.krazey.utcomp.dashboard.util.fixed
+import de.krazey.utcomp.dashboard.view.DashboardSwipeScrollView
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.LinkedHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
-class MainActivity : Activity() {
+class MainActivity : Activity(), DashboardRenderHost {
     private class ClickableLinearLayout(context: Context) : LinearLayout(context) {
         override fun performClick(): Boolean {
             super.performClick()
@@ -73,24 +77,6 @@ class MainActivity : Activity() {
         private const val DASHBOARD_DOUBLE_TAP_MS = 320L
         private const val DASHBOARD_SWIPE_CLICK_SUPPRESS_MS = 280L
 
-        private const val RALLIART_CANVAS_WIDTH = 1024
-        private const val RALLIART_CANVAS_HEIGHT = 600
-        private val RALLIART_HEADER_STATUS_BOX = intArrayOf(670, 18, 332, 24)
-        private val RALLIART_BOOST_HIT_BOX = intArrayOf(32, 70, 472, 472)
-        private val RALLIART_BOOST_VALUE_BOX = intArrayOf(120, 266, 310, 92)
-        private val RALLIART_BOOST_NEEDLE_BOX = intArrayOf(49, 87, 452, 452)
-        private val RALLIART_BOOST_MIN_MAX_BOX = intArrayOf(334, 392, 68, 58)
-        private val RALLIART_AFR_HIT_BOX = intArrayOf(538, 76, 494, 250)
-        private val RALLIART_AFR_VALUE_BOX = intArrayOf(652, 138, 236, 82)
-        private val RALLIART_AFR_DEBUG_GUIDE_BOX = intArrayOf(571, 240, 395, 52)
-        private val RALLIART_AFR_LIVE_BAR_BOX = intArrayOf(571, 254, 395, 18)
-        private val RALLIART_OIL_PRESSURE_HIT_BOX = intArrayOf(548, 325, 214, 197)
-        private val RALLIART_OIL_PRESSURE_VALUE_BOX = intArrayOf(580, 392, 148, 74)
-        private val RALLIART_OIL_PRESSURE_MIN_MAX_BOX = intArrayOf(700, 468, 56, 46)
-        private val RALLIART_OIL_TEMP_HIT_BOX = intArrayOf(774, 325, 214, 197)
-        private val RALLIART_OIL_TEMP_VALUE_BOX = intArrayOf(800, 392, 162, 76)
-        private val RALLIART_OIL_TEMP_MIN_MAX_BOX = intArrayOf(926, 468, 56, 46)
-
         const val TAG = "UTCOMPDashboard"
     }
 
@@ -103,17 +89,13 @@ class MainActivity : Activity() {
     }
 
     private enum class UiMode { FANCY, SIMPLE, DEBUG }
-    private enum class Page(
-        val title: String,
-        val rows: Int,
-        val columns: Int,
-    ) {
-        RACE_2X2("Race 2×2", 2, 2),
-        STRIP_1X4("Strip 1×4", 4, 1),
-        FULL_2X4("Full 2×4", 4, 2),
-    }
-
     private enum class MinMaxMode { ON_TAP, ALWAYS }
+
+    private data class MergeSession(
+        val pageId: String,
+        val sourceBoxIndex: Int,
+        val targetCells: Set<Int>,
+    )
 
     private lateinit var usb: UtcompUsbTransport
     private lateinit var statusText: TextView
@@ -125,6 +107,9 @@ class MainActivity : Activity() {
     private lateinit var csvLogger: UtcompCsvLogger
     private lateinit var csvLogController: CsvLogController
     private lateinit var dashboardEditorController: DashboardEditorController
+    private lateinit var dashboardPageEditorController: DashboardPageEditorController
+    private lateinit var ralliartRenderer: RalliartDashboardRenderer
+    private lateinit var simpleRenderer: SimpleDashboardRenderer
     private var dataLogTreeUri: Uri? = null
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
@@ -201,7 +186,8 @@ class MainActivity : Activity() {
 
     private var simModeButton: Button? = null
     private var uiMode = UiMode.FANCY
-    private var page = Page.RACE_2X2
+    private var lastRenderedUiMode: UiMode? = null
+    private var currentPageIndex = 0
     private var connected = false
     private var autoRefresh = false
     private var simTick = 0L
@@ -225,113 +211,14 @@ class MainActivity : Activity() {
     }
 
     private var dashboardPages = DefaultDashboardPages.all
-    private var swipeStartX = 0f
-    private var swipeStartY = 0f
+    private var mergeSession: MergeSession? = null
     private var showSourceLine = true
-    private val minMaxBySensor = LinkedHashMap<String, MinMax>()
+    private val minMaxBySensor = LinkedHashMap<String, DashboardMinMax>()
     private val smoothedValuesByBox = LinkedHashMap<Int, Float>()
     private var minMaxDisplayMode = MinMaxMode.ON_TAP
     private var activeMinMaxCard: String? = null
     private var minMaxHideRunnable: Runnable? = null
 
-    private data class MinMax(
-        var min: Float = Float.NaN,
-        var max: Float = Float.NaN,
-    )
-
-    private data class RalliartLayoutKey(
-        val page: Page,
-        val config: DashboardPageConfig,
-    )
-
-    private data class RalliartMinMaxViews(
-        val container: LinearLayout,
-        val maxText: TextView,
-        val minText: TextView,
-    )
-
-    private class RalliartDashboardBinding(
-        val key: RalliartLayoutKey,
-        val root: FrameLayout,
-        val headerText: TextView,
-        val boostValueText: TextView,
-        val boostNeedle: RalliartBoostNeedleView,
-        val boostMinMax: RalliartMinMaxViews?,
-        val afrValueText: TextView,
-        val afrOverlay: FrameLayout,
-        val afrTargetBand: View,
-        val afrMarker: View,
-        val oilPressureAlarmFill: View,
-        val oilPressureValueText: TextView,
-        val oilPressureMinMax: RalliartMinMaxViews?,
-        val oilTempAlarmFill: View,
-        val oilTempValueText: TextView,
-        val oilTempMinMax: RalliartMinMaxViews?,
-    ) {
-        var afr = Float.NaN
-        var afrTargetMin = 12.8f
-        var afrTargetMax = 14.2f
-
-        fun updateAfrOverlay() {
-            val total = afrOverlay.width
-            if (total <= 0) return
-
-            val barMin = 10.0f
-            val barMax = 20.0f
-            val startFraction = ((afrTargetMin - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
-            val endFraction = ((afrTargetMax - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
-            val valueFraction = if (afr.isFinite()) {
-                ((afr - barMin) / (barMax - barMin)).coerceIn(0f, 1f)
-            } else {
-                0f
-            }
-
-            val bandStart = (total * startFraction).toInt()
-            val bandEnd = (total * endFraction).toInt()
-            val bandWidth = (bandEnd - bandStart).coerceAtLeast(6)
-            val bandParams = afrTargetBand.layoutParams as FrameLayout.LayoutParams
-            if (bandParams.width != bandWidth || bandParams.leftMargin != bandStart) {
-                bandParams.width = bandWidth
-                bandParams.leftMargin = bandStart
-                afrTargetBand.layoutParams = bandParams
-            }
-
-            val markerLeft = ((total * valueFraction).toInt() - 4)
-                .coerceIn(0, (total - 8).coerceAtLeast(0))
-            val markerParams = afrMarker.layoutParams as FrameLayout.LayoutParams
-            if (markerParams.leftMargin != markerLeft) {
-                markerParams.leftMargin = markerLeft
-                afrMarker.layoutParams = markerParams
-            }
-        }
-    }
-
-    private var ralliartBinding: RalliartDashboardBinding? = null
-
-    private data class SimpleLayoutKey(
-        val page: Page,
-        val config: DashboardPageConfig,
-    )
-
-    private data class SimpleCardBinding(
-        val boxIndex: Int,
-        val box: DashboardBoxConfig,
-        val card: LinearLayout,
-        val background: GradientDrawable,
-        val valueText: TextView,
-        val unitText: TextView?,
-        val maxText: TextView?,
-        val minText: TextView?,
-        val minMaxKey: String?,
-    )
-
-    private data class SimpleDashboardBinding(
-        val key: SimpleLayoutKey,
-        val root: LinearLayout,
-        val cards: List<SimpleCardBinding>,
-    )
-
-    private var simpleBinding: SimpleDashboardBinding? = null
     private var debugTextView: TextView? = null
 
     private val simRunnable = object : Runnable {
@@ -380,6 +267,16 @@ class MainActivity : Activity() {
             onSmoothingChanged = { boxIndex, box ->
                 smoothedValuesByBox.remove(smoothedValueKey(boxIndex, box))
             },
+            onEditPageGrid = {
+                dashboardPageEditorController.showCurrentPageGridEditor()
+            },
+            onStartMerge = ::startMerge,
+        )
+        dashboardPageEditorController = DashboardPageEditorController(
+            context = this,
+            pages = { dashboardPages },
+            currentPageIndex = { currentPageIndex },
+            onPagesChanged = ::replaceDashboardPages,
         )
         usb = UtcompUsbTransport(
             context = this,
@@ -388,6 +285,8 @@ class MainActivity : Activity() {
             onDecodedSnapshot = ::onDecodedSnapshot,
         )
         buildUi()
+        ralliartRenderer = RalliartDashboardRenderer(this, dashboardRoot, this)
+        simpleRenderer = SimpleDashboardRenderer(this, dashboardRoot, this)
         usb.register()
         startUsbAutoConnect()
 
@@ -546,7 +445,7 @@ class MainActivity : Activity() {
 
         val row2 = ClickableLinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         row2.addView(button("Style") { cycleUiMode() })
-        row2.addView(button("Page") { cyclePage() })
+        row2.addView(button("Pages / Grid") { dashboardPageEditorController.showPageManager() })
         row2.addView(button("REQ live") { requestLiveData(logEach = true) })
         controls.addView(row2)
 
@@ -577,10 +476,20 @@ class MainActivity : Activity() {
         }
         root.addView(controlsPanel, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
-        val dashScroll = ScrollView(this).apply {
+        val dashScroll = DashboardSwipeScrollView(this).apply {
             isFillViewport = true
-            setOnTouchListener { _, event ->
-                handlePageSwipe(event)
+            isPageSwipeEnabled = {
+                mergeSession == null && dashboardPages.size > 1 && uiMode != UiMode.DEBUG
+            }
+            onTouchStateChanged = { active ->
+                if (active) markDashboardTouchActive() else markDashboardTouchFinished()
+            }
+            onHorizontalGestureStarted = {
+                cancelPendingDashboardSingleTap()
+            }
+            onPageSwipe = { pageDelta ->
+                suppressDashboardClicksBriefly()
+                if (pageDelta > 0) nextPage() else previousPage()
             }
             dashboardRoot = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
@@ -675,41 +584,72 @@ class MainActivity : Activity() {
             enumValues<UiMode>().firstOrNull { it.name == saved }?.let { uiMode = it }
         }
 
-        prefs.getString("page", null)?.let { saved ->
-            enumValues<Page>().firstOrNull { it.name == saved }?.let { page = it }
-        }
-
         showSourceLine = prefs.getBoolean("showSourceLine", showSourceLine)
         dataLogTreeUri = prefs.getString("dataLogTreeUri", null)?.let { Uri.parse(it) }
 
         DashboardConfigJson.decode(prefs.getString("dashboardPagesJson", null))?.let { savedPages ->
             if (savedPages.isNotEmpty()) {
-                dashboardPages = savedPages
+                dashboardPages = savedPages.map(DashboardPageConfig::normalized)
             }
         }
+
+        val savedPageId = prefs.getString("pageId", null)
+        currentPageIndex = dashboardPages.indexOfFirst { it.id == savedPageId }
+            .takeIf { it >= 0 }
+            ?: when (prefs.getString("page", null)) {
+                "STRIP_1X4" -> 1
+                "FULL_2X4" -> 2
+                else -> 0
+            }
+        currentPageIndex = currentPageIndex.coerceIn(dashboardPages.indices)
     }
 
     private fun saveDashboardPrefs() {
+        saveDashboardPrefs(includePageConfig = true)
+    }
+
+    private fun saveDashboardViewPrefs() {
+        saveDashboardPrefs(includePageConfig = false)
+    }
+
+    private fun saveDashboardPrefs(includePageConfig: Boolean) {
         runCatching {
-            dashboardPrefs.edit()
-                .putString("uiMode", uiMode.name)
-                .putString("page", page.name)
-                .putBoolean("showSourceLine", showSourceLine)
-                .putString("dataLogTreeUri", dataLogTreeUri?.toString())
-                .putString("dashboardPagesJson", DashboardConfigJson.encode(dashboardPages))
-                .apply()
+            dashboardPrefs.edit().apply {
+                putString("uiMode", uiMode.name)
+                putString("pageId", currentPageConfig().id)
+                putBoolean("showSourceLine", showSourceLine)
+                putString("dataLogTreeUri", dataLogTreeUri?.toString())
+                if (includePageConfig) {
+                    putString("dashboardPagesJson", DashboardConfigJson.encode(dashboardPages))
+                }
+            }.apply()
         }.onFailure { error ->
             appendLog("Could not save dashboard settings: ${error.message}")
         }
     }
 
     private fun currentPageConfig(): DashboardPageConfig =
-        dashboardPages.getOrNull(page.ordinal) ?: dashboardPages.first()
+        dashboardPages.getOrNull(currentPageIndex) ?: dashboardPages.first()
 
     private fun updateCurrentPage(transform: (DashboardPageConfig) -> DashboardPageConfig) {
         dashboardPages = dashboardPages.mapIndexed { index, pageConfig ->
-            if (index == page.ordinal) transform(pageConfig) else pageConfig
+            if (index == currentPageIndex) transform(pageConfig).normalized() else pageConfig
         }
+        saveDashboardPrefs()
+        renderDashboard()
+    }
+
+    private fun replaceDashboardPages(
+        pages: List<DashboardPageConfig>,
+        selectedIndex: Int,
+    ) {
+        mergeSession = null
+        dashboardPages = pages.ifEmpty { DefaultDashboardPages.all }
+            .map(DashboardPageConfig::normalized)
+        currentPageIndex = selectedIndex.coerceIn(dashboardPages.indices)
+        smoothedValuesByBox.clear()
+        ralliartRenderer.clear()
+        simpleRenderer.clear()
         saveDashboardPrefs()
         renderDashboard()
     }
@@ -721,6 +661,72 @@ class MainActivity : Activity() {
             }
             pageConfig.copy(boxes = updatedBoxes)
         }
+    }
+
+    private fun startMerge(boxIndex: Int) {
+        val page = currentPageConfig().normalized()
+        val targetCells = page.mergeTargetCells(boxIndex)
+        if (targetCells.isEmpty()) {
+            Toast.makeText(this, "No rectangular adjacent cell is available", Toast.LENGTH_SHORT)
+                .show()
+            return
+        }
+
+        editMode = true
+        if (uiMode != UiMode.SIMPLE) {
+            uiMode = UiMode.SIMPLE
+            saveDashboardViewPrefs()
+        }
+        mergeSession = MergeSession(page.id, boxIndex, targetCells)
+        simpleRenderer.clear()
+        updateEditModeButton()
+        updateTopBarChromeVisibility()
+        appendLog("Merge started for ${page.boxes[boxIndex].sensor.label}")
+        Toast.makeText(
+            this,
+            "Select a green cell. Tap the blue source or CANCEL to stop.",
+            Toast.LENGTH_LONG,
+        ).show()
+        renderDashboard()
+    }
+
+    private fun cancelMerge(render: Boolean = true) {
+        if (mergeSession == null) return
+        mergeSession = null
+        simpleRenderer.clear()
+        updateEditModeButton()
+        updateTopBarChromeVisibility()
+        appendLog("Merge cancelled")
+        if (render) renderDashboard()
+    }
+
+    private fun selectMergeBox(boxIndex: Int) {
+        val session = mergeSession ?: return
+        if (boxIndex == session.sourceBoxIndex) {
+            cancelMerge()
+            return
+        }
+
+        val page = currentPageConfig().normalized()
+        if (session.pageId != page.id) {
+            cancelMerge()
+            return
+        }
+        val box = page.boxes.getOrNull(boxIndex) ?: return
+        val targetCell = buildList {
+            for (row in box.row until box.row + box.rowSpan) {
+                for (column in box.column until box.column + box.columnSpan) {
+                    add(row * page.columns + column)
+                }
+            }
+        }.firstOrNull(session.targetCells::contains)
+
+        if (targetCell == null) {
+            Toast.makeText(this, "Select one of the highlighted green cells", Toast.LENGTH_SHORT)
+                .show()
+            return
+        }
+        selectMergeCell(targetCell / page.columns, targetCell % page.columns)
     }
 
     private fun startUsbAutoConnect() {
@@ -813,9 +819,18 @@ class MainActivity : Activity() {
         }
 
     private fun editModeButtonText(): String =
-        if (editMode) "✓ DONE" else "✎ EDIT"
+        when {
+            mergeSession != null -> "✕ CANCEL"
+            editMode -> "✓ DONE"
+            else -> "✎ EDIT"
+        }
 
     private fun toggleEditMode() {
+        if (mergeSession != null) {
+            cancelMerge()
+            return
+        }
+
         editMode = !editMode
         if (editMode) {
             revealTopBarChrome(autoHide = false)
@@ -852,7 +867,11 @@ class MainActivity : Activity() {
         }
 
     private fun topBarHintText(): String =
-        "Tap: min/max · Quick double tap: menu · Long press: menu"
+        if (mergeSession != null) {
+            "MERGE: tap a green cell · tap the blue source or CANCEL to stop"
+        } else {
+            "Tap: min/max · Quick double tap: menu · Long press: menu"
+        }
 
     private fun View.setTooltipCompat(text: CharSequence?) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -863,10 +882,10 @@ class MainActivity : Activity() {
     private fun updateEditModeButton() {
         editModeButton?.apply {
             text = editModeButtonText()
-            contentDescription = if (editMode) {
-                "Finish editing dashboard boxes"
-            } else {
-                "Edit dashboard boxes"
+            contentDescription = when {
+                mergeSession != null -> "Cancel dashboard box merge"
+                editMode -> "Finish editing dashboard boxes"
+                else -> "Edit dashboard boxes"
             }
             setTooltipCompat(contentDescription)
         }
@@ -881,7 +900,11 @@ class MainActivity : Activity() {
             setTooltipCompat(contentDescription)
         }
         editModeButton?.apply {
-            contentDescription = if (editMode) "Finish editing dashboard boxes" else "Edit dashboard boxes"
+            contentDescription = when {
+                mergeSession != null -> "Cancel dashboard box merge"
+                editMode -> "Finish editing dashboard boxes"
+                else -> "Edit dashboard boxes"
+            }
             setTooltipCompat(contentDescription)
         }
         gearButton?.apply {
@@ -959,7 +982,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun openBoxEditorOnce(boxIndex: Int) {
+    private fun openBoxEditorOnce(boxIndex: Int, editorTitle: String) {
         val now = SystemClock.uptimeMillis()
         if (now - lastBoxEditorLaunchMs < 700L) {
             return
@@ -968,17 +991,29 @@ class MainActivity : Activity() {
         lastBoxEditorLaunchMs = now
         cancelPendingDashboardSingleTap()
         lastDashboardBoxTapMs = 0L
-        dashboardEditorController.showBoxEditor(boxIndex)
+        dashboardEditorController.showBoxEditor(boxIndex, editorTitle)
     }
 
 
-    private fun attachDashboardBoxActions(card: View, boxIndex: Int, minMaxKey: String?) {
+    override fun attachBoxActions(
+        view: View,
+        boxIndex: Int,
+        minMaxKey: String?,
+        editorTitle: String,
+    ) {
+        val card = view
         card.isClickable = true
         card.setOnClickListener {
             if (dashboardClickSuppressed()) return@setOnClickListener
 
             if (editMode) {
-                openBoxEditorOnce(boxIndex)
+                if (boxIndex >= 0) {
+                    if (mergeSession != null) {
+                        selectMergeBox(boxIndex)
+                    } else {
+                        openBoxEditorOnce(boxIndex, editorTitle)
+                    }
+                }
             } else {
                 handleDashboardBoxTapForChrome(minMaxKey, "box:$boxIndex")
             }
@@ -987,7 +1022,13 @@ class MainActivity : Activity() {
             cancelPendingDashboardSingleTap()
             lastDashboardBoxTapMs = 0L
             if (editMode) {
-                openBoxEditorOnce(boxIndex)
+                if (boxIndex >= 0) {
+                    if (mergeSession != null) {
+                        selectMergeBox(boxIndex)
+                    } else {
+                        openBoxEditorOnce(boxIndex, editorTitle)
+                    }
+                }
             } else {
                 revealTopBarChrome(autoHide = true)
             }
@@ -1036,59 +1077,33 @@ class MainActivity : Activity() {
     }
 
     private fun cycleUiMode() {
+        cancelMerge(render = false)
         uiMode = when (uiMode) {
             UiMode.FANCY -> UiMode.SIMPLE
             UiMode.SIMPLE -> UiMode.DEBUG
             UiMode.DEBUG -> UiMode.FANCY
         }
-        saveDashboardPrefs()
+        saveDashboardViewPrefs()
         renderDashboard()
     }
 
-    private fun cyclePage() {
-        nextPage()
-    }
-
     private fun nextPage() {
-        val pages = Page.entries
-        page = pages[(page.ordinal + 1) % pages.size]
+        if (dashboardPages.isEmpty()) return
+        cancelMerge(render = false)
+        currentPageIndex = (currentPageIndex + 1) % dashboardPages.size
+        saveDashboardViewPrefs()
         renderDashboard()
     }
 
     private fun previousPage() {
-        val pages = Page.entries
-        page = pages[(page.ordinal + pages.size - 1) % pages.size]
+        if (dashboardPages.isEmpty()) return
+        cancelMerge(render = false)
+        currentPageIndex =
+            (currentPageIndex + dashboardPages.size - 1) % dashboardPages.size
+        saveDashboardViewPrefs()
         renderDashboard()
     }
 
-    private fun handlePageSwipe(event: MotionEvent): Boolean {
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                swipeStartX = event.x
-                swipeStartY = event.y
-                return false
-            }
-
-            MotionEvent.ACTION_UP -> {
-                val dx = event.x - swipeStartX
-                val dy = event.y - swipeStartY
-                val absDx = kotlin.math.abs(dx)
-                val absDy = kotlin.math.abs(dy)
-
-                if (absDx >= 90f && absDx > absDy * 1.6f) {
-                    suppressDashboardClicksBriefly()
-                    if (dx < 0f) {
-                        nextPage()
-                    } else {
-                        previousPage()
-                    }
-                    return true
-                }
-            }
-        }
-
-        return false
-    }
 
 
     private fun onUsbConnectionChanged(isConnected: Boolean) {
@@ -1348,7 +1363,7 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         val renderSnapshot = simRenderSnapshot ?: s
 
         statusText.text = buildString {
-            append("$page")
+            append(currentPageConfig().title)
             append("  •  $uiMode")
             append("  •  $dataMode")
             append("  •  USB ${if (connected) "OK" else "—"}")
@@ -1357,25 +1372,30 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             if (s.firmware != "?") append("  •  fw ${s.firmware}")
         }
 
+        prepareDashboardMode()
         when (uiMode) {
-            UiMode.FANCY -> {
-                simpleBinding = null
-                debugTextView = null
-                renderFancy(renderSnapshot)
-            }
-            UiMode.SIMPLE -> {
-                debugTextView = null
-                renderSimple(renderSnapshot)
-            }
-            UiMode.DEBUG -> {
-                ralliartBinding = null
-                simpleBinding = null
-                renderDebug(renderSnapshot)
-            }
+            UiMode.FANCY -> renderFancy(renderSnapshot)
+            UiMode.SIMPLE -> renderSimple(renderSnapshot)
+            UiMode.DEBUG -> renderDebug(renderSnapshot)
         }
     }
 
-    private fun displayValueForBox(box: DashboardBoxConfig, boxIndex: Int, rawValue: Float?): Float? {
+    private fun prepareDashboardMode() {
+        if (lastRenderedUiMode == uiMode) return
+
+        dashboardRoot.removeAllViews()
+        dashboardRoot.minimumWidth = 0
+        dashboardRoot.minimumHeight = 0
+        dashboardRoot.setPadding(0, 0, 0, 0)
+        debugTextView = null
+        lastRenderedUiMode = uiMode
+    }
+
+    override fun displayValueForBox(
+        box: DashboardBoxConfig,
+        boxIndex: Int,
+        rawValue: Float?,
+    ): Float? {
         val value = rawValue ?: return null
         if (value.isNaN() || value.isInfinite()) return value
 
@@ -1397,12 +1417,12 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
     }
 
     private fun smoothedValueKey(boxIndex: Int, box: DashboardBoxConfig): Int =
-        (page.ordinal shl 16) or (boxIndex shl 8) or box.sensor.ordinal
+        ((currentPageConfig().id.hashCode() * 31) + boxIndex) * 31 + box.sensor.ordinal
 
-    private fun formatBoxValue(value: Float?, decimals: Int): String =
+    override fun formatBoxValue(value: Float?, decimals: Int): String =
         value?.fixed(decimals.coerceIn(0, 2)) ?: "--"
 
-    private fun styledValueText(valueText: String, split: Boolean): CharSequence {
+    override fun styledValueText(valueText: String, split: Boolean): CharSequence {
         if (!split) return valueText
 
         val dot = valueText.indexOf('.')
@@ -1417,22 +1437,16 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
     private fun Int.floorMod(mod: Int): Int =
         ((this % mod) + mod) % mod
 
-    private enum class BoxAlarmLevel {
-        NORMAL,
-        WARNING,
-        CRITICAL,
-    }
-
-    private fun alarmLevelFor(
+    override fun alarmLevelFor(
         box: DashboardBoxConfig,
         rawValue: Float?,
-        snapshot: UtcompDataSnapshot? = null,
-    ): BoxAlarmLevel {
-        val value = rawValue ?: return BoxAlarmLevel.NORMAL
-        if (value.isNaN() || value.isInfinite()) return BoxAlarmLevel.NORMAL
+        snapshot: UtcompDataSnapshot?,
+    ): DashboardAlarmLevel {
+        val value = rawValue ?: return DashboardAlarmLevel.NORMAL
+        if (value.isNaN() || value.isInfinite()) return DashboardAlarmLevel.NORMAL
 
         oilPressureBoostAlarmLevel(box, value, snapshot).let { oilLevel ->
-            if (oilLevel != BoxAlarmLevel.NORMAL) return oilLevel
+            if (oilLevel != DashboardAlarmLevel.NORMAL) return oilLevel
         }
 
         val skipGenericLowAlarm = box.sensor == DashboardSensor.OIL_PRESSURE && box.oilPressureBoostAlarm
@@ -1441,15 +1455,15 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             (!skipGenericLowAlarm && thresholdHitLow(value, box.criticalLow)) ||
             thresholdHitHigh(value, box.criticalHigh)
         ) {
-            return BoxAlarmLevel.CRITICAL
+            return DashboardAlarmLevel.CRITICAL
         }
         if (
             (!skipGenericLowAlarm && thresholdHitLow(value, box.warningLow)) ||
             thresholdHitHigh(value, box.warningHigh)
         ) {
-            return BoxAlarmLevel.WARNING
+            return DashboardAlarmLevel.WARNING
         }
-        return BoxAlarmLevel.NORMAL
+        return DashboardAlarmLevel.NORMAL
     }
 
 
@@ -1457,25 +1471,25 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         box: DashboardBoxConfig,
         oilPressureBar: Float,
         snapshot: UtcompDataSnapshot?,
-    ): BoxAlarmLevel {
-        if (box.sensor != DashboardSensor.OIL_PRESSURE) return BoxAlarmLevel.NORMAL
-        if (!box.oilPressureBoostAlarm) return BoxAlarmLevel.NORMAL
-        if (oilPressureBar.isNaN() || oilPressureBar.isInfinite()) return BoxAlarmLevel.NORMAL
+    ): DashboardAlarmLevel {
+        if (box.sensor != DashboardSensor.OIL_PRESSURE) return DashboardAlarmLevel.NORMAL
+        if (!box.oilPressureBoostAlarm) return DashboardAlarmLevel.NORMAL
+        if (oilPressureBar.isNaN() || oilPressureBar.isInfinite()) return DashboardAlarmLevel.NORMAL
 
-        val boostBar = snapshot?.bar1 ?: return BoxAlarmLevel.NORMAL
-        if (boostBar.isNaN() || boostBar.isInfinite()) return BoxAlarmLevel.NORMAL
+        val boostBar = snapshot?.bar1 ?: return DashboardAlarmLevel.NORMAL
+        if (boostBar.isNaN() || boostBar.isInfinite()) return DashboardAlarmLevel.NORMAL
         if (box.oilPressureBoostArmBar.isNaN() || boostBar < box.oilPressureBoostArmBar) {
-            return BoxAlarmLevel.NORMAL
+            return DashboardAlarmLevel.NORMAL
         }
 
         if (!box.criticalLow.isNaN() && oilPressureBar <= box.criticalLow) {
-            return BoxAlarmLevel.CRITICAL
+            return DashboardAlarmLevel.CRITICAL
         }
         if (!box.warningLow.isNaN() && oilPressureBar <= box.warningLow) {
-            return BoxAlarmLevel.WARNING
+            return DashboardAlarmLevel.WARNING
         }
 
-        return BoxAlarmLevel.NORMAL
+        return DashboardAlarmLevel.NORMAL
     }
 
 
@@ -1485,32 +1499,38 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
     private fun thresholdHitLow(value: Float, threshold: Float): Boolean =
         !threshold.isNaN() && value <= threshold
 
-    private fun boxBackgroundColor(box: DashboardBoxConfig, alarmLevel: BoxAlarmLevel): Int =
+    override fun boxBackgroundColor(
+        box: DashboardBoxConfig,
+        alarmLevel: DashboardAlarmLevel,
+    ): Int =
         if (!box.alarmColorsBackground) {
             box.backgroundColor
         } else {
             when (alarmLevel) {
-                BoxAlarmLevel.CRITICAL -> box.criticalColor
-                BoxAlarmLevel.WARNING -> box.warningColor
-                BoxAlarmLevel.NORMAL -> box.backgroundColor
+                DashboardAlarmLevel.CRITICAL -> box.criticalColor
+                DashboardAlarmLevel.WARNING -> box.warningColor
+                DashboardAlarmLevel.NORMAL -> box.backgroundColor
             }
         }
 
-    private fun boxValueColor(box: DashboardBoxConfig, alarmLevel: BoxAlarmLevel): Int =
+    override fun boxValueColor(
+        box: DashboardBoxConfig,
+        alarmLevel: DashboardAlarmLevel,
+    ): Int =
         if (!box.alarmColorsValue) {
             box.valueColor
         } else {
             when (alarmLevel) {
-                BoxAlarmLevel.CRITICAL -> box.criticalValueColor
-                BoxAlarmLevel.WARNING -> box.warningValueColor
-                BoxAlarmLevel.NORMAL -> box.valueColor
+                DashboardAlarmLevel.CRITICAL -> box.criticalValueColor
+                DashboardAlarmLevel.WARNING -> box.warningValueColor
+                DashboardAlarmLevel.NORMAL -> box.valueColor
             }
         }
 
-    private fun sourceSubtitleFor(sensor: DashboardSensor): String =
+    override fun sourceSubtitleFor(sensor: DashboardSensor): String =
         UtcompDeviceConfig.subtitleFor(sensor)
 
-    private fun fallbackIconFor(sensor: DashboardSensor): String =
+    override fun fallbackIconFor(sensor: DashboardSensor): String =
         when (sensor) {
             DashboardSensor.BOOST -> "🌀"
             DashboardSensor.AFR -> "AFR"
@@ -1522,946 +1542,12 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             DashboardSensor.TIME -> "19:47"
         }
 
-    private fun renderFancy(s: UtcompDataSnapshot) {
-        renderRalliartFancyPage(s)
-    }
-
-
-    private data class FancySensorSlot(
-        val sensor: DashboardSensor,
-        val boxIndex: Int,
-        val box: DashboardBoxConfig,
-    )
-
-    private fun renderRalliartFancyPage(snapshot: UtcompDataSnapshot) {
-        val boostSlot = fancySensorSlot(DashboardSensor.BOOST)
-        val afrSlot = fancySensorSlot(DashboardSensor.AFR)
-        val oilPressureSlot = fancySensorSlot(DashboardSensor.OIL_PRESSURE)
-        val oilTempSlot = fancySensorSlot(DashboardSensor.OIL_TEMP)
-
-        val binding = ensureRalliartBinding(
-            boostSlot = boostSlot,
-            afrSlot = afrSlot,
-            oilPressureSlot = oilPressureSlot,
-            oilTempSlot = oilTempSlot,
-        )
-
-        val (_, shownBoost) = fancyDisplayValue(boostSlot, snapshot)
-        val (_, shownAfr) = fancyDisplayValue(afrSlot, snapshot)
-        val (rawOilPressure, shownOilPressure) = fancyDisplayValue(oilPressureSlot, snapshot)
-        val (rawOilTemp, shownOilTemp) = fancyDisplayValue(oilTempSlot, snapshot)
-
-        val boost = shownBoost ?: Float.NaN
-        val afr = shownAfr ?: Float.NaN
-        val oilPressure = shownOilPressure ?: Float.NaN
-        val oilTemp = shownOilTemp ?: Float.NaN
-
-        val (targetMin, targetMax) = afrTargetRangeForBoost(boost)
-        val afrColor = when {
-            !afr.isFinite() -> Color.rgb(218, 222, 228)
-            afr in targetMin..targetMax -> Color.rgb(102, 214, 132)
-            afr >= targetMin - 0.45f && afr <= targetMax + 0.45f -> Color.rgb(255, 188, 72)
-            else -> Color.rgb(255, 98, 98)
-        }
-
-        val boostColor = if (boost.isFinite() && boost > 2.0f) {
-            Color.rgb(255, 196, 72)
-        } else {
-            boostSlot.box.valueColor
-        }
-
-        val oilPressureAlarm = alarmLevelFor(oilPressureSlot.box, rawOilPressure, snapshot)
-        val oilPressureColor = boxValueColor(oilPressureSlot.box, oilPressureAlarm)
-        val oilTempAlarm = alarmLevelFor(oilTempSlot.box, rawOilTemp, snapshot)
-        val oilTempColor = if (oilTempAlarm == BoxAlarmLevel.NORMAL) {
-            Color.rgb(255, 226, 226)
-        } else {
-            boxValueColor(oilTempSlot.box, oilTempAlarm)
-        }
-
-        val outside = formatTopValue(snapshot.temperatureDsA, "°C")
-        val inside = formatTopValue(snapshot.temperatureDsB, "°C")
-        val battery = formatTopValue(snapshot.adcInValCh0, " V")
-        val header = "OUT $outside   |   IN $inside   |   $battery   |   ${currentClockText()}"
-        if (binding.headerText.text.toString() != header) binding.headerText.text = header
-
-        updateRalliartValue(binding.boostValueText, boost, boostSlot, boostColor)
-        binding.boostNeedle.currentValue = boost.coerceIn(-1.0f, 2.0f)
-        updateRalliartMinMax(
-            views = binding.boostMinMax,
-            key = boostSlot.sensor.label,
-            value = boost,
-            slot = boostSlot,
-        )
-
-        updateRalliartValue(binding.afrValueText, afr, afrSlot, afrColor)
-        (binding.afrMarker.background as? GradientDrawable)?.setColor(afrColor)
-        binding.afr = afr
-        binding.afrTargetMin = targetMin
-        binding.afrTargetMax = targetMax
-        binding.updateAfrOverlay()
-
-        updateRalliartAlarmFill(
-            binding.oilPressureAlarmFill,
-            ralliartAlarmOverlayColor(oilPressureSlot.box, oilPressureAlarm),
-        )
-        updateRalliartValue(
-            binding.oilPressureValueText,
-            oilPressure,
-            oilPressureSlot,
-            oilPressureColor,
-        )
-        updateRalliartMinMax(
-            views = binding.oilPressureMinMax,
-            key = oilPressureSlot.sensor.label,
-            value = oilPressure,
-            slot = oilPressureSlot,
-        )
-
-        updateRalliartAlarmFill(
-            binding.oilTempAlarmFill,
-            ralliartAlarmOverlayColor(oilTempSlot.box, oilTempAlarm),
-        )
-        updateRalliartValue(binding.oilTempValueText, oilTemp, oilTempSlot, oilTempColor)
-        updateRalliartMinMax(
-            views = binding.oilTempMinMax,
-            key = oilTempSlot.sensor.label,
-            value = oilTemp,
-            slot = oilTempSlot,
-        )
-    }
-
-    private fun ensureRalliartBinding(
-        boostSlot: FancySensorSlot,
-        afrSlot: FancySensorSlot,
-        oilPressureSlot: FancySensorSlot,
-        oilTempSlot: FancySensorSlot,
-    ): RalliartDashboardBinding {
-        val currentPage = page
-        val pageConfig = currentPageConfig()
-        ralliartBinding?.let { current ->
-            if (
-                current.key.page == currentPage &&
-                current.key.config == pageConfig &&
-                current.root.parent === dashboardRoot
-            ) {
-                return current
-            }
-        }
-
-        val binding = buildRalliartDashboard(
-            key = RalliartLayoutKey(currentPage, pageConfig),
-            boostSlot = boostSlot,
-            afrSlot = afrSlot,
-            oilPressureSlot = oilPressureSlot,
-            oilTempSlot = oilTempSlot,
-        )
-        dashboardRoot.removeAllViews()
-        dashboardRoot.addView(
-            binding.root,
-            LinearLayout.LayoutParams(RALLIART_CANVAS_WIDTH, RALLIART_CANVAS_HEIGHT),
-        )
-        ralliartBinding = binding
-        return binding
-    }
-
-    private fun buildRalliartDashboard(
-        key: RalliartLayoutKey,
-        boostSlot: FancySensorSlot,
-        afrSlot: FancySensorSlot,
-        oilPressureSlot: FancySensorSlot,
-        oilTempSlot: FancySensorSlot,
-    ): RalliartDashboardBinding {
-        clearRalliartViewportPadding()
-
-        val root = FrameLayout(this).apply {
-            setBackgroundResource(R.drawable.ralliart_dashboard_static)
-            installDashboardSwipeHandler()
-            clipToPadding = false
-            clipChildren = false
-        }
-
-        val oilPressureAlarmFill = createRalliartAlarmFill().also {
-            root.addView(it, ralliartLayoutParams(RALLIART_OIL_PRESSURE_HIT_BOX))
-        }
-        val oilTempAlarmFill = createRalliartAlarmFill().also {
-            root.addView(it, ralliartLayoutParams(RALLIART_OIL_TEMP_HIT_BOX))
-        }
-
-        val headerText = TextView(this).apply {
-            textSize = 16f
-            includeFontPadding = false
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            isSingleLine = true
-            setTextColor(Color.rgb(236, 238, 244))
-        }.also { root.addView(it, ralliartLayoutParams(RALLIART_HEADER_STATUS_BOX)) }
-
-        addRalliartHitZone(root, RALLIART_BOOST_HIT_BOX, boostSlot, boostSlot.sensor.label)
-        addRalliartHitZone(
-            root,
-            RALLIART_AFR_HIT_BOX,
-            afrSlot,
-            if (afrSlot.box.showMinMax) afrSlot.sensor.label else null,
-        )
-        addRalliartHitZone(
-            root,
-            RALLIART_OIL_PRESSURE_HIT_BOX,
-            oilPressureSlot,
-            oilPressureSlot.sensor.label,
-        )
-        addRalliartHitZone(
-            root,
-            RALLIART_OIL_TEMP_HIT_BOX,
-            oilTempSlot,
-            oilTempSlot.sensor.label,
-        )
-
-        val boostValueText = createRalliartValueText(70f).also {
-            root.addView(it, ralliartLayoutParams(RALLIART_BOOST_VALUE_BOX))
-        }
-        val boostNeedle = RalliartBoostNeedleView(this).apply {
-            minValue = -1.0f
-            maxValue = 2.0f
-            warningValue = 2.0f
-            showDebugGuides = false
-        }.also { root.addView(it, ralliartLayoutParams(RALLIART_BOOST_NEEDLE_BOX)) }
-        val boostMinMax = createRalliartMinMaxViews(boostSlot).also { views ->
-            if (views != null) root.addView(views.container, ralliartLayoutParams(RALLIART_BOOST_MIN_MAX_BOX))
-        }
-
-        val afrValueText = createRalliartValueText(66f).also {
-            root.addView(it, ralliartLayoutParams(RALLIART_AFR_VALUE_BOX))
-        }
-        root.addView(RalliartAfrDebugBarView(this).apply {
-            minValue = 10.0f
-            maxValue = 20.0f
-            showDebugGuides = false
-        }, ralliartLayoutParams(RALLIART_AFR_DEBUG_GUIDE_BOX))
-
-        val afrOverlay = FrameLayout(this)
-        val afrTargetBand = View(this).apply {
-            background = GradientDrawable().apply {
-                setColor(Color.argb(150, 76, 170, 88))
-                cornerRadius = 4f
-            }
-        }
-        val afrMarker = View(this).apply {
-            background = GradientDrawable().apply {
-                setColor(Color.rgb(218, 222, 228))
-                cornerRadius = 5f
-            }
-        }
-        afrOverlay.addView(afrTargetBand, FrameLayout.LayoutParams(4, FrameLayout.LayoutParams.MATCH_PARENT))
-        afrOverlay.addView(afrMarker, FrameLayout.LayoutParams(8, FrameLayout.LayoutParams.MATCH_PARENT))
-        root.addView(afrOverlay, ralliartLayoutParams(RALLIART_AFR_LIVE_BAR_BOX))
-
-        val oilPressureValueText = createRalliartValueText(58f).also {
-            root.addView(it, ralliartLayoutParams(RALLIART_OIL_PRESSURE_VALUE_BOX))
-        }
-        val oilPressureMinMax = createRalliartMinMaxViews(oilPressureSlot).also { views ->
-            if (views != null) {
-                root.addView(views.container, ralliartLayoutParams(RALLIART_OIL_PRESSURE_MIN_MAX_BOX))
-            }
-        }
-
-        val oilTempValueText = createRalliartValueText(58f).also {
-            root.addView(it, ralliartLayoutParams(RALLIART_OIL_TEMP_VALUE_BOX))
-        }
-        val oilTempMinMax = createRalliartMinMaxViews(oilTempSlot).also { views ->
-            if (views != null) root.addView(views.container, ralliartLayoutParams(RALLIART_OIL_TEMP_MIN_MAX_BOX))
-        }
-
-        val binding = RalliartDashboardBinding(
-            key = key,
-            root = root,
-            headerText = headerText,
-            boostValueText = boostValueText,
-            boostNeedle = boostNeedle,
-            boostMinMax = boostMinMax,
-            afrValueText = afrValueText,
-            afrOverlay = afrOverlay,
-            afrTargetBand = afrTargetBand,
-            afrMarker = afrMarker,
-            oilPressureAlarmFill = oilPressureAlarmFill,
-            oilPressureValueText = oilPressureValueText,
-            oilPressureMinMax = oilPressureMinMax,
-            oilTempAlarmFill = oilTempAlarmFill,
-            oilTempValueText = oilTempValueText,
-            oilTempMinMax = oilTempMinMax,
-        )
-        afrOverlay.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            binding.updateAfrOverlay()
-        }
-        return binding
-    }
-
-    private fun clearRalliartViewportPadding() {
-        dashboardRoot.apply {
-            setPadding(0, 0, 0, 0)
-            clipToPadding = false
-            clipChildren = false
-            gravity = Gravity.NO_GRAVITY
-            minimumWidth = RALLIART_CANVAS_WIDTH
-            minimumHeight = RALLIART_CANVAS_HEIGHT
-        }
-
-        var parentView: android.view.ViewParent? = dashboardRoot.parent
-        repeat(6) {
-            val group = parentView as? ViewGroup ?: return@repeat
-            group.setPadding(0, 0, 0, 0)
-            group.clipToPadding = false
-            group.clipChildren = false
-            parentView = group.parent
-        }
-    }
-
-    private fun addRalliartHitZone(
-        root: FrameLayout,
-        box: IntArray,
-        slot: FancySensorSlot,
-        minMaxKey: String?,
-    ) {
-        val hitZone = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, 0)
-            installDashboardSwipeHandler()
-        }
-        attachFancyCardActions(hitZone, slot, minMaxKey)
-        root.addView(hitZone, ralliartLayoutParams(box))
-    }
-
-    private fun createRalliartValueText(size: Float): TextView =
-        TextView(this).apply {
-            textSize = size
-            includeFontPadding = false
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-        }
-
-    private fun createRalliartAlarmFill(): View =
-        View(this).apply {
-            background = GradientDrawable().apply {
-                setColor(Color.TRANSPARENT)
-                cornerRadius = 8f
-            }
-            visibility = View.GONE
-            isClickable = false
-            isFocusable = false
-        }
-
-    private fun createRalliartMinMaxViews(slot: FancySensorSlot): RalliartMinMaxViews? {
-        if (!slot.box.showMinMax) return null
-
-        val maxText = TextView(this).apply {
-            textSize = 16f
-            setTextColor(slot.box.maxColor)
-            gravity = Gravity.CENTER
-            textAlignment = View.TEXT_ALIGNMENT_CENTER
-            typeface = Typeface.DEFAULT_BOLD
-            includeFontPadding = false
-        }
-        val minText = TextView(this).apply {
-            textSize = 16f
-            setTextColor(slot.box.minColor)
-            gravity = Gravity.CENTER
-            textAlignment = View.TEXT_ALIGNMENT_CENTER
-            typeface = Typeface.DEFAULT_BOLD
-            includeFontPadding = false
-        }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(0, 2, 0, 2)
-            isClickable = false
-            isFocusable = false
-            visibility = View.GONE
-            addView(maxText, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ))
-            addView(minText, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ))
-        }
-        return RalliartMinMaxViews(container, maxText, minText)
-    }
-
-    private fun updateRalliartValue(
-        textView: TextView,
-        value: Float,
-        slot: FancySensorSlot,
-        color: Int,
-    ) {
-        val formattedValue = formatBoxValue(value, slot.box.decimalPlaces)
-        if (textView.text.toString() != formattedValue) {
-            textView.text = styledValueText(formattedValue, slot.box.splitValueDigits)
-        }
-        if (textView.currentTextColor != color) textView.setTextColor(color)
-    }
-
-    private fun updateRalliartMinMax(
-        views: RalliartMinMaxViews?,
-        key: String,
-        value: Float,
-        slot: FancySensorSlot,
-    ) {
-        if (views == null || !value.isFinite()) {
-            views?.container?.visibility = View.GONE
-            return
-        }
-
-        val stats = trackMinMax(key, value)
-        val visible = shouldShowMinMax(key)
-        views.container.visibility = if (visible) View.VISIBLE else View.GONE
-        if (!visible) return
-
-        val maxText = formatBoxValue(stats.max, slot.box.decimalPlaces)
-        val minText = formatBoxValue(stats.min, slot.box.decimalPlaces)
-        if (views.maxText.text.toString() != maxText) views.maxText.text = maxText
-        if (views.minText.text.toString() != minText) views.minText.text = minText
-    }
-
-    private fun updateRalliartAlarmFill(view: View, color: Int?) {
-        view.visibility = if (color == null) View.GONE else View.VISIBLE
-        if (color != null) (view.background as? GradientDrawable)?.setColor(color)
-    }
-
-    private fun ralliartAlarmOverlayColor(
-        box: DashboardBoxConfig,
-        alarmLevel: BoxAlarmLevel,
-    ): Int? {
-        if (!box.alarmColorsBackground) return null
-        val source = when (alarmLevel) {
-            BoxAlarmLevel.CRITICAL -> box.criticalColor
-            BoxAlarmLevel.WARNING -> box.warningColor
-            BoxAlarmLevel.NORMAL -> return null
-        }
-        return Color.argb(210, Color.red(source), Color.green(source), Color.blue(source))
-    }
-
-    private fun formatTopValue(value: Float, suffix: String): String =
-        if (value.isFinite()) formatBoxValue(value, 1) + suffix else "--$suffix"
-
-    private fun ralliartLayoutParams(box: IntArray): FrameLayout.LayoutParams =
-        FrameLayout.LayoutParams(box[2], box[3]).apply {
-            leftMargin = box[0]
-            topMargin = box[1]
-        }
-
-
-
-
-
-
-    private fun fancySensorSlot(sensor: DashboardSensor): FancySensorSlot {
-        val pageConfig = currentPageConfig()
-        val currentIndex = pageConfig.boxes.indexOfFirst { it.sensor == sensor }
-        if (currentIndex >= 0) {
-            return FancySensorSlot(sensor, currentIndex, pageConfig.boxes[currentIndex])
-        }
-
-        val fallbackBox = DefaultDashboardPages.race2x2.boxes.first { it.sensor == sensor }
-        return FancySensorSlot(sensor, -1, fallbackBox)
-    }
-
-    private fun fancyDisplayValue(slot: FancySensorSlot, snapshot: UtcompDataSnapshot): Pair<Float?, Float?> {
-        val rawValue = slot.sensor.readValue(snapshot)
-        val renderIndex = if (slot.boxIndex >= 0) slot.boxIndex else 100 + slot.sensor.ordinal
-        val displayValue = displayValueForBox(slot.box, renderIndex, rawValue)
-        return rawValue to (displayValue ?: rawValue)
-    }
-
-    private fun attachFancyCardActions(card: View, slot: FancySensorSlot, minMaxKey: String?) {
-        card.installDashboardSwipeHandler()
-        if (slot.boxIndex >= 0) {
-            attachDashboardBoxActions(card, slot.boxIndex, minMaxKey)
-            return
-        }
-
-        card.isClickable = true
-        card.setOnClickListener {
-            if (dashboardClickSuppressed()) return@setOnClickListener
-            handleDashboardBoxTapForChrome(minMaxKey, "fancy:${slot.sensor.name}")
-        }
-        card.setOnLongClickListener {
-            cancelPendingDashboardSingleTap()
-            lastDashboardBoxTapMs = 0L
-            revealTopBarChrome(autoHide = true)
-            true
-        }
-    }
-
-    private fun lerpFloat(start: Float, end: Float, fraction: Float): Float =
-        start + (end - start) * fraction.coerceIn(0f, 1f)
-
-    private fun afrTargetRangeForBoost(boostBar: Float): Pair<Float, Float> {
-        if (boostBar.isNaN() || boostBar.isInfinite()) {
-            return 12.8f to 14.2f
-        }
-
-        val boost = boostBar.coerceIn(-1.0f, 2.0f)
-
-        return when {
-            boost <= 0.20f -> {
-                13.2f to 15.0f
-            }
-            boost < 2.0f -> {
-                val fraction = ((boost - 0.20f) / 1.80f).coerceIn(0f, 1f)
-                val low = lerpFloat(12.4f, 10.2f, fraction)
-                val high = lerpFloat(14.2f, 12.5f, fraction)
-                low to high
-            }
-            else -> {
-                10.2f to 12.5f
-            }
-        }
+    private fun renderFancy(snapshot: UtcompDataSnapshot) {
+        ralliartRenderer.render(currentPageConfig(), snapshot)
     }
 
     private fun renderSimple(snapshot: UtcompDataSnapshot) {
-        val binding = ensureSimpleDashboardBinding()
-        binding.cards.forEach { updateSimpleCard(it, snapshot) }
-    }
-
-    private fun ensureSimpleDashboardBinding(): SimpleDashboardBinding {
-        val currentPage = page
-        val pageConfig = currentPageConfig()
-        simpleBinding?.let { current ->
-            if (
-                current.key.page == currentPage &&
-                current.key.config == pageConfig &&
-                current.root.parent === dashboardRoot
-            ) {
-                return current
-            }
-        }
-        val key = SimpleLayoutKey(currentPage, pageConfig)
-
-        dashboardRoot.apply {
-            setBackgroundColor(Color.BLACK)
-            setPadding(0, 0, 0, 0)
-            clipToPadding = false
-            clipChildren = false
-            gravity = Gravity.NO_GRAVITY
-        }
-
-        var parentView: android.view.ViewParent? = dashboardRoot.parent
-        repeat(4) {
-            val group = parentView as? ViewGroup ?: return@repeat
-            group.setBackgroundColor(Color.BLACK)
-            group.setPadding(0, 0, 0, 0)
-            group.clipToPadding = false
-            group.clipChildren = false
-            parentView = group.parent
-        }
-
-        val cardBindings = pageConfig.boxes
-            .mapIndexed { index, box -> index to box }
-            .sortedWith(
-                compareBy<Pair<Int, DashboardBoxConfig>> { it.second.row }
-                    .thenBy { it.second.column },
-            )
-            .map { (boxIndex, box) -> buildSimpleCard(boxIndex, box) }
-
-        val root = buildSimpleGrid(pageConfig.rows, pageConfig.columns, cardBindings.map { it.card })
-        dashboardRoot.removeAllViews()
-        dashboardRoot.addView(
-            root,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.MATCH_PARENT,
-            ),
-        )
-
-        ralliartBinding = null
-        return SimpleDashboardBinding(key, root, cardBindings).also { simpleBinding = it }
-    }
-
-    private fun buildSimpleGrid(
-        rows: Int,
-        columns: Int,
-        cards: List<LinearLayout>,
-    ): LinearLayout {
-        val safeRows = rows.coerceAtLeast(1)
-        val safeColumns = columns.coerceAtLeast(1)
-        val totalCells = safeRows * safeColumns
-        val cells = cards.take(totalCells)
-
-        return ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, 0)
-            setBackgroundColor(Color.BLACK)
-
-            for (rowIndex in 0 until safeRows) {
-                val row = ClickableLinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER
-                    setPadding(0, 0, 0, 0)
-                    setBackgroundColor(Color.BLACK)
-                }
-
-                for (columnIndex in 0 until safeColumns) {
-                    val index = rowIndex * safeColumns + columnIndex
-                    val cell = cells.getOrNull(index) ?: ClickableLinearLayout(this@MainActivity)
-                    cell.minimumWidth = 0
-                    cell.minimumHeight = 0
-                    cell.installDashboardSwipeHandler()
-                    row.addView(
-                        cell,
-                        LinearLayout.LayoutParams(
-                            0,
-                            LinearLayout.LayoutParams.MATCH_PARENT,
-                            1f,
-                        ).apply {
-                            setMargins(6, 6, 6, 6)
-                        },
-                    )
-                }
-
-                addView(
-                    row,
-                    LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        0,
-                        1f,
-                    ),
-                )
-            }
-        }
-    }
-
-    private fun buildSimpleCard(
-        boxIndex: Int,
-        box: DashboardBoxConfig,
-    ): SimpleCardBinding {
-        val sensor = box.sensor
-        val minMaxKey = if (sensor == DashboardSensor.TIME || !box.showMinMax) null else sensor.label
-        val background = GradientDrawable().apply {
-            setColor(box.backgroundColor)
-            cornerRadius = 0f
-            setStroke(2, Color.rgb(255, 110, 36))
-        }
-        val card = ClickableLinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            contentDescription = sensor.label
-            this.background = background
-            setPadding(8, 4, 8, 4)
-            clipToPadding = false
-            clipChildren = false
-        }
-
-        val safeValueScale = box.valueScale.coerceIn(0.25f, 4.0f)
-        val safeIconScale = box.iconScale.coerceIn(0.25f, 4.0f)
-        val safeIconValueGapScale = box.iconValueGapScale.coerceIn(0.25f, 4.0f)
-        val iconSize = (40f * safeIconScale).toInt().coerceAtLeast(18)
-        val iconGapPx = (8f * safeValueScale * safeIconValueGapScale).coerceAtLeast(2f)
-        val unitGapPx = (4f * safeValueScale).toInt().coerceAtLeast(1)
-        val minMaxTextSize = 11.5f * safeValueScale
-        val minMaxPaddingY = (2f * safeValueScale).toInt().coerceAtLeast(2)
-        val minMaxWidthPx = (58f * safeValueScale).toInt().coerceAtLeast(50)
-        val minMaxCornerInsetPx = (5f * safeValueScale).coerceAtLeast(4f)
-
-        var iconView: View? = null
-        var unitTextView: TextView? = null
-        var maxStatView: TextView? = null
-        var minStatView: TextView? = null
-
-        val content = FrameLayout(this).apply {
-            clipToPadding = false
-            clipChildren = false
-        }
-        val valueLine = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            isBaselineAligned = false
-            clipToPadding = false
-            clipChildren = false
-        }
-        val valueTextView = TextView(this).apply {
-            text = "--"
-            textSize = 29f * safeValueScale
-            setTextColor(box.valueColor)
-            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            textAlignment = View.TEXT_ALIGNMENT_CENTER
-            typeface = Typeface.DEFAULT_BOLD
-            includeFontPadding = false
-        }
-        valueLine.addView(
-            valueTextView,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { gravity = Gravity.BOTTOM },
-        )
-
-        if (box.showUnit && sensor.unit.isNotBlank()) {
-            unitTextView = TextView(this).apply {
-                text = sensor.unit
-                textSize = 10.5f * safeValueScale
-                setTextColor(box.unitColor)
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                textAlignment = View.TEXT_ALIGNMENT_CENTER
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
-                includeFontPadding = false
-            }.also { unitText ->
-                valueLine.addView(
-                    unitText,
-                    LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                    ).apply {
-                        gravity = Gravity.BOTTOM
-                        leftMargin = unitGapPx
-                    },
-                )
-            }
-        }
-
-        content.addView(
-            valueLine,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER,
-            ),
-        )
-
-        if (box.showIcon && sensor != DashboardSensor.TIME) {
-            val iconResource = iconDrawableResourceId(sensor.iconResourceName)
-            iconView = if (iconResource != 0) {
-                ImageView(this).apply {
-                    setImageResource(iconResource)
-                    adjustViewBounds = true
-                    scaleType = ImageView.ScaleType.FIT_CENTER
-                    alpha = 0.95f
-                }
-            } else {
-                val fallbackIcon = fallbackIconFor(sensor)
-                TextView(this).apply {
-                    text = fallbackIcon
-                    textSize = if (fallbackIcon.length > 2) {
-                        13f * safeIconScale
-                    } else {
-                        22f * safeIconScale
-                    }
-                    gravity = Gravity.CENTER
-                    textAlignment = View.TEXT_ALIGNMENT_CENTER
-                    setTextColor(box.unitColor)
-                    typeface = Typeface.DEFAULT_BOLD
-                    includeFontPadding = false
-                }
-            }
-            content.addView(iconView, FrameLayout.LayoutParams(iconSize, iconSize))
-        }
-
-        if (minMaxKey != null) {
-            maxStatView = TextView(this).apply {
-                textSize = minMaxTextSize
-                setTextColor(box.maxColor)
-                gravity = Gravity.CENTER
-                textAlignment = View.TEXT_ALIGNMENT_CENTER
-                typeface = Typeface.DEFAULT_BOLD
-                includeFontPadding = false
-                visibility = View.GONE
-                setPadding(0, minMaxPaddingY, 0, minMaxPaddingY)
-            }
-            minStatView = TextView(this).apply {
-                textSize = minMaxTextSize
-                setTextColor(box.minColor)
-                gravity = Gravity.CENTER
-                textAlignment = View.TEXT_ALIGNMENT_CENTER
-                typeface = Typeface.DEFAULT_BOLD
-                includeFontPadding = false
-                visibility = View.GONE
-                setPadding(0, minMaxPaddingY, 0, minMaxPaddingY)
-            }
-            content.addView(
-                maxStatView,
-                FrameLayout.LayoutParams(
-                    minMaxWidthPx,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                ),
-            )
-            content.addView(
-                minStatView,
-                FrameLayout.LayoutParams(
-                    minMaxWidthPx,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                ),
-            )
-        }
-
-        val valueBounds = android.graphics.RectF()
-        val unitBounds = android.graphics.RectF()
-        val scratchBounds = android.graphics.Rect()
-
-        fun textInkBounds(textView: TextView, out: android.graphics.RectF) {
-            val baseline = textView.baseline
-            val rawText = textView.text?.toString().orEmpty()
-            if (textView.height <= 0 || baseline < 0 || rawText.isEmpty()) {
-                out.set(
-                    textView.left.toFloat(),
-                    textView.top.toFloat(),
-                    textView.right.toFloat(),
-                    textView.bottom.toFloat(),
-                )
-                return
-            }
-
-            textView.paint.getTextBounds(rawText, 0, rawText.length, scratchBounds)
-            out.set(
-                textView.left + scratchBounds.left.toFloat(),
-                textView.top + baseline + scratchBounds.top.toFloat(),
-                textView.left + scratchBounds.right.toFloat(),
-                textView.top + baseline + scratchBounds.bottom.toFloat(),
-            )
-        }
-
-        fun alignSimpleContent() {
-            if (content.width <= 0 || content.height <= 0 || valueLine.width <= 0 ||
-                valueLine.height <= 0 || valueTextView.height <= 0
-            ) return
-
-            valueLine.translationX = 0f
-            valueLine.translationY = 0f
-            valueTextView.translationY = 0f
-            unitTextView?.translationY = 0f
-
-            val icon = iconView
-            val iconBlockWidth = if (icon != null && icon.width > 0) {
-                icon.width.toFloat() + iconGapPx
-            } else {
-                0f
-            }
-            val groupWidth = iconBlockWidth + valueLine.width
-            val groupLeft = (content.width - groupWidth) / 2f
-            textInkBounds(valueTextView, valueBounds)
-            val valueLineTop = content.height / 2f - (valueBounds.top + valueBounds.bottom) / 2f
-            valueLine.x = groupLeft + iconBlockWidth
-            valueLine.y = valueLineTop
-            val targetBottom = valueLine.y + valueBounds.bottom
-
-            unitTextView?.let { unitText ->
-                if (unitText.height > 0) {
-                    textInkBounds(unitText, unitBounds)
-                    unitText.translationY = targetBottom - (valueLine.y + unitBounds.bottom)
-                }
-            }
-
-            icon?.let {
-                if (it.width > 0 && it.height > 0) {
-                    it.x = groupLeft
-                    it.y = targetBottom - it.height
-                }
-            }
-
-            val statRight = content.width - minMaxCornerInsetPx
-            val statLeft = (statRight - minMaxWidthPx).coerceAtLeast(minMaxCornerInsetPx)
-            maxStatView?.let { maxView ->
-                if (maxView.visibility != View.GONE && maxView.width > 0 && maxView.height > 0) {
-                    maxView.x = statLeft
-                    maxView.y = minMaxCornerInsetPx
-                }
-            }
-            minStatView?.let { minView ->
-                if (minView.visibility != View.GONE && minView.width > 0 && minView.height > 0) {
-                    minView.x = statLeft
-                    minView.y = (content.height - minMaxCornerInsetPx - minView.height)
-                        .coerceAtLeast(minMaxCornerInsetPx)
-                }
-            }
-        }
-
-        val alignListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            alignSimpleContent()
-        }
-        content.addOnLayoutChangeListener(alignListener)
-        valueLine.addOnLayoutChangeListener(alignListener)
-        valueTextView.addOnLayoutChangeListener(alignListener)
-        unitTextView?.addOnLayoutChangeListener(alignListener)
-        iconView?.addOnLayoutChangeListener(alignListener)
-        maxStatView?.addOnLayoutChangeListener(alignListener)
-        minStatView?.addOnLayoutChangeListener(alignListener)
-        content.post { alignSimpleContent() }
-
-        card.addView(
-            content,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f,
-            ),
-        )
-        attachDashboardBoxActions(card, boxIndex, minMaxKey)
-
-        return SimpleCardBinding(
-            boxIndex = boxIndex,
-            box = box,
-            card = card,
-            background = background,
-            valueText = valueTextView,
-            unitText = unitTextView,
-            maxText = maxStatView,
-            minText = minStatView,
-            minMaxKey = minMaxKey,
-        )
-    }
-
-    private fun updateSimpleCard(
-        binding: SimpleCardBinding,
-        snapshot: UtcompDataSnapshot,
-    ) {
-        val box = binding.box
-        val sensor = box.sensor
-        val rawValue = sensor.readValue(snapshot)
-        val displayValue = displayValueForBox(box, binding.boxIndex, rawValue)
-        val formattedValue = if (sensor == DashboardSensor.TIME) {
-            currentClockText()
-        } else {
-            formatBoxValue(displayValue ?: rawValue, box.decimalPlaces)
-        }
-
-        if (binding.valueText.text.toString() != formattedValue) {
-            binding.valueText.text = styledValueText(formattedValue, box.splitValueDigits)
-        }
-
-        val alarmLevel = alarmLevelFor(box, rawValue, snapshot)
-        val valueColor = boxValueColor(box, alarmLevel)
-        binding.background.setColor(boxBackgroundColor(box, alarmLevel))
-        if (binding.valueText.currentTextColor != valueColor) {
-            binding.valueText.setTextColor(valueColor)
-        }
-        val effectiveUnitColor = if (alarmLevel == BoxAlarmLevel.NORMAL) box.unitColor else valueColor
-        binding.unitText?.let { unitText ->
-            if (unitText.currentTextColor != effectiveUnitColor) unitText.setTextColor(effectiveUnitColor)
-        }
-        binding.card.alpha = if (editMode) 0.92f else 1.0f
-
-        val minMaxKey = binding.minMaxKey
-        val value = rawValue
-        val stats = if (minMaxKey != null && value != null && value.isFinite()) {
-            trackMinMax(minMaxKey, value)
-        } else {
-            null
-        }
-        val visibleStats = if (
-            stats != null && minMaxKey != null && shouldShowMinMax(minMaxKey)
-        ) {
-            stats
-        } else {
-            null
-        }
-        val statsVisibility = if (visibleStats != null) View.VISIBLE else View.GONE
-        binding.maxText?.visibility = statsVisibility
-        binding.minText?.visibility = statsVisibility
-        visibleStats?.let { currentStats ->
-            val maxText = formatBoxValue(currentStats.max, box.decimalPlaces)
-            val minText = formatBoxValue(currentStats.min, box.decimalPlaces)
-            if (binding.maxText?.text?.toString() != maxText) binding.maxText?.text = maxText
-            if (binding.minText?.text?.toString() != minText) binding.minText?.text = minText
-        }
+        simpleRenderer.render(currentPageConfig(), snapshot)
     }
 
     private fun renderDebug(s: UtcompDataSnapshot) {
@@ -2497,7 +1583,8 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         if (textView.text.toString() != text) textView.text = text
     }
 
-    private fun currentClockText(nowMs: Long = System.currentTimeMillis()): String {
+    override fun currentClockText(): String {
+        val nowMs = System.currentTimeMillis()
         val minute = nowMs / 60_000L
         if (minute != cachedClockMinute) {
             cachedClockMinute = minute
@@ -2507,16 +1594,63 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         return cachedClockText
     }
 
-    private data class RowValue(val icon: String, val label: String, val value: String)
+    override fun mergeVisualStateForBox(boxIndex: Int): DashboardMergeVisualState {
+        val session = mergeSession ?: return DashboardMergeVisualState.NONE
+        val page = currentPageConfig().normalized()
+        if (session.pageId != page.id) return DashboardMergeVisualState.NONE
+        if (boxIndex == session.sourceBoxIndex) return DashboardMergeVisualState.SOURCE
 
-    private fun View.installDashboardSwipeHandler() {
-        isClickable = true
-        setOnTouchListener { _, event ->
-                handlePageSwipe(event)
+        val box = page.boxes.getOrNull(boxIndex) ?: return DashboardMergeVisualState.BLOCKED
+        for (row in box.row until box.row + box.rowSpan) {
+            for (column in box.column until box.column + box.columnSpan) {
+                if (row * page.columns + column in session.targetCells) {
+                    return DashboardMergeVisualState.TARGET
+                }
             }
+        }
+        return DashboardMergeVisualState.BLOCKED
     }
 
-    private fun iconDrawableResourceId(resourceName: String?): Int =
+    override fun mergeVisualStateForCell(row: Int, column: Int): DashboardMergeVisualState {
+        val session = mergeSession ?: return DashboardMergeVisualState.NONE
+        val page = currentPageConfig().normalized()
+        if (session.pageId != page.id) return DashboardMergeVisualState.NONE
+        val cell = row * page.columns + column
+        return if (cell in session.targetCells) {
+            DashboardMergeVisualState.TARGET
+        } else {
+            DashboardMergeVisualState.BLOCKED
+        }
+    }
+
+    override fun selectMergeCell(row: Int, column: Int) {
+        val session = mergeSession ?: return
+        val page = currentPageConfig().normalized()
+        if (session.pageId != page.id) {
+            cancelMerge()
+            return
+        }
+        val cell = row * page.columns + column
+        if (cell !in session.targetCells) {
+            Toast.makeText(this, "Select one of the highlighted green cells", Toast.LENGTH_SHORT)
+                .show()
+            return
+        }
+
+        val merged = page.mergeBoxIntoCell(session.sourceBoxIndex, row, column)
+        if (merged == page) {
+            Toast.makeText(this, "Those cells do not form a rectangle", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        mergeSession = null
+        simpleRenderer.clear()
+        updateEditModeButton()
+        updateTopBarChromeVisibility()
+        updateCurrentPage { merged }
+    }
+
+    override fun iconDrawableResourceId(resourceName: String?): Int =
         when (resourceName) {
             "ic_utcomp_battery_48dp" -> R.drawable.ic_rcomp_accu_48dp
             "ic_rcomp_accu_48dp" -> R.drawable.ic_rcomp_accu_48dp
@@ -2554,8 +1688,8 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         }
 
 
-    private fun trackMinMax(key: String, value: Float): MinMax {
-        val stats = minMaxBySensor.getOrPut(key) { MinMax() }
+    override fun trackMinMax(key: String, value: Float): DashboardMinMax {
+        val stats = minMaxBySensor.getOrPut(key) { DashboardMinMax() }
         if (value.isNaN() || value.isInfinite()) return stats
 
         if (stats.min.isNaN() || value < stats.min) stats.min = value
@@ -2587,8 +1721,18 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         renderDashboard()
     }
 
-    private fun shouldShowMinMax(key: String): Boolean =
+    override fun shouldShowMinMax(key: String): Boolean =
         minMaxDisplayMode == MinMaxMode.ALWAYS || activeMinMaxCard == key
+
+    override fun isEditMode(): Boolean = editMode
+
+    override fun addBoxAt(row: Int, column: Int) {
+        if (mergeSession != null) {
+            selectMergeCell(row, column)
+        } else {
+            updateCurrentPage { it.addBoxAt(row, column) }
+        }
+    }
 
     private fun showMinMaxInline(key: String) {
         activeMinMaxCard = key

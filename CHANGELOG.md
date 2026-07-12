@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Extract simple and Ralliart rendering from `MainActivity`.
+- Add configurable dashboard pages with 1×1 through 4×4 grids.
+- Support merging, splitting, removing, and restoring dashboard boxes.
+- Add editable card borders and independent min/max text scaling.
+- Split Ralliart oil minimum and maximum values into the lower corners.
+- Redesign the dashboard editor with larger inverted rows and separators.
+- Reduce refresh allocations by caching normalized layouts and rendered text.
 - Move CSV logging/viewer orchestration out of `MainActivity`.
 - Parse only displayed CSV columns when building graph previews.
 - Move dashboard configuration JSON serialization into a focused codec.

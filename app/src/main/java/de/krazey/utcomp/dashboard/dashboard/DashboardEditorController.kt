@@ -19,167 +19,304 @@ internal class DashboardEditorController(
         transform: (DashboardBoxConfig) -> DashboardBoxConfig,
     ) -> Unit,
     private val onSmoothingChanged: (boxIndex: Int, box: DashboardBoxConfig) -> Unit,
+    private val onEditPageGrid: () -> Unit,
+    private val onStartMerge: (boxIndex: Int) -> Unit,
 ) {
     private data class NamedColor(
         val name: String,
         val color: Int,
     )
 
-    fun showBoxEditor(boxIndex: Int) {
-        val pageConfig = currentPageConfig()
+    fun showBoxEditor(boxIndex: Int, titleOverride: String? = null) {
+        val pageConfig = currentPageConfig().normalized()
         val box = pageConfig.boxes.getOrNull(boxIndex) ?: return
-
+        val mergeTargetCount = pageConfig.mergeTargetCells(boxIndex).size
         val oilBoostText = if (box.sensor == DashboardSensor.OIL_PRESSURE) {
             oilPressureBoostAlarmSummary(box)
         } else {
             "only for Oil pressure"
         }
+        val position = "Row ${box.row + 1}, column ${box.column + 1} • " +
+            spanSummary(box.rowSpan, box.columnSpan)
 
-        val actions = arrayOf(
-            "Sensor: ${box.sensor.label}",
-            "Value size: ${formatScale(box.valueScale)}",
-            "Icon size: ${formatScale(box.iconScale)}",
-            "Icon/value gap: ${formatScale(box.iconValueGapScale)}",
-            "Decimals: ${decimalsText(box.decimalPlaces)}",
-            "Split decimals: ${enabledText(box.splitValueDigits)}",
-            "Smoothing: ${smoothingText(box.smoothingAlpha)}",
-            "Normal value color: ${colorName(box.valueColor)}",
-            "Background color: ${colorName(box.backgroundColor)}",
-            "Warning low: ${formatThreshold(box.warningLow, box.sensor.unit)}",
-            "Critical low: ${formatThreshold(box.criticalLow, box.sensor.unit)}",
-            "Warning high: ${formatThreshold(box.warningHigh, box.sensor.unit)}",
-            "Critical high: ${formatThreshold(box.criticalHigh, box.sensor.unit)}",
-            "Oil pressure boost arm: $oilBoostText",
-            "Warning background: ${colorName(box.warningColor)}",
-            "Warning value color: ${colorName(box.warningValueColor)}",
-            "Critical background: ${colorName(box.criticalColor)}",
-            "Critical value color: ${colorName(box.criticalValueColor)}",
-            "Alarm background: ${enabledText(box.alarmColorsBackground)}",
-            "Alarm value color: ${enabledText(box.alarmColorsValue)}",
-            "Icon: ${shownText(box.showIcon)}",
-            "Unit: ${shownText(box.showUnit)}",
-            "Min/max: ${shownText(box.showMinMax)}",
-            "Apply visual style to all boxes on page",
-            "Set default alarms for ${box.sensor.label}",
-            "Disable alarms for ${box.sensor.label}",
-            "Reset this box style",
+        showEditorMenu(
+            context = context,
+            title = titleOverride ?: "${pageConfig.title} • ${box.sensor.label}",
+            sections = listOf(
+                EditorMenuSection(
+                    "Display",
+                    listOf(
+                        EditorMenuRow("Sensor", box.sensor.label) {
+                            showSensorPicker(boxIndex)
+                        },
+                        EditorMenuRow("Value size", formatScale(box.valueScale)) {
+                            showScalePicker("Value size", box.valueScale) { selected ->
+                                updateBoxConfig(boxIndex) { it.copy(valueScale = selected) }
+                            }
+                        },
+                        EditorMenuRow("Icon size", formatScale(box.iconScale)) {
+                            showScalePicker("Icon size", box.iconScale) { selected ->
+                                updateBoxConfig(boxIndex) { it.copy(iconScale = selected) }
+                            }
+                        },
+                        EditorMenuRow("Icon/value gap", formatScale(box.iconValueGapScale)) {
+                            showScalePicker("Icon/value gap", box.iconValueGapScale) { selected ->
+                                updateBoxConfig(boxIndex) {
+                                    it.copy(iconValueGapScale = selected)
+                                }
+                            }
+                        },
+                        EditorMenuRow("Min/max size", formatScale(box.minMaxScale)) {
+                            showScalePicker("Min/max size", box.minMaxScale) { selected ->
+                                updateBoxConfig(boxIndex) { it.copy(minMaxScale = selected) }
+                            }
+                        },
+                        EditorMenuRow("Decimal digits", decimalsText(box.decimalPlaces)) {
+                            showDecimalsPicker(boxIndex, box)
+                        },
+                        EditorMenuRow("Split decimal digits", enabledText(box.splitValueDigits)) {
+                            updateBoxConfig(boxIndex) {
+                                it.copy(splitValueDigits = !it.splitValueDigits)
+                            }
+                        },
+                        EditorMenuRow("Smoothing", smoothingText(box.smoothingAlpha)) {
+                            showSmoothingPicker(boxIndex, box)
+                        },
+                    ),
+                ),
+                EditorMenuSection(
+                    "Colors",
+                    listOf(
+                        EditorMenuRow("Normal value", colorName(box.valueColor)) {
+                            showColorPicker("Normal value color", box.valueColor, VALUE_COLORS) {
+                                selected ->
+                                updateBoxConfig(boxIndex) {
+                                    it.copy(valueColor = selected, foregroundColor = selected)
+                                }
+                            }
+                        },
+                        EditorMenuRow("Unit", colorName(box.unitColor)) {
+                            showColorPicker("Unit color", box.unitColor, VALUE_COLORS) { selected ->
+                                updateBoxConfig(boxIndex) { it.copy(unitColor = selected) }
+                            }
+                        },
+                        EditorMenuRow("Background", colorName(box.backgroundColor)) {
+                            showColorPicker(
+                                "Background color",
+                                box.backgroundColor,
+                                BACKGROUND_COLORS,
+                            ) { selected ->
+                                updateBoxConfig(boxIndex) { it.copy(backgroundColor = selected) }
+                            }
+                        },
+                        EditorMenuRow("Border", colorName(box.borderColor)) {
+                            showColorPicker("Border color", box.borderColor, BORDER_COLORS) {
+                                selected ->
+                                updateBoxConfig(boxIndex) { it.copy(borderColor = selected) }
+                            }
+                        },
+                        EditorMenuRow("Minimum value", colorName(box.minColor)) {
+                            showColorPicker("Minimum value color", box.minColor, VALUE_COLORS) {
+                                selected ->
+                                updateBoxConfig(boxIndex) { it.copy(minColor = selected) }
+                            }
+                        },
+                        EditorMenuRow("Maximum value", colorName(box.maxColor)) {
+                            showColorPicker("Maximum value color", box.maxColor, VALUE_COLORS) {
+                                selected ->
+                                updateBoxConfig(boxIndex) { it.copy(maxColor = selected) }
+                            }
+                        },
+                    ),
+                ),
+                EditorMenuSection(
+                    "Alarms",
+                    listOf(
+                        EditorMenuRow(
+                            "Warning low",
+                            formatThreshold(box.warningLow, box.sensor.unit),
+                        ) {
+                            showThresholdEditor(
+                                "Warning low",
+                                boxIndex,
+                                box,
+                                box.warningLow,
+                            ) { value -> copy(warningLow = value) }
+                        },
+                        EditorMenuRow(
+                            "Critical low",
+                            formatThreshold(box.criticalLow, box.sensor.unit),
+                        ) {
+                            showThresholdEditor(
+                                "Critical low",
+                                boxIndex,
+                                box,
+                                box.criticalLow,
+                            ) { value -> copy(criticalLow = value) }
+                        },
+                        EditorMenuRow(
+                            "Warning high",
+                            formatThreshold(box.warningHigh, box.sensor.unit),
+                        ) {
+                            showThresholdEditor(
+                                "Warning high",
+                                boxIndex,
+                                box,
+                                box.warningHigh,
+                            ) { value -> copy(warningHigh = value) }
+                        },
+                        EditorMenuRow(
+                            "Critical high",
+                            formatThreshold(box.criticalHigh, box.sensor.unit),
+                        ) {
+                            showThresholdEditor(
+                                "Critical high",
+                                boxIndex,
+                                box,
+                                box.criticalHigh,
+                            ) { value -> copy(criticalHigh = value) }
+                        },
+                        EditorMenuRow("Oil pressure boost arm", oilBoostText) {
+                            if (box.sensor == DashboardSensor.OIL_PRESSURE) {
+                                showOilPressureBoostAlarmEditor(boxIndex, box)
+                            } else {
+                                showSensorPicker(boxIndex)
+                            }
+                        },
+                        EditorMenuRow("Warning background", colorName(box.warningColor)) {
+                            showColorPicker(
+                                "Warning background",
+                                box.warningColor,
+                                WARNING_COLORS,
+                            ) { selected ->
+                                updateBoxConfig(boxIndex) { it.copy(warningColor = selected) }
+                            }
+                        },
+                        EditorMenuRow("Warning value", colorName(box.warningValueColor)) {
+                            showColorPicker(
+                                "Warning value color",
+                                box.warningValueColor,
+                                ALARM_VALUE_COLORS,
+                            ) { selected ->
+                                updateBoxConfig(boxIndex) {
+                                    it.copy(warningValueColor = selected)
+                                }
+                            }
+                        },
+                        EditorMenuRow("Critical background", colorName(box.criticalColor)) {
+                            showColorPicker(
+                                "Critical background",
+                                box.criticalColor,
+                                CRITICAL_COLORS,
+                            ) { selected ->
+                                updateBoxConfig(boxIndex) {
+                                    it.copy(
+                                        criticalColor = selected,
+                                        alarmColor = selected,
+                                        maxColor = selected,
+                                    )
+                                }
+                            }
+                        },
+                        EditorMenuRow("Critical value", colorName(box.criticalValueColor)) {
+                            showColorPicker(
+                                "Critical value color",
+                                box.criticalValueColor,
+                                ALARM_VALUE_COLORS,
+                            ) { selected ->
+                                updateBoxConfig(boxIndex) {
+                                    it.copy(criticalValueColor = selected)
+                                }
+                            }
+                        },
+                        EditorMenuRow(
+                            "Color alarm background",
+                            enabledText(box.alarmColorsBackground),
+                        ) {
+                            updateBoxConfig(boxIndex) {
+                                it.copy(alarmColorsBackground = !it.alarmColorsBackground)
+                            }
+                        },
+                        EditorMenuRow(
+                            "Color alarm value",
+                            enabledText(box.alarmColorsValue),
+                        ) {
+                            updateBoxConfig(boxIndex) {
+                                it.copy(alarmColorsValue = !it.alarmColorsValue)
+                            }
+                        },
+                    ),
+                ),
+                EditorMenuSection(
+                    "Visibility",
+                    listOf(
+                        EditorMenuRow("Icon", shownText(box.showIcon)) {
+                            updateBoxConfig(boxIndex) { it.copy(showIcon = !it.showIcon) }
+                        },
+                        EditorMenuRow("Unit", shownText(box.showUnit)) {
+                            updateBoxConfig(boxIndex) { it.copy(showUnit = !it.showUnit) }
+                        },
+                        EditorMenuRow("Min/max", shownText(box.showMinMax)) {
+                            updateBoxConfig(boxIndex) { it.copy(showMinMax = !it.showMinMax) }
+                        },
+                    ),
+                ),
+                EditorMenuSection(
+                    "Layout",
+                    listOf(
+                        EditorMenuRow("Position and span", position, enabled = false) {},
+                        EditorMenuRow(
+                            "Page grid",
+                            "${pageConfig.rows} rows × ${pageConfig.columns} columns",
+                        ) {
+                            onEditPageGrid()
+                        },
+                        EditorMenuRow(
+                            "Start merge",
+                            if (mergeTargetCount == 0) {
+                                "No rectangular adjacent cell available"
+                            } else {
+                                "Select one of $mergeTargetCount highlighted cells"
+                            },
+                            enabled = mergeTargetCount > 0,
+                        ) {
+                            onStartMerge(boxIndex)
+                        },
+                        EditorMenuRow(
+                            "Split merged box",
+                            "Restore one box per occupied cell",
+                            enabled = box.rowSpan > 1 || box.columnSpan > 1,
+                        ) {
+                            updateCurrentPage { it.splitBox(boxIndex) }
+                        },
+                        EditorMenuRow(
+                            "Remove box",
+                            "The empty cell can be added again in edit mode",
+                            enabled = pageConfig.boxes.size > 1,
+                        ) {
+                            updateCurrentPage { it.removeBox(boxIndex) }
+                        },
+                    ),
+                ),
+                EditorMenuSection(
+                    "Actions",
+                    listOf(
+                        EditorMenuRow("Apply visual style to page") {
+                            confirmApplyStyleToPage(boxIndex)
+                        },
+                        EditorMenuRow("Set default alarms", box.sensor.label) {
+                            updateBoxConfig(boxIndex) { withDefaultAlarmThresholds(it) }
+                        },
+                        EditorMenuRow("Disable alarms", box.sensor.label) {
+                            updateBoxConfig(boxIndex) { clearAlarmThresholds(it) }
+                        },
+                        EditorMenuRow("Reset this box style") {
+                            updateBoxConfig(boxIndex) { resetBoxStyle(it) }
+                        },
+                    ),
+                ),
+            ),
         )
-
-        AlertDialog.Builder(context)
-            .setTitle("Edit ${pageConfig.title}: ${box.sensor.label}")
-            .setItems(actions) { _, which ->
-                when (which) {
-                    0 -> showSensorPicker(boxIndex)
-                    1 -> showScalePicker("Value size", box.valueScale) { selected ->
-                        updateBoxConfig(boxIndex) { it.copy(valueScale = selected) }
-                    }
-                    2 -> showScalePicker("Icon size", box.iconScale) { selected ->
-                        updateBoxConfig(boxIndex) { it.copy(iconScale = selected) }
-                    }
-                    3 -> showScalePicker("Icon/value gap", box.iconValueGapScale) { selected ->
-                        updateBoxConfig(boxIndex) { it.copy(iconValueGapScale = selected) }
-                    }
-                    4 -> showDecimalsPicker(boxIndex, box)
-                    5 -> updateBoxConfig(boxIndex) {
-                        it.copy(splitValueDigits = !it.splitValueDigits)
-                    }
-                    6 -> showSmoothingPicker(boxIndex, box)
-                    7 -> showColorPicker(
-                        title = "Normal value color",
-                        current = box.valueColor,
-                        palette = VALUE_COLORS,
-                    ) { selected ->
-                        updateBoxConfig(boxIndex) {
-                            it.copy(valueColor = selected, foregroundColor = selected)
-                        }
-                    }
-                    8 -> showColorPicker(
-                        title = "Background color",
-                        current = box.backgroundColor,
-                        palette = BACKGROUND_COLORS,
-                    ) { selected ->
-                        updateBoxConfig(boxIndex) { it.copy(backgroundColor = selected) }
-                    }
-                    9 -> showThresholdEditor(
-                        title = "Warning low",
-                        boxIndex = boxIndex,
-                        box = box,
-                        current = box.warningLow,
-                    ) { newValue -> copy(warningLow = newValue) }
-                    10 -> showThresholdEditor(
-                        title = "Critical low",
-                        boxIndex = boxIndex,
-                        box = box,
-                        current = box.criticalLow,
-                    ) { newValue -> copy(criticalLow = newValue) }
-                    11 -> showThresholdEditor(
-                        title = "Warning high",
-                        boxIndex = boxIndex,
-                        box = box,
-                        current = box.warningHigh,
-                    ) { newValue -> copy(warningHigh = newValue) }
-                    12 -> showThresholdEditor(
-                        title = "Critical high",
-                        boxIndex = boxIndex,
-                        box = box,
-                        current = box.criticalHigh,
-                    ) { newValue -> copy(criticalHigh = newValue) }
-                    13 -> if (box.sensor == DashboardSensor.OIL_PRESSURE) {
-                        showOilPressureBoostAlarmEditor(boxIndex, box)
-                    } else {
-                        showSensorPicker(boxIndex)
-                    }
-                    14 -> showColorPicker(
-                        title = "Warning background",
-                        current = box.warningColor,
-                        palette = WARNING_COLORS,
-                    ) { selected ->
-                        updateBoxConfig(boxIndex) { it.copy(warningColor = selected) }
-                    }
-                    15 -> showColorPicker(
-                        title = "Warning value color",
-                        current = box.warningValueColor,
-                        palette = ALARM_VALUE_COLORS,
-                    ) { selected ->
-                        updateBoxConfig(boxIndex) { it.copy(warningValueColor = selected) }
-                    }
-                    16 -> showColorPicker(
-                        title = "Critical background",
-                        current = box.criticalColor,
-                        palette = CRITICAL_COLORS,
-                    ) { selected ->
-                        updateBoxConfig(boxIndex) {
-                            it.copy(
-                                criticalColor = selected,
-                                alarmColor = selected,
-                                maxColor = selected,
-                            )
-                        }
-                    }
-                    17 -> showColorPicker(
-                        title = "Critical value color",
-                        current = box.criticalValueColor,
-                        palette = ALARM_VALUE_COLORS,
-                    ) { selected ->
-                        updateBoxConfig(boxIndex) { it.copy(criticalValueColor = selected) }
-                    }
-                    18 -> updateBoxConfig(boxIndex) {
-                        it.copy(alarmColorsBackground = !it.alarmColorsBackground)
-                    }
-                    19 -> updateBoxConfig(boxIndex) {
-                        it.copy(alarmColorsValue = !it.alarmColorsValue)
-                    }
-                    20 -> updateBoxConfig(boxIndex) { it.copy(showIcon = !it.showIcon) }
-                    21 -> updateBoxConfig(boxIndex) { it.copy(showUnit = !it.showUnit) }
-                    22 -> updateBoxConfig(boxIndex) { it.copy(showMinMax = !it.showMinMax) }
-                    23 -> confirmApplyStyleToPage(boxIndex)
-                    24 -> updateBoxConfig(boxIndex) { withDefaultAlarmThresholds(it) }
-                    25 -> updateBoxConfig(boxIndex) { clearAlarmThresholds(it) }
-                    26 -> updateBoxConfig(boxIndex) { resetBoxStyle(it) }
-                }
-            }
-            .setNegativeButton("Close", null)
-            .show()
     }
 
     private fun showDecimalsPicker(boxIndex: Int, box: DashboardBoxConfig) {
@@ -418,6 +555,8 @@ internal class DashboardEditorController(
             box.copy(
                 valueScale = 1.0f,
                 iconScale = 1.0f,
+                iconValueGapScale = 1.0f,
+                minMaxScale = 1.0f,
                 decimalPlaces = defaultDisplayDecimals(box.sensor),
                 splitValueDigits = true,
                 smoothingAlpha = defaultDisplaySmoothing(box.sensor),
@@ -428,6 +567,7 @@ internal class DashboardEditorController(
                 alarmColor = Color.rgb(255, 72, 72),
                 minColor = Color.rgb(80, 170, 255),
                 maxColor = Color.rgb(255, 72, 72),
+                borderColor = Color.rgb(255, 110, 36),
                 warningColor = Color.rgb(255, 170, 48),
                 criticalColor = Color.rgb(255, 72, 72),
                 warningValueColor = Color.BLACK,
@@ -512,6 +652,11 @@ internal class DashboardEditorController(
             else -> 1.0f
         }
 
+
+    private fun spanSummary(rows: Int, columns: Int): String =
+        "$rows ${if (rows == 1) "row" else "rows"} × " +
+            "$columns ${if (columns == 1) "column" else "columns"}"
+
     private fun decimalsText(decimals: Int): String =
         when (decimals.coerceIn(0, 2)) {
             0 -> "0 decimals"
@@ -576,6 +721,16 @@ internal class DashboardEditorController(
             NamedColor("Dark teal", Color.rgb(8, 24, 28)),
             NamedColor("Dark amber", Color.rgb(28, 18, 8)),
         )
+        val BORDER_COLORS = listOf(
+            NamedColor("UTCOMP orange", Color.rgb(255, 110, 36)),
+            NamedColor("White", Color.WHITE),
+            NamedColor("Ice blue", Color.rgb(120, 210, 255)),
+            NamedColor("Green", Color.rgb(80, 220, 120)),
+            NamedColor("Yellow", Color.rgb(255, 220, 70)),
+            NamedColor("Red", Color.rgb(255, 72, 72)),
+            NamedColor("Gray", Color.rgb(110, 120, 138)),
+            NamedColor("Black", Color.BLACK),
+        )
         val WARNING_COLORS = listOf(
             NamedColor("Orange", Color.rgb(255, 170, 48)),
             NamedColor("Yellow", Color.rgb(255, 220, 70)),
@@ -597,7 +752,10 @@ internal class DashboardEditorController(
             NamedColor("Magenta", Color.rgb(220, 40, 255)),
         )
         val ALL_NAMED_COLORS =
-            (VALUE_COLORS + ALARM_VALUE_COLORS + BACKGROUND_COLORS + WARNING_COLORS + CRITICAL_COLORS)
+            (
+                VALUE_COLORS + ALARM_VALUE_COLORS + BACKGROUND_COLORS +
+                    BORDER_COLORS + WARNING_COLORS + CRITICAL_COLORS
+            )
                 .distinctBy { it.color }
     }
 }

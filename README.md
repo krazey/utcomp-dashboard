@@ -27,7 +27,15 @@ hierarchies and update only live values, colors, min/max labels, and overlays.
 The CSV writer streams rows through a reusable builder path instead of creating
 large temporary field lists. CSV preview loading runs outside the activity and
 extracts only the displayed columns from wide log rows. Dashboard configuration
-JSON is handled by a focused codec rather than the UI controller.
+JSON is handled by a focused codec rather than the UI controller. The simple
+dashboard uses a retained weighted grid with configurable pages from 1×1 through
+4×4. Boxes can span adjacent cells, so values can be merged into wider or taller
+cards without adding hard-coded layouts.
+
+Edit mode provides page creation, duplication, reordering, grid presets, box
+merge/split, editable border colors, and independent min/max sizing. Ralliart
+rendering keeps its fixed instrument layout but uses the same per-sensor style
+configuration, including split lower-corner oil min/max values.
 
 The Kotlin namespace is `de.krazey.utcomp.dashboard`. The Android
 `applicationId` intentionally remains `de.krazey.utcomp.probe` so existing

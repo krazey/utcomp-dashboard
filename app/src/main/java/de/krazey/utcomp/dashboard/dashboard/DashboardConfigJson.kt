@@ -52,6 +52,7 @@ internal object DashboardConfigJson {
             putFloat(this, "valueScale", box.valueScale)
             putFloat(this, "iconScale", box.iconScale)
             putFloat(this, "iconValueGapScale", box.iconValueGapScale)
+            putFloat(this, "minMaxScale", box.minMaxScale)
             putFloat(this, "scaleMin", box.scaleMin)
             putFloat(this, "scaleMax", box.scaleMax)
             putFloat(this, "smoothingAlpha", box.smoothingAlpha)
@@ -73,6 +74,7 @@ internal object DashboardConfigJson {
             put("alarmColor", box.alarmColor)
             put("minColor", box.minColor)
             put("maxColor", box.maxColor)
+            put("borderColor", box.borderColor)
             put("valueColor", box.valueColor)
             put("warningColor", box.warningColor)
             put("criticalColor", box.criticalColor)
@@ -116,7 +118,7 @@ internal object DashboardConfigJson {
             rows = json.optInt("rows", fallback.rows),
             columns = json.optInt("columns", fallback.columns),
             boxes = boxes,
-        )
+        ).normalized()
     }
 
     private fun boxConfigFromJson(
@@ -140,6 +142,11 @@ internal object DashboardConfigJson {
                 json,
                 "iconValueGapScale",
                 fallback.iconValueGapScale,
+            ),
+            minMaxScale = optFloat(
+                json,
+                "minMaxScale",
+                fallback.minMaxScale,
             ),
             scaleMin = optFloat(json, "scaleMin", fallback.scaleMin),
             scaleMax = optFloat(json, "scaleMax", fallback.scaleMax),
@@ -187,6 +194,7 @@ internal object DashboardConfigJson {
             alarmColor = json.optInt("alarmColor", fallback.alarmColor),
             minColor = json.optInt("minColor", fallback.minColor),
             maxColor = json.optInt("maxColor", fallback.maxColor),
+            borderColor = json.optInt("borderColor", fallback.borderColor),
             valueColor = json.optInt("valueColor", fallback.valueColor),
             warningColor = json.optInt(
                 "warningColor",
