@@ -117,5 +117,61 @@ fun main() {
     check(single.boxes.single().row == 0)
     check(single.boxes.single().column == 0)
 
+    val customizedSimple = twoByTwo.copy(
+        minMaxAlwaysVisible = true,
+        showSourceLine = false,
+        boxes = twoByTwo.boxes.map { current ->
+            when (current.sensor) {
+                DashboardSensor.BOOST -> current.copy(
+                    valueScale = 1.35f,
+                    minMaxScale = 1.6f,
+                    minColor = 0x11223344,
+                    showMinMax = false,
+                )
+                DashboardSensor.OIL_TEMP -> current.copy(
+                    warningHigh = 118.0f,
+                    criticalHigh = 127.0f,
+                )
+                else -> current
+            }
+        },
+    )
+    val migratedRalliart = DefaultDashboardPages.ralliart
+        .withSensorSettingsFrom(customizedSimple)
+    val migratedBoost = migratedRalliart.boxes.first {
+        it.sensor == DashboardSensor.BOOST
+    }
+    val defaultBoost = DefaultDashboardPages.ralliart.boxes.first {
+        it.sensor == DashboardSensor.BOOST
+    }
+    check(migratedRalliart.id == "ralliart")
+    check(migratedRalliart.minMaxAlwaysVisible)
+    check(!migratedRalliart.showSourceLine)
+    check(migratedBoost.valueScale == 1.35f)
+    check(migratedBoost.minMaxScale == 1.6f)
+    check(migratedBoost.minColor == 0x11223344)
+    check(!migratedBoost.showMinMax)
+    check(migratedBoost.row == defaultBoost.row)
+    check(migratedBoost.column == defaultBoost.column)
+
+    val simpleAfterRalliartEdit = customizedSimple
+    val editedRalliart = migratedRalliart.copy(
+        minMaxAlwaysVisible = false,
+        boxes = migratedRalliart.boxes.map { current ->
+            if (current.sensor == DashboardSensor.BOOST) {
+                current.copy(valueScale = 0.8f, showMinMax = true)
+            } else {
+                current
+            }
+        },
+    )
+    check(simpleAfterRalliartEdit.minMaxAlwaysVisible)
+    check(!simpleAfterRalliartEdit.showSourceLine)
+    check(simpleAfterRalliartEdit.boxes.first().valueScale == 1.35f)
+    check(!simpleAfterRalliartEdit.boxes.first().showMinMax)
+    check(!editedRalliart.minMaxAlwaysVisible)
+    check(editedRalliart.boxes.first().valueScale == 0.8f)
+    check(editedRalliart.boxes.first().showMinMax)
+
     println("Dashboard layout tests passed")
 }

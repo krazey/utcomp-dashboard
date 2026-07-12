@@ -32,6 +32,8 @@ internal object DashboardConfigJson {
             put("title", pageConfig.title)
             put("rows", pageConfig.rows)
             put("columns", pageConfig.columns)
+            put("minMaxAlwaysVisible", pageConfig.minMaxAlwaysVisible)
+            put("showSourceLine", pageConfig.showSourceLine)
             put(
                 "boxes",
                 JSONArray().apply {
@@ -118,6 +120,14 @@ internal object DashboardConfigJson {
             rows = json.optInt("rows", fallback.rows),
             columns = json.optInt("columns", fallback.columns),
             boxes = boxes,
+            minMaxAlwaysVisible = json.optBoolean(
+                "minMaxAlwaysVisible",
+                fallback.minMaxAlwaysVisible,
+            ),
+            showSourceLine = json.optBoolean(
+                "showSourceLine",
+                fallback.showSourceLine,
+            ),
         ).normalized()
     }
 

@@ -89,7 +89,6 @@ class MainActivity : Activity(), DashboardRenderHost {
     }
 
     private enum class UiMode { FANCY, SIMPLE, DEBUG }
-    private enum class MinMaxMode { ON_TAP, ALWAYS }
 
     private data class MergeSession(
         val pageId: String,
@@ -211,11 +210,10 @@ class MainActivity : Activity(), DashboardRenderHost {
     }
 
     private var dashboardPages = DefaultDashboardPages.all
+    private var ralliartPageConfig = DefaultDashboardPages.ralliart
     private var mergeSession: MergeSession? = null
-    private var showSourceLine = true
-    private val minMaxBySensor = LinkedHashMap<String, DashboardMinMax>()
+    private val minMaxByScope = LinkedHashMap<String, DashboardMinMax>()
     private val smoothedValuesByBox = LinkedHashMap<Int, Float>()
-    private var minMaxDisplayMode = MinMaxMode.ON_TAP
     private var activeMinMaxCard: String? = null
     private var minMaxHideRunnable: Runnable? = null
 
@@ -267,6 +265,7 @@ class MainActivity : Activity(), DashboardRenderHost {
             onSmoothingChanged = { boxIndex, box ->
                 smoothedValuesByBox.remove(smoothedValueKey(boxIndex, box))
             },
+            isLayoutEditable = { uiMode == UiMode.SIMPLE },
             onEditPageGrid = {
                 dashboardPageEditorController.showCurrentPageGridEditor()
             },
@@ -445,7 +444,7 @@ class MainActivity : Activity(), DashboardRenderHost {
 
         val row2 = ClickableLinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         row2.addView(button("Style") { cycleUiMode() })
-        row2.addView(button("Pages / Grid") { dashboardPageEditorController.showPageManager() })
+        row2.addView(button("Pages / Grid") { showSimplePageManager() })
         row2.addView(button("REQ live") { requestLiveData(logEach = true) })
         controls.addView(row2)
 
@@ -458,11 +457,7 @@ class MainActivity : Activity(), DashboardRenderHost {
         val row4 = ClickableLinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         row4.addView(button("Reset min/max") { resetAllMinMax() })
         row4.addView(button("Min/max") { toggleMinMaxMode() })
-        row4.addView(button("Toggle subtitles") {
-            showSourceLine = !showSourceLine
-            appendLog("Sensor source subtitles ${if (showSourceLine) "enabled" else "hidden"}")
-            renderDashboard()
-        })
+        row4.addView(button("Toggle subtitles") { toggleSourceSubtitles() })
         controls.addView(row4)
 
         val row5 = ClickableLinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -479,7 +474,7 @@ class MainActivity : Activity(), DashboardRenderHost {
         val dashScroll = DashboardSwipeScrollView(this).apply {
             isFillViewport = true
             isPageSwipeEnabled = {
-                mergeSession == null && dashboardPages.size > 1 && uiMode != UiMode.DEBUG
+                mergeSession == null && dashboardPages.size > 1 && uiMode == UiMode.SIMPLE
             }
             onTouchStateChanged = { active ->
                 if (active) markDashboardTouchActive() else markDashboardTouchFinished()
@@ -555,7 +550,7 @@ class MainActivity : Activity(), DashboardRenderHost {
         if (prefs.getBoolean("fastSensorSmoothingV1Applied", false)) return
 
         var touched = false
-        dashboardPages = dashboardPages.map { pageConfig ->
+        fun migrate(pageConfig: DashboardPageConfig): DashboardPageConfig =
             pageConfig.copy(
                 boxes = pageConfig.boxes.map { box ->
                     if (
@@ -571,7 +566,9 @@ class MainActivity : Activity(), DashboardRenderHost {
                     }
                 },
             )
-        }
+
+        dashboardPages = dashboardPages.map(::migrate)
+        ralliartPageConfig = migrate(ralliartPageConfig)
 
         prefs.edit().putBoolean("fastSensorSmoothingV1Applied", true).apply()
         if (touched) saveDashboardPrefs()
@@ -584,7 +581,6 @@ class MainActivity : Activity(), DashboardRenderHost {
             enumValues<UiMode>().firstOrNull { it.name == saved }?.let { uiMode = it }
         }
 
-        showSourceLine = prefs.getBoolean("showSourceLine", showSourceLine)
         dataLogTreeUri = prefs.getString("dataLogTreeUri", null)?.let { Uri.parse(it) }
 
         DashboardConfigJson.decode(prefs.getString("dashboardPagesJson", null))?.let { savedPages ->
@@ -602,6 +598,44 @@ class MainActivity : Activity(), DashboardRenderHost {
                 else -> 0
             }
         currentPageIndex = currentPageIndex.coerceIn(dashboardPages.indices)
+
+        val savedRalliart = DashboardConfigJson.decode(
+            prefs.getString("ralliartPageJson", null),
+            defaults = listOf(DefaultDashboardPages.ralliart),
+        )?.firstOrNull()
+        ralliartPageConfig = savedRalliart?.normalized()
+            ?: DefaultDashboardPages.ralliart.withSensorSettingsFrom(simplePageConfig())
+
+        if (savedRalliart == null) {
+            prefs.edit()
+                .putString(
+                    "ralliartPageJson",
+                    DashboardConfigJson.encode(listOf(ralliartPageConfig)),
+                )
+                .apply()
+        }
+
+        if (!prefs.getBoolean("pageScopedSourceLineV1Applied", false)) {
+            val legacyShowSourceLine = prefs.getBoolean("showSourceLine", true)
+            dashboardPages = dashboardPages.map { page ->
+                page.copy(showSourceLine = legacyShowSourceLine)
+            }
+            ralliartPageConfig = ralliartPageConfig.copy(
+                showSourceLine = legacyShowSourceLine,
+            )
+            prefs.edit()
+                .remove("showSourceLine")
+                .putBoolean("pageScopedSourceLineV1Applied", true)
+                .putString(
+                    "dashboardPagesJson",
+                    DashboardConfigJson.encode(dashboardPages),
+                )
+                .putString(
+                    "ralliartPageJson",
+                    DashboardConfigJson.encode(listOf(ralliartPageConfig)),
+                )
+                .apply()
+        }
     }
 
     private fun saveDashboardPrefs() {
@@ -616,11 +650,14 @@ class MainActivity : Activity(), DashboardRenderHost {
         runCatching {
             dashboardPrefs.edit().apply {
                 putString("uiMode", uiMode.name)
-                putString("pageId", currentPageConfig().id)
-                putBoolean("showSourceLine", showSourceLine)
+                putString("pageId", simplePageConfig().id)
                 putString("dataLogTreeUri", dataLogTreeUri?.toString())
                 if (includePageConfig) {
                     putString("dashboardPagesJson", DashboardConfigJson.encode(dashboardPages))
+                    putString(
+                        "ralliartPageJson",
+                        DashboardConfigJson.encode(listOf(ralliartPageConfig)),
+                    )
                 }
             }.apply()
         }.onFailure { error ->
@@ -628,12 +665,33 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
     }
 
-    private fun currentPageConfig(): DashboardPageConfig =
+    private fun simplePageConfig(): DashboardPageConfig =
         dashboardPages.getOrNull(currentPageIndex) ?: dashboardPages.first()
 
+    private fun currentPageConfig(): DashboardPageConfig =
+        when (uiMode) {
+            UiMode.FANCY -> ralliartPageConfig
+            UiMode.SIMPLE,
+            UiMode.DEBUG -> simplePageConfig()
+        }
+
     private fun updateCurrentPage(transform: (DashboardPageConfig) -> DashboardPageConfig) {
-        dashboardPages = dashboardPages.mapIndexed { index, pageConfig ->
-            if (index == currentPageIndex) transform(pageConfig).normalized() else pageConfig
+        when (uiMode) {
+            UiMode.FANCY -> {
+                ralliartPageConfig = transform(ralliartPageConfig).normalized()
+                ralliartRenderer.clear()
+            }
+            UiMode.SIMPLE -> {
+                dashboardPages = dashboardPages.mapIndexed { index, pageConfig ->
+                    if (index == currentPageIndex) {
+                        transform(pageConfig).normalized()
+                    } else {
+                        pageConfig
+                    }
+                }
+                simpleRenderer.clear()
+            }
+            UiMode.DEBUG -> return
         }
         saveDashboardPrefs()
         renderDashboard()
@@ -644,11 +702,11 @@ class MainActivity : Activity(), DashboardRenderHost {
         selectedIndex: Int,
     ) {
         mergeSession = null
+        clearTransientMinMaxDisplay()
         dashboardPages = pages.ifEmpty { DefaultDashboardPages.all }
             .map(DashboardPageConfig::normalized)
         currentPageIndex = selectedIndex.coerceIn(dashboardPages.indices)
         smoothedValuesByBox.clear()
-        ralliartRenderer.clear()
         simpleRenderer.clear()
         saveDashboardPrefs()
         renderDashboard()
@@ -664,6 +722,10 @@ class MainActivity : Activity(), DashboardRenderHost {
     }
 
     private fun startMerge(boxIndex: Int) {
+        if (uiMode != UiMode.SIMPLE) {
+            Toast.makeText(this, "Merging is available on simple pages", Toast.LENGTH_SHORT).show()
+            return
+        }
         val page = currentPageConfig().normalized()
         val targetCells = page.mergeTargetCells(boxIndex)
         if (targetCells.isEmpty()) {
@@ -673,10 +735,6 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
 
         editMode = true
-        if (uiMode != UiMode.SIMPLE) {
-            uiMode = UiMode.SIMPLE
-            saveDashboardViewPrefs()
-        }
         mergeSession = MergeSession(page.id, boxIndex, targetCells)
         simpleRenderer.clear()
         updateEditModeButton()
@@ -1078,6 +1136,7 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     private fun cycleUiMode() {
         cancelMerge(render = false)
+        clearTransientMinMaxDisplay()
         uiMode = when (uiMode) {
             UiMode.FANCY -> UiMode.SIMPLE
             UiMode.SIMPLE -> UiMode.DEBUG
@@ -1087,17 +1146,30 @@ class MainActivity : Activity(), DashboardRenderHost {
         renderDashboard()
     }
 
-    private fun nextPage() {
-        if (dashboardPages.isEmpty()) return
+    private fun showSimplePageManager() {
         cancelMerge(render = false)
+        clearTransientMinMaxDisplay()
+        if (uiMode != UiMode.SIMPLE) {
+            uiMode = UiMode.SIMPLE
+            saveDashboardViewPrefs()
+            renderDashboard()
+        }
+        dashboardPageEditorController.showPageManager()
+    }
+
+    private fun nextPage() {
+        if (uiMode != UiMode.SIMPLE || dashboardPages.isEmpty()) return
+        cancelMerge(render = false)
+        clearTransientMinMaxDisplay()
         currentPageIndex = (currentPageIndex + 1) % dashboardPages.size
         saveDashboardViewPrefs()
         renderDashboard()
     }
 
     private fun previousPage() {
-        if (dashboardPages.isEmpty()) return
+        if (uiMode != UiMode.SIMPLE || dashboardPages.isEmpty()) return
         cancelMerge(render = false)
+        clearTransientMinMaxDisplay()
         currentPageIndex =
             (currentPageIndex + dashboardPages.size - 1) % dashboardPages.size
         saveDashboardViewPrefs()
@@ -1528,7 +1600,11 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         }
 
     override fun sourceSubtitleFor(sensor: DashboardSensor): String =
-        UtcompDeviceConfig.subtitleFor(sensor)
+        if (currentPageConfig().showSourceLine) {
+            UtcompDeviceConfig.subtitleFor(sensor)
+        } else {
+            ""
+        }
 
     override fun fallbackIconFor(sensor: DashboardSensor): String =
         when (sensor) {
@@ -1688,8 +1764,13 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         }
 
 
+    private fun minMaxScopePrefix(): String =
+        "${uiMode.name}:${currentPageConfig().id}:"
+
+    private fun scopedMinMaxKey(key: String): String = minMaxScopePrefix() + key
+
     override fun trackMinMax(key: String, value: Float): DashboardMinMax {
-        val stats = minMaxBySensor.getOrPut(key) { DashboardMinMax() }
+        val stats = minMaxByScope.getOrPut(scopedMinMaxKey(key)) { DashboardMinMax() }
         if (value.isNaN() || value.isInfinite()) return stats
 
         if (stats.min.isNaN() || value < stats.min) stats.min = value
@@ -1698,31 +1779,42 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
     }
 
     private fun resetAllMinMax() {
-        minMaxBySensor.clear()
-        appendLog("Min/max values reset")
-        renderDashboard()
-    }
-
-    private fun resetMinMax(key: String) {
-        minMaxBySensor.remove(key)
-        appendLog("Min/max reset for $key")
+        val scopePrefix = minMaxScopePrefix()
+        minMaxByScope.keys.removeAll { it.startsWith(scopePrefix) }
+        clearTransientMinMaxDisplay()
+        appendLog("Min/max values reset for ${currentPageConfig().title} / $uiMode")
         renderDashboard()
     }
 
     private fun toggleMinMaxMode() {
-        minMaxDisplayMode = when (minMaxDisplayMode) {
-            MinMaxMode.ON_TAP -> MinMaxMode.ALWAYS
-            MinMaxMode.ALWAYS -> MinMaxMode.ON_TAP
+        if (uiMode == UiMode.DEBUG) {
+            appendLog("Min/max display is unavailable in debug mode")
+            return
         }
-        activeMinMaxCard = null
-        minMaxHideRunnable?.let { handler.removeCallbacks(it) }
-        minMaxHideRunnable = null
-        appendLog("Min/max display mode: ${if (minMaxDisplayMode == MinMaxMode.ALWAYS) "always" else "tap for 3 seconds"}")
-        renderDashboard()
+        val alwaysVisible = !currentPageConfig().minMaxAlwaysVisible
+        clearTransientMinMaxDisplay()
+        appendLog(
+            "Min/max display for ${currentPageConfig().title} / $uiMode: " +
+                if (alwaysVisible) "always" else "tap for 3 seconds",
+        )
+        updateCurrentPage { it.copy(minMaxAlwaysVisible = alwaysVisible) }
+    }
+
+    private fun toggleSourceSubtitles() {
+        if (uiMode == UiMode.DEBUG) {
+            appendLog("Sensor source subtitles are unavailable in debug mode")
+            return
+        }
+        val showSourceLine = !currentPageConfig().showSourceLine
+        appendLog(
+            "Sensor source subtitles for ${currentPageConfig().title} / $uiMode: " +
+                if (showSourceLine) "enabled" else "hidden",
+        )
+        updateCurrentPage { it.copy(showSourceLine = showSourceLine) }
     }
 
     override fun shouldShowMinMax(key: String): Boolean =
-        minMaxDisplayMode == MinMaxMode.ALWAYS || activeMinMaxCard == key
+        currentPageConfig().minMaxAlwaysVisible || activeMinMaxCard == scopedMinMaxKey(key)
 
     override fun isEditMode(): Boolean = editMode
 
@@ -1734,13 +1826,20 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         }
     }
 
+    private fun clearTransientMinMaxDisplay() {
+        activeMinMaxCard = null
+        minMaxHideRunnable?.let { handler.removeCallbacks(it) }
+        minMaxHideRunnable = null
+    }
+
     private fun showMinMaxInline(key: String) {
-        activeMinMaxCard = key
+        val scopedKey = scopedMinMaxKey(key)
+        activeMinMaxCard = scopedKey
         minMaxHideRunnable?.let { handler.removeCallbacks(it) }
 
-        if (minMaxDisplayMode == MinMaxMode.ON_TAP) {
+        if (!currentPageConfig().minMaxAlwaysVisible) {
             val hide = Runnable {
-                if (activeMinMaxCard == key) {
+                if (activeMinMaxCard == scopedKey) {
                     activeMinMaxCard = null
                     renderDashboard()
                 }

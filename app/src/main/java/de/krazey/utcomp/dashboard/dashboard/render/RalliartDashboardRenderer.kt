@@ -183,7 +183,7 @@ internal class RalliartDashboardRenderer(
             current.renderedBoost,
         )
         current.boostNeedle.currentValue = boost.coerceIn(-1.0f, 2.0f)
-        updateMinMax(current.boostMinMax, boostSlot.sensor.label, boost, boostSlot)
+        updateMinMax(current.boostMinMax, boostSlot.sensor.name, boost, boostSlot)
 
         current.renderedAfr = updateValue(
             current.afrValueText,
@@ -211,7 +211,7 @@ internal class RalliartDashboardRenderer(
         )
         updateMinMax(
             current.oilPressureMinMax,
-            oilPressureSlot.sensor.label,
+            oilPressureSlot.sensor.name,
             oilPressure,
             oilPressureSlot,
         )
@@ -229,7 +229,7 @@ internal class RalliartDashboardRenderer(
         )
         updateMinMax(
             current.oilTempMinMax,
-            oilTempSlot.sensor.label,
+            oilTempSlot.sensor.name,
             oilTemp,
             oilTempSlot,
         )
@@ -401,7 +401,7 @@ internal class RalliartDashboardRenderer(
             BOOST_HIT_BOX,
             boostSlot,
             "Ralliart • Boost",
-            minMaxKey = boostSlot.sensor.label,
+            minMaxKey = boostSlot.sensor.name,
         )
         addHitZone(root, AFR_HIT_BOX, afrSlot, "Ralliart • AFR")
         addHitZone(root, OIL_PRESSURE_HIT_BOX, oilPressureSlot, "Ralliart • Oil pressure")
@@ -455,7 +455,7 @@ internal class RalliartDashboardRenderer(
         bounds: IntArray,
         slot: SensorSlot,
         editorTitle: String,
-        minMaxKey: String? = if (slot.box.showMinMax) slot.sensor.label else null,
+        minMaxKey: String? = if (slot.box.showMinMax) slot.sensor.name else null,
     ) {
         val hitZone = ClickableLinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -619,7 +619,7 @@ internal class RalliartDashboardRenderer(
     private fun sensorSlot(pageConfig: DashboardPageConfig, sensor: DashboardSensor): SensorSlot {
         val index = pageConfig.boxes.indexOfFirst { it.sensor == sensor }
         if (index >= 0) return SensorSlot(sensor, index, pageConfig.boxes[index])
-        val fallback = DefaultDashboardPages.race2x2.boxes.first { it.sensor == sensor }
+        val fallback = DefaultDashboardPages.ralliart.boxes.first { it.sensor == sensor }
         return SensorSlot(sensor, -1, fallback)
     }
 

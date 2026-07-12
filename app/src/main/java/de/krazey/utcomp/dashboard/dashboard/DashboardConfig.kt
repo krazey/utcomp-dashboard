@@ -189,6 +189,8 @@ data class DashboardPageConfig(
     val rows: Int,
     val columns: Int,
     val boxes: List<DashboardBoxConfig>,
+    val minMaxAlwaysVisible: Boolean = false,
+    val showSourceLine: Boolean = true,
 ) {
     fun withBoxDefaultsAppliedToPage(sourceBox: DashboardBoxConfig): DashboardPageConfig =
         copy(
@@ -215,6 +217,23 @@ data class DashboardPageConfig(
                     showMinMax = sourceBox.showMinMax,
                 )
             },
+        )
+
+    fun withSensorSettingsFrom(sourcePage: DashboardPageConfig): DashboardPageConfig =
+        copy(
+            boxes = boxes.map { targetBox ->
+                sourcePage.boxes.firstOrNull { it.sensor == targetBox.sensor }
+                    ?.copy(
+                        sensor = targetBox.sensor,
+                        row = targetBox.row,
+                        column = targetBox.column,
+                        rowSpan = targetBox.rowSpan,
+                        columnSpan = targetBox.columnSpan,
+                    )
+                    ?: targetBox
+            },
+            minMaxAlwaysVisible = sourcePage.minMaxAlwaysVisible,
+            showSourceLine = sourcePage.showSourceLine,
         )
 
     fun normalized(): DashboardPageConfig {
@@ -613,6 +632,12 @@ object DefaultDashboardPages {
             DashboardBoxConfig(DashboardSensor.TIME, row = 3, column = 1, showMinMax = false),
         ),
     )
+
+    val ralliart: DashboardPageConfig =
+        race2x2.copy(
+            id = "ralliart",
+            title = "Ralliart",
+        )
 
     val all: List<DashboardPageConfig> = listOf(race2x2, strip1x4, full2x4)
 }

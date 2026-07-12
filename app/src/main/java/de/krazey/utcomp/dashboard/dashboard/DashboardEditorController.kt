@@ -19,6 +19,7 @@ internal class DashboardEditorController(
         transform: (DashboardBoxConfig) -> DashboardBoxConfig,
     ) -> Unit,
     private val onSmoothingChanged: (boxIndex: Int, box: DashboardBoxConfig) -> Unit,
+    private val isLayoutEditable: () -> Boolean,
     private val onEditPageGrid: () -> Unit,
     private val onStartMerge: (boxIndex: Int) -> Unit,
 ) {
@@ -30,7 +31,12 @@ internal class DashboardEditorController(
     fun showBoxEditor(boxIndex: Int, titleOverride: String? = null) {
         val pageConfig = currentPageConfig().normalized()
         val box = pageConfig.boxes.getOrNull(boxIndex) ?: return
-        val mergeTargetCount = pageConfig.mergeTargetCells(boxIndex).size
+        val layoutEditable = isLayoutEditable()
+        val mergeTargetCount = if (layoutEditable) {
+            pageConfig.mergeTargetCells(boxIndex).size
+        } else {
+            0
+        }
         val oilBoostText = if (box.sensor == DashboardSensor.OIL_PRESSURE) {
             oilPressureBoostAlarmSummary(box)
         } else {
@@ -267,32 +273,42 @@ internal class DashboardEditorController(
                         EditorMenuRow("Position and span", position, enabled = false) {},
                         EditorMenuRow(
                             "Page grid",
-                            "${pageConfig.rows} rows × ${pageConfig.columns} columns",
+                            if (layoutEditable) {
+                                "${pageConfig.rows} rows × ${pageConfig.columns} columns"
+                            } else {
+                                "Fixed for this dashboard style"
+                            },
+                            enabled = layoutEditable,
                         ) {
                             onEditPageGrid()
                         },
                         EditorMenuRow(
                             "Start merge",
-                            if (mergeTargetCount == 0) {
-                                "No rectangular adjacent cell available"
-                            } else {
-                                "Select one of $mergeTargetCount highlighted cells"
+                            when {
+                                !layoutEditable -> "Only available on simple pages"
+                                mergeTargetCount == 0 -> {
+                                    "No rectangular adjacent cell available"
+                                }
+                                else -> {
+                                    "Select one of $mergeTargetCount highlighted cells"
+                                }
                             },
-                            enabled = mergeTargetCount > 0,
+                            enabled = layoutEditable && mergeTargetCount > 0,
                         ) {
                             onStartMerge(boxIndex)
                         },
                         EditorMenuRow(
                             "Split merged box",
                             "Restore one box per occupied cell",
-                            enabled = box.rowSpan > 1 || box.columnSpan > 1,
+                            enabled = layoutEditable &&
+                                (box.rowSpan > 1 || box.columnSpan > 1),
                         ) {
                             updateCurrentPage { it.splitBox(boxIndex) }
                         },
                         EditorMenuRow(
                             "Remove box",
                             "The empty cell can be added again in edit mode",
-                            enabled = pageConfig.boxes.size > 1,
+                            enabled = layoutEditable && pageConfig.boxes.size > 1,
                         ) {
                             updateCurrentPage { it.removeBox(boxIndex) }
                         },

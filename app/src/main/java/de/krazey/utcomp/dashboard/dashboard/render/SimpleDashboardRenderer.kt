@@ -253,7 +253,7 @@ internal class SimpleDashboardRenderer(
         val minMaxKey = if (sensor == DashboardSensor.TIME || !box.showMinMax) {
             null
         } else {
-            sensor.label
+            "box:$boxIndex:${sensor.name}"
         }
         val background = GradientDrawable().apply {
             setColor(box.backgroundColor)
