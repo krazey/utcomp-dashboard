@@ -129,6 +129,9 @@ class MainActivity : Activity() {
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private val clockFmt = SimpleDateFormat("HH:mm", Locale.US)
+    private val clockDate = Date()
+    private var cachedClockMinute = Long.MIN_VALUE
+    private var cachedClockText = ""
     private val handler = Handler(Looper.getMainLooper())
     private var dataMode = DataMode.USB
     private var simTestMode = SimTestMode.OFF
@@ -226,7 +229,7 @@ class MainActivity : Activity() {
     private var swipeStartY = 0f
     private var showSourceLine = true
     private val minMaxBySensor = LinkedHashMap<String, MinMax>()
-    private val smoothedValuesByBox = LinkedHashMap<String, Float>()
+    private val smoothedValuesByBox = LinkedHashMap<Int, Float>()
     private var minMaxDisplayMode = MinMaxMode.ON_TAP
     private var activeMinMaxCard: String? = null
     private var minMaxHideRunnable: Runnable? = null
@@ -285,20 +288,20 @@ class MainActivity : Activity() {
 
             val bandStart = (total * startFraction).toInt()
             val bandEnd = (total * endFraction).toInt()
-            afrTargetBand.layoutParams = FrameLayout.LayoutParams(
-                (bandEnd - bandStart).coerceAtLeast(6),
-                FrameLayout.LayoutParams.MATCH_PARENT,
-            ).apply {
-                leftMargin = bandStart
+            val bandWidth = (bandEnd - bandStart).coerceAtLeast(6)
+            val bandParams = afrTargetBand.layoutParams as FrameLayout.LayoutParams
+            if (bandParams.width != bandWidth || bandParams.leftMargin != bandStart) {
+                bandParams.width = bandWidth
+                bandParams.leftMargin = bandStart
+                afrTargetBand.layoutParams = bandParams
             }
 
             val markerLeft = ((total * valueFraction).toInt() - 4)
                 .coerceIn(0, (total - 8).coerceAtLeast(0))
-            afrMarker.layoutParams = FrameLayout.LayoutParams(
-                8,
-                FrameLayout.LayoutParams.MATCH_PARENT,
-            ).apply {
-                leftMargin = markerLeft
+            val markerParams = afrMarker.layoutParams as FrameLayout.LayoutParams
+            if (markerParams.leftMargin != markerLeft) {
+                markerParams.leftMargin = markerLeft
+                afrMarker.layoutParams = markerParams
             }
         }
     }
@@ -329,6 +332,7 @@ class MainActivity : Activity() {
     )
 
     private var simpleBinding: SimpleDashboardBinding? = null
+    private var debugTextView: TextView? = null
 
     private val simRunnable = object : Runnable {
         override fun run() {
@@ -1356,13 +1360,16 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         when (uiMode) {
             UiMode.FANCY -> {
                 simpleBinding = null
+                debugTextView = null
                 renderFancy(renderSnapshot)
             }
-            UiMode.SIMPLE -> renderSimple(renderSnapshot)
+            UiMode.SIMPLE -> {
+                debugTextView = null
+                renderSimple(renderSnapshot)
+            }
             UiMode.DEBUG -> {
                 ralliartBinding = null
                 simpleBinding = null
-                dashboardRoot.removeAllViews()
                 renderDebug(renderSnapshot)
             }
         }
@@ -1389,8 +1396,8 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         return smoothed
     }
 
-    private fun smoothedValueKey(boxIndex: Int, box: DashboardBoxConfig): String =
-        "${page.ordinal}:$boxIndex:${box.sensor.name}"
+    private fun smoothedValueKey(boxIndex: Int, box: DashboardBoxConfig): Int =
+        (page.ordinal shl 16) or (boxIndex shl 8) or box.sensor.ordinal
 
     private fun formatBoxValue(value: Float?, decimals: Int): String =
         value?.fixed(decimals.coerceIn(0, 2)) ?: "--"
@@ -1575,7 +1582,8 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         val outside = formatTopValue(snapshot.temperatureDsA, "°C")
         val inside = formatTopValue(snapshot.temperatureDsB, "°C")
         val battery = formatTopValue(snapshot.adcInValCh0, " V")
-        binding.headerText.text = "OUT $outside   |   IN $inside   |   $battery   |   ${clockFmt.format(Date())}"
+        val header = "OUT $outside   |   IN $inside   |   $battery   |   ${currentClockText()}"
+        if (binding.headerText.text.toString() != header) binding.headerText.text = header
 
         updateRalliartValue(binding.boostValueText, boost, boostSlot, boostColor)
         binding.boostNeedle.currentValue = boost.coerceIn(-1.0f, 2.0f)
@@ -1629,13 +1637,20 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         oilPressureSlot: FancySensorSlot,
         oilTempSlot: FancySensorSlot,
     ): RalliartDashboardBinding {
-        val key = RalliartLayoutKey(page, currentPageConfig())
+        val currentPage = page
+        val pageConfig = currentPageConfig()
         ralliartBinding?.let { current ->
-            if (current.key == key && current.root.parent === dashboardRoot) return current
+            if (
+                current.key.page == currentPage &&
+                current.key.config == pageConfig &&
+                current.root.parent === dashboardRoot
+            ) {
+                return current
+            }
         }
 
         val binding = buildRalliartDashboard(
-            key = key,
+            key = RalliartLayoutKey(currentPage, pageConfig),
             boostSlot = boostSlot,
             afrSlot = afrSlot,
             oilPressureSlot = oilPressureSlot,
@@ -1879,11 +1894,10 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         slot: FancySensorSlot,
         color: Int,
     ) {
-        val text = styledValueText(
-            formatBoxValue(value, slot.box.decimalPlaces),
-            slot.box.splitValueDigits,
-        )
-        if (!android.text.TextUtils.equals(textView.text, text)) textView.text = text
+        val formattedValue = formatBoxValue(value, slot.box.decimalPlaces)
+        if (textView.text.toString() != formattedValue) {
+            textView.text = styledValueText(formattedValue, slot.box.splitValueDigits)
+        }
         if (textView.currentTextColor != color) textView.setTextColor(color)
     }
 
@@ -2011,11 +2025,18 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
     }
 
     private fun ensureSimpleDashboardBinding(): SimpleDashboardBinding {
+        val currentPage = page
         val pageConfig = currentPageConfig()
-        val key = SimpleLayoutKey(page, pageConfig)
         simpleBinding?.let { current ->
-            if (current.key == key && current.root.parent === dashboardRoot) return current
+            if (
+                current.key.page == currentPage &&
+                current.key.config == pageConfig &&
+                current.root.parent === dashboardRoot
+            ) {
+                return current
+            }
         }
+        val key = SimpleLayoutKey(currentPage, pageConfig)
 
         dashboardRoot.apply {
             setBackgroundColor(Color.BLACK)
@@ -2397,7 +2418,7 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         val rawValue = sensor.readValue(snapshot)
         val displayValue = displayValueForBox(box, binding.boxIndex, rawValue)
         val formattedValue = if (sensor == DashboardSensor.TIME) {
-            clockFmt.format(Date())
+            currentClockText()
         } else {
             formatBoxValue(displayValue ?: rawValue, box.decimalPlaces)
         }
@@ -2444,24 +2465,46 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
     }
 
     private fun renderDebug(s: UtcompDataSnapshot) {
-        val tv = TextView(this).apply {
+        val textView = debugTextView?.takeIf { it.parent === dashboardRoot } ?: TextView(this).apply {
             textSize = 12f
             setTextColor(Color.rgb(220, 225, 235))
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
-            text = buildString {
-                appendLine("Debug snapshot")
-                appendLine("fw=${s.firmware} utcompPro=${s.utcompPro}")
-                appendLine("bar1=${s.bar1} bar2=${s.bar2} bar3=${s.bar3}")
-                appendLine("afr1=${s.afr1} afr2=${s.afr2}")
-                appendLine("adc0=${s.adcInValCh0} adc1=${s.adcInValCh1} adc2=${s.adcInValCh2} adc3=${s.adcInValCh3} adc4=${s.adcInValCh4}")
-                appendLine("ntc1=${s.temperatureNtc1} dsA=${s.temperatureDsA} dsB=${s.temperatureDsB}")
-                appendLine("rpm=${s.rpm} speed=${s.vssSpeed1s}")
-                appendLine("fuelPb=${s.fuelLeftPb} fuelLpg=${s.fuelLeftLpg}")
-                appendLine("tripDist=${s.tripDist} tripCost=${s.tripCost}")
-            }
+        }.also { created ->
+            dashboardRoot.removeAllViews()
+            dashboardRoot.addView(
+                created,
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+            debugTextView = created
         }
-        dashboardRoot.addView(tv, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        val text = buildString(384) {
+            appendLine("Debug snapshot")
+            appendLine("fw=${s.firmware} utcompPro=${s.utcompPro}")
+            appendLine("bar1=${s.bar1} bar2=${s.bar2} bar3=${s.bar3}")
+            appendLine("afr1=${s.afr1} afr2=${s.afr2}")
+            appendLine(
+                "adc0=${s.adcInValCh0} adc1=${s.adcInValCh1} " +
+                    "adc2=${s.adcInValCh2} adc3=${s.adcInValCh3} adc4=${s.adcInValCh4}"
+            )
+            appendLine("ntc1=${s.temperatureNtc1} dsA=${s.temperatureDsA} dsB=${s.temperatureDsB}")
+            appendLine("rpm=${s.rpm} speed=${s.vssSpeed1s}")
+            appendLine("fuelPb=${s.fuelLeftPb} fuelLpg=${s.fuelLeftLpg}")
+            appendLine("tripDist=${s.tripDist} tripCost=${s.tripCost}")
+        }
+        if (textView.text.toString() != text) textView.text = text
+    }
+
+    private fun currentClockText(nowMs: Long = System.currentTimeMillis()): String {
+        val minute = nowMs / 60_000L
+        if (minute != cachedClockMinute) {
+            cachedClockMinute = minute
+            clockDate.time = nowMs
+            cachedClockText = clockFmt.format(clockDate)
+        }
+        return cachedClockText
     }
 
     private data class RowValue(val icon: String, val label: String, val value: String)

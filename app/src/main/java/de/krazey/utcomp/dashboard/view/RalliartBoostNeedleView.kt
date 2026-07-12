@@ -16,30 +16,35 @@ class RalliartBoostNeedleView @JvmOverloads constructor(
 ) : View(context, attrs) {
     var minValue: Float = -1.0f
         set(value) {
+            if (field.toBits() == value.toBits()) return
             field = value
             invalidate()
         }
 
     var maxValue: Float = 2.0f
         set(value) {
+            if (field.toBits() == value.toBits()) return
             field = value
             invalidate()
         }
 
     var currentValue: Float = 0f
         set(value) {
+            if (field.toBits() == value.toBits()) return
             field = value
             invalidate()
         }
 
     var warningValue: Float = 2.0f
         set(value) {
+            if (field.toBits() == value.toBits()) return
             field = value
             invalidate()
         }
 
     var showDebugGuides: Boolean = false
         set(value) {
+            if (field == value) return
             field = value
             invalidate()
         }

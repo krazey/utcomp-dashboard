@@ -13,18 +13,21 @@ class RalliartAfrDebugBarView @JvmOverloads constructor(
 ) : View(context, attrs) {
     var minValue: Float = 10.0f
         set(value) {
+            if (field.toBits() == value.toBits()) return
             field = value
             invalidate()
         }
 
     var maxValue: Float = 20.0f
         set(value) {
+            if (field.toBits() == value.toBits()) return
             field = value
             invalidate()
         }
 
     var showDebugGuides: Boolean = false
         set(value) {
+            if (field == value) return
             field = value
             invalidate()
         }
