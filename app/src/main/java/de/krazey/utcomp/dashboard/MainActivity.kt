@@ -4,8 +4,6 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Build
 import android.os.SystemClock
-import org.json.JSONObject
-import org.json.JSONArray
 import android.content.SharedPreferences
 import android.widget.FrameLayout
 import android.text.style.RelativeSizeSpan
@@ -14,10 +12,12 @@ import android.text.SpannableString
 import android.widget.EditText
 import android.text.InputType
 import android.app.AlertDialog
+import de.krazey.utcomp.dashboard.dashboard.DashboardConfigJson
 import de.krazey.utcomp.dashboard.dashboard.DefaultDashboardPages
 import de.krazey.utcomp.dashboard.dashboard.DashboardSensor
 import de.krazey.utcomp.dashboard.dashboard.DashboardPageConfig
 import de.krazey.utcomp.dashboard.dashboard.DashboardBoxConfig
+import de.krazey.utcomp.dashboard.logging.CsvLogController
 import de.krazey.utcomp.dashboard.logging.UtcompCsvLogger
 import android.app.Activity
 import android.content.Intent
@@ -50,12 +50,7 @@ import de.krazey.utcomp.dashboard.utcomp.UtcompDeviceConfig
 import de.krazey.utcomp.dashboard.utcomp.pretty
 import de.krazey.utcomp.dashboard.view.RalliartBoostNeedleView
 import de.krazey.utcomp.dashboard.view.RalliartAfrDebugBarView
-import de.krazey.utcomp.dashboard.view.CsvLogGraphMarker
-import de.krazey.utcomp.dashboard.view.CsvLogGraphPoint
-import de.krazey.utcomp.dashboard.view.CsvLogGraphView
 import de.krazey.utcomp.dashboard.util.fixed
-import java.io.BufferedReader
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -77,9 +72,6 @@ class MainActivity : Activity() {
         private const val DASHBOARD_RENDER_MS = 125L
         private const val DASHBOARD_TOUCH_RENDER_GRACE_MS = 220L
         private const val DASHBOARD_TOUCH_DEFER_RETRY_MS = 80L
-        private const val DATA_LOG_TREE_REQUEST = 42_100
-        private const val DATA_LOG_VIEW_FILE_REQUEST = 42_101
-        private const val CSV_VIEW_GRAPH_MAX_POINTS = 1600
         private const val DASHBOARD_DOUBLE_TAP_MS = 320L
         private const val DASHBOARD_SWIPE_CLICK_SUPPRESS_MS = 280L
 
@@ -133,6 +125,7 @@ class MainActivity : Activity() {
     private lateinit var logText: TextView
     private lateinit var logScroll: ScrollView
     private lateinit var csvLogger: UtcompCsvLogger
+    private lateinit var csvLogController: CsvLogController
     private var dataLogTreeUri: Uri? = null
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
@@ -338,52 +331,6 @@ class MainActivity : Activity() {
 
     private var simpleBinding: SimpleDashboardBinding? = null
 
-    private data class CsvViewerRow(
-        val time: String,
-        val wallTimeMs: Long?,
-        val elapsedRealtimeMs: Long?,
-        val afr: Float,
-        val boost: Float,
-        val oilPressure: Float,
-        val oilTemp: Float,
-    )
-
-    private data class CsvViewerRange(
-        val min: Float,
-        val max: Float,
-    )
-
-    private data class CsvViewerStats(
-        val afr: CsvViewerRange,
-        val boost: CsvViewerRange,
-        val oilPressure: CsvViewerRange,
-        val oilTemp: CsvViewerRange,
-    )
-
-    private data class CsvViewerPreview(
-        val totalRows: Int,
-        val graphRows: List<CsvViewerRow>,
-        val sourceColumns: String,
-        val firstTime: String,
-        val lastTime: String,
-        val durationText: String,
-        val sampleRateHz: Float,
-        val stats: CsvViewerStats,
-    )
-
-    private class CsvRangeAccumulator {
-        private var minValue = Float.NaN
-        private var maxValue = Float.NaN
-
-        fun add(value: Float) {
-            if (!value.isFinite()) return
-            minValue = if (minValue.isNaN()) value else minOf(minValue, value)
-            maxValue = if (maxValue.isNaN()) value else maxOf(maxValue, value)
-        }
-
-        fun toRange(): CsvViewerRange = CsvViewerRange(minValue, maxValue)
-    }
-
     private val simRunnable = object : Runnable {
         override fun run() {
             if (simTestMode != SimTestMode.OFF || dataMode == DataMode.SIM) {
@@ -410,6 +357,18 @@ class MainActivity : Activity() {
         dataMode = DataMode.USB
         simTestMode = SimTestMode.OFF
         csvLogger = UtcompCsvLogger(this, ::appendLog)
+        csvLogController = CsvLogController(
+            activity = this,
+            logger = csvLogger,
+            appendLog = ::appendLog,
+            savedTreeUri = { dataLogTreeUri },
+            onTreeUriChanged = { uri ->
+                dataLogTreeUri = uri
+                saveDashboardPrefs()
+            },
+            currentPageConfig = ::currentPageConfig,
+            dashboardPages = { dashboardPages },
+        )
         usb = UtcompUsbTransport(
             context = this,
             log = ::appendLog,
@@ -596,7 +555,7 @@ class MainActivity : Activity() {
         controls.addView(row4)
 
         val row5 = ClickableLinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row5.addView(button("Data log") { showDataLoggerMenu() })
+        row5.addView(button("Data log") { csvLogController.showMenu() })
         controls.addView(row5)
 
         controlsPanel = controls.apply {
@@ -711,7 +670,7 @@ class MainActivity : Activity() {
         showSourceLine = prefs.getBoolean("showSourceLine", showSourceLine)
         dataLogTreeUri = prefs.getString("dataLogTreeUri", null)?.let { Uri.parse(it) }
 
-        dashboardPagesFromJson(prefs.getString("dashboardPagesJson", null))?.let { savedPages ->
+        DashboardConfigJson.decode(prefs.getString("dashboardPagesJson", null))?.let { savedPages ->
             if (savedPages.isNotEmpty()) {
                 dashboardPages = savedPages
             }
@@ -725,172 +684,12 @@ class MainActivity : Activity() {
                 .putString("page", page.name)
                 .putBoolean("showSourceLine", showSourceLine)
                 .putString("dataLogTreeUri", dataLogTreeUri?.toString())
-                .putString("dashboardPagesJson", dashboardPagesToJson(dashboardPages))
+                .putString("dashboardPagesJson", DashboardConfigJson.encode(dashboardPages))
                 .apply()
         }.onFailure { error ->
             appendLog("Could not save dashboard settings: ${error.message}")
         }
     }
-
-    private fun dashboardPagesToJson(pages: List<DashboardPageConfig>): String =
-        JSONArray().apply {
-            pages.forEach { pageConfig ->
-                put(pageConfigToJson(pageConfig))
-            }
-        }.toString()
-
-    private fun pageConfigToJson(pageConfig: DashboardPageConfig): JSONObject =
-        JSONObject().apply {
-            put("id", pageConfig.id)
-            put("title", pageConfig.title)
-            put("rows", pageConfig.rows)
-            put("columns", pageConfig.columns)
-            put("boxes", JSONArray().apply {
-                pageConfig.boxes.forEach { box ->
-                    put(boxConfigToJson(box))
-                }
-            })
-        }
-
-    private fun boxConfigToJson(box: DashboardBoxConfig): JSONObject =
-        JSONObject().apply {
-            put("sensor", box.sensor.name)
-            put("row", box.row)
-            put("column", box.column)
-            put("rowSpan", box.rowSpan)
-            put("columnSpan", box.columnSpan)
-            putFloatJson(this, "valueScale", box.valueScale)
-            putFloatJson(this, "iconScale", box.iconScale)
-            putFloatJson(this, "iconValueGapScale", box.iconValueGapScale)
-            putFloatJson(this, "scaleMin", box.scaleMin)
-            putFloatJson(this, "scaleMax", box.scaleMax)
-            putFloatJson(this, "smoothingAlpha", box.smoothingAlpha)
-            putFloatJson(this, "warningLow", box.warningLow)
-            putFloatJson(this, "criticalLow", box.criticalLow)
-            putFloatJson(this, "warningHigh", box.warningHigh)
-            putFloatJson(this, "criticalHigh", box.criticalHigh)
-            putFloatJson(this, "oilPressureBoostArmBar", box.oilPressureBoostArmBar)
-            putFloatJson(this, "oilPressureWarningBar", box.warningLow)
-            putFloatJson(this, "oilPressureCriticalBar", box.criticalLow)
-            put("decimalPlaces", box.decimalPlaces)
-            put("backgroundColor", box.backgroundColor)
-            put("foregroundColor", box.foregroundColor)
-            put("unitColor", box.unitColor)
-            put("alarmColor", box.alarmColor)
-            put("minColor", box.minColor)
-            put("maxColor", box.maxColor)
-            put("valueColor", box.valueColor)
-            put("warningColor", box.warningColor)
-            put("criticalColor", box.criticalColor)
-            put("warningValueColor", box.warningValueColor)
-            put("criticalValueColor", box.criticalValueColor)
-            put("splitValueDigits", box.splitValueDigits)
-            put("alarmColorsBackground", box.alarmColorsBackground)
-            put("alarmColorsValue", box.alarmColorsValue)
-            put("oilPressureBoostAlarm", box.oilPressureBoostAlarm)
-            put("showIcon", box.showIcon)
-            put("showUnit", box.showUnit)
-            put("showMinMax", box.showMinMax)
-        }
-
-    private fun dashboardPagesFromJson(raw: String?): List<DashboardPageConfig>? {
-        if (raw.isNullOrBlank()) return null
-
-        return runCatching {
-            val array = JSONArray(raw)
-            val defaults = DefaultDashboardPages.all
-            (0 until array.length()).map { index ->
-                val fallback = defaults.getOrElse(index) { defaults.last() }
-                pageConfigFromJson(array.optJSONObject(index), fallback)
-            }
-        }.getOrNull()
-    }
-
-    private fun pageConfigFromJson(json: JSONObject?, fallback: DashboardPageConfig): DashboardPageConfig {
-        if (json == null) return fallback
-
-        val boxArray = json.optJSONArray("boxes")
-        val boxes = if (boxArray != null) {
-            (0 until boxArray.length()).map { index ->
-                val fallbackBox = fallback.boxes.getOrElse(index) {
-                    fallback.boxes.lastOrNull() ?: DashboardBoxConfig(DashboardSensor.BOOST, row = 0, column = 0)
-                }
-                boxConfigFromJson(boxArray.optJSONObject(index), fallbackBox)
-            }
-        } else {
-            fallback.boxes
-        }
-
-        return DashboardPageConfig(
-            id = json.optString("id", fallback.id),
-            title = json.optString("title", fallback.title),
-            rows = json.optInt("rows", fallback.rows),
-            columns = json.optInt("columns", fallback.columns),
-            boxes = boxes,
-        )
-    }
-
-    private fun boxConfigFromJson(json: JSONObject?, fallback: DashboardBoxConfig): DashboardBoxConfig {
-        if (json == null) return fallback
-
-        return fallback.copy(
-            sensor = dashboardSensorFromName(json.optString("sensor", fallback.sensor.name), fallback.sensor),
-            row = json.optInt("row", fallback.row),
-            column = json.optInt("column", fallback.column),
-            rowSpan = json.optInt("rowSpan", fallback.rowSpan),
-            columnSpan = json.optInt("columnSpan", fallback.columnSpan),
-            valueScale = optFloatJson(json, "valueScale", fallback.valueScale),
-            iconScale = optFloatJson(json, "iconScale", fallback.iconScale),
-            iconValueGapScale = optFloatJson(json, "iconValueGapScale", fallback.iconValueGapScale),
-            scaleMin = optFloatJson(json, "scaleMin", fallback.scaleMin),
-            scaleMax = optFloatJson(json, "scaleMax", fallback.scaleMax),
-            smoothingAlpha = optFloatJson(json, "smoothingAlpha", fallback.smoothingAlpha),
-            warningLow = optFloatJson(json, "warningLow", fallback.warningLow),
-            criticalLow = optFloatJson(json, "criticalLow", fallback.criticalLow),
-            warningHigh = optFloatJson(json, "warningHigh", fallback.warningHigh),
-            criticalHigh = optFloatJson(json, "criticalHigh", fallback.criticalHigh),
-            oilPressureBoostArmBar = optFloatJson(json, "oilPressureBoostArmBar", fallback.oilPressureBoostArmBar),
-            oilPressureWarningBar = optFloatJson(json, "oilPressureWarningBar", fallback.oilPressureWarningBar),
-            oilPressureCriticalBar = optFloatJson(json, "oilPressureCriticalBar", fallback.oilPressureCriticalBar),
-            decimalPlaces = json.optInt("decimalPlaces", fallback.decimalPlaces),
-            backgroundColor = json.optInt("backgroundColor", fallback.backgroundColor),
-            foregroundColor = json.optInt("foregroundColor", fallback.foregroundColor),
-            unitColor = json.optInt("unitColor", fallback.unitColor),
-            alarmColor = json.optInt("alarmColor", fallback.alarmColor),
-            minColor = json.optInt("minColor", fallback.minColor),
-            maxColor = json.optInt("maxColor", fallback.maxColor),
-            valueColor = json.optInt("valueColor", fallback.valueColor),
-            warningColor = json.optInt("warningColor", fallback.warningColor),
-            criticalColor = json.optInt("criticalColor", fallback.criticalColor),
-            warningValueColor = json.optInt("warningValueColor", fallback.warningValueColor),
-            criticalValueColor = json.optInt("criticalValueColor", fallback.criticalValueColor),
-            splitValueDigits = json.optBoolean("splitValueDigits", fallback.splitValueDigits),
-            alarmColorsBackground = json.optBoolean("alarmColorsBackground", fallback.alarmColorsBackground),
-            alarmColorsValue = json.optBoolean("alarmColorsValue", fallback.alarmColorsValue),
-            oilPressureBoostAlarm = json.optBoolean("oilPressureBoostAlarm", fallback.oilPressureBoostAlarm),
-            showIcon = json.optBoolean("showIcon", fallback.showIcon),
-            showUnit = json.optBoolean("showUnit", fallback.showUnit),
-            showMinMax = json.optBoolean("showMinMax", fallback.showMinMax),
-        )
-    }
-
-    private fun dashboardSensorFromName(name: String?, fallback: DashboardSensor): DashboardSensor =
-        runCatching { DashboardSensor.valueOf(name ?: fallback.name) }.getOrDefault(fallback)
-
-    private fun putFloatJson(json: JSONObject, key: String, value: Float) {
-        if (value.isNaN() || value.isInfinite()) {
-            json.put(key, JSONObject.NULL)
-        } else {
-            json.put(key, value.toDouble())
-        }
-    }
-
-    private fun optFloatJson(json: JSONObject, key: String, fallback: Float): Float =
-        if (!json.has(key) || json.isNull(key)) {
-            fallback
-        } else {
-            json.optDouble(key, fallback.toDouble()).toFloat()
-        }
 
     private fun currentPageConfig(): DashboardPageConfig =
         dashboardPages.getOrNull(page.ordinal) ?: dashboardPages.first()
@@ -1297,589 +1096,18 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showDataLoggerMenu() {
-        val savedFolder = dataLogTreeUri
-        val items = mutableListOf<String>()
-        val actions = mutableListOf<() -> Unit>()
-
-        items += csvLogger.statusText()
-        actions += { appendLog(csvLogger.statusText()) }
-
-        items += "View latest CSV: internal"
-        actions += { viewLatestCsvLog("internal", File(filesDir, "utcomp-logs")) }
-
-        items += "View latest CSV: app external"
-        actions += { viewLatestCsvLog("app external", File(getExternalFilesDir("utcomp-logs") ?: filesDir, "csv")) }
-
-        items += "Pick CSV log to view"
-        actions += { pickCsvLogToView() }
-
-        if (csvLogger.isRunning) {
-            items += "Stop CSV logging"
-            actions += { csvLogger.stop() }
-        } else {
-            items += "Start CSV logging: internal app storage"
-            actions += { startCsvLoggingInternal() }
-
-            items += "Start CSV logging: app external storage"
-            actions += { startCsvLoggingAppExternal() }
-
-            if (savedFolder != null) {
-                items += "Start CSV logging: saved SD/folder"
-                actions += { startCsvLoggingTree(savedFolder) }
-            }
-
-            items += "Pick SD card/folder and start CSV logging"
-            actions += { pickCsvLoggingFolder() }
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle("High-resolution data logging")
-            .setItems(items.toTypedArray()) { _, which -> actions.getOrNull(which)?.invoke() }
-            .setNegativeButton("Close", null)
-            .show()
-    }
-
-    private fun viewLatestCsvLog(label: String, dir: File) {
-        val file = dir.listFiles { candidate ->
-            candidate.isFile && candidate.name.endsWith(".csv", ignoreCase = true)
-        }?.maxByOrNull { candidate -> candidate.lastModified() }
-
-        if (file == null) {
-            appendLog("No CSV log found in $label: ${dir.absolutePath}")
-            return
-        }
-
-        appendLog("Loading CSV viewer from $label: ${file.name}")
-        loadCsvLogPreview(title = "$label: ${file.name}") {
-            file.bufferedReader()
-        }
-    }
-
-    private fun pickCsvLogToView() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
-                "text/csv",
-                "text/comma-separated-values",
-                "application/csv",
-                "text/plain",
-            ))
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        startActivityForResult(intent, DATA_LOG_VIEW_FILE_REQUEST)
-    }
-
-    private fun viewPickedCsvLog(uri: Uri) {
-        val title = "picked: ${uri.lastPathSegment ?: uri}"
-        appendLog("Loading CSV viewer from picked file: $uri")
-        loadCsvLogPreview(title = title) {
-            contentResolver.openInputStream(uri)?.bufferedReader()
-                ?: error("Could not open selected CSV")
-        }
-    }
-
-    private fun loadCsvLogPreview(title: String, openReader: () -> BufferedReader) {
-        Thread({
-            val result = runCatching {
-                openReader().use { reader -> readCsvLogPreview(reader) }
-            }
-
-            handler.post {
-                result
-                    .onSuccess { preview -> showCsvLogPreviewDialog(title, preview) }
-                    .onFailure { error -> appendLog("CSV viewer failed: ${error.message}") }
-            }
-        }, "utcomp-csv-viewer").start()
-    }
-
-    private fun readCsvLogPreview(reader: BufferedReader): CsvViewerPreview {
-        val headerLine = reader.readLine() ?: return emptyCsvViewerPreview("empty file")
-        val headers = parseCsvLine(headerLine).map { it.trim() }
-        val lowerHeaders = headers.map { it.lowercase(Locale.US) }
-
-        fun indexOfAny(vararg names: String): Int =
-            names.firstNotNullOfOrNull { name ->
-                lowerHeaders.indexOf(name.lowercase(Locale.US)).takeIf { it >= 0 }
-            } ?: -1
-
-        val wallTimeIndex = indexOfAny("wall_time_ms")
-        val isoTimeIndex = indexOfAny("wall_time_iso")
-        val elapsedTimeIndex = indexOfAny("elapsed_realtime_ms")
-        val timeIndex = listOf(isoTimeIndex, wallTimeIndex, elapsedTimeIndex).firstOrNull { it >= 0 } ?: -1
-        val afrIndex = indexOfAny("afr1", "adc_in_ch1")
-        val boostIndex = indexOfAny("bar1", "adc_in_ch3")
-        val oilPressureIndex = indexOfAny("bar2", "adc_in_ch4")
-        val oilTempIndex = indexOfAny("temperature_ntc1_c", "temperature_oil_c")
-
-        val sourceColumns = listOf(
-            "time=${headers.getOrNull(timeIndex) ?: "?"}",
-            "afr=${headers.getOrNull(afrIndex) ?: "?"}",
-            "boost=${headers.getOrNull(boostIndex) ?: "?"}",
-            "oilP=${headers.getOrNull(oilPressureIndex) ?: "?"}",
-            "oilT=${headers.getOrNull(oilTempIndex) ?: "?"}",
-        ).joinToString(" · ")
-
-        val graphRows = ArrayList<CsvViewerRow>(CSV_VIEW_GRAPH_MAX_POINTS)
-        var graphStride = 1
-        var total = 0
-        var firstTime = ""
-        var lastTime = ""
-        var firstWallTimeMs: Long? = null
-        var lastWallTimeMs: Long? = null
-        var firstElapsedMs: Long? = null
-        var lastElapsedMs: Long? = null
-
-        val afrRange = CsvRangeAccumulator()
-        val boostRange = CsvRangeAccumulator()
-        val oilPressureRange = CsvRangeAccumulator()
-        val oilTempRange = CsvRangeAccumulator()
-
-        while (true) {
-            val line = reader.readLine() ?: break
-            if (line.isBlank()) continue
-            val fields = parseCsvLine(line)
-            total++
-
-            val wallTimeMs = fields.getOrNull(wallTimeIndex).toLongOrNullCompat()
-            val elapsedMs = fields.getOrNull(elapsedTimeIndex).toLongOrNullCompat()
-            val displayTime = compactCsvTime(fields.getOrNull(timeIndex).orEmpty())
-
-            val row = CsvViewerRow(
-                time = displayTime,
-                wallTimeMs = wallTimeMs,
-                elapsedRealtimeMs = elapsedMs,
-                afr = fields.getOrNull(afrIndex).toFloatOrNan(),
-                boost = fields.getOrNull(boostIndex).toFloatOrNan(),
-                oilPressure = fields.getOrNull(oilPressureIndex).toFloatOrNan(),
-                oilTemp = fields.getOrNull(oilTempIndex).toFloatOrNan(),
-            )
-
-            if (firstTime.isBlank()) firstTime = displayTime
-            lastTime = displayTime
-            if (firstWallTimeMs == null && wallTimeMs != null) firstWallTimeMs = wallTimeMs
-            if (wallTimeMs != null) lastWallTimeMs = wallTimeMs
-            if (firstElapsedMs == null && elapsedMs != null) firstElapsedMs = elapsedMs
-            if (elapsedMs != null) lastElapsedMs = elapsedMs
-
-            afrRange.add(row.afr)
-            boostRange.add(row.boost)
-            oilPressureRange.add(row.oilPressure)
-            oilTempRange.add(row.oilTemp)
-
-            if (total % graphStride == 0) {
-                graphRows += row
-                if (graphRows.size > CSV_VIEW_GRAPH_MAX_POINTS * 2) {
-                    val compacted = graphRows.filterIndexed { index, _ -> index % 2 == 0 }
-                    graphRows.clear()
-                    graphRows.addAll(compacted)
-                    graphStride *= 2
-                }
-            }
-        }
-
-        if (graphRows.size > CSV_VIEW_GRAPH_MAX_POINTS) {
-            val keepEvery = (graphRows.size.toFloat() / CSV_VIEW_GRAPH_MAX_POINTS.toFloat())
-            val compacted = ArrayList<CsvViewerRow>(CSV_VIEW_GRAPH_MAX_POINTS)
-            var next = 0f
-            for (index in graphRows.indices) {
-                if (index + 0.001f >= next) {
-                    compacted += graphRows[index]
-                    next += keepEvery
-                }
-            }
-            graphRows.clear()
-            graphRows.addAll(compacted.take(CSV_VIEW_GRAPH_MAX_POINTS))
-        }
-
-        val durationMs =
-            durationMs(firstWallTimeMs, lastWallTimeMs)
-                ?: durationMs(firstElapsedMs, lastElapsedMs)
-                ?: 0L
-
-        val sampleRate = if (durationMs > 0L && total > 1) {
-            (total - 1).toFloat() / (durationMs.toFloat() / 1000f)
-        } else {
-            Float.NaN
-        }
-
-        return CsvViewerPreview(
-            totalRows = total,
-            graphRows = graphRows.toList(),
-            sourceColumns = sourceColumns,
-            firstTime = firstTime.ifBlank { "—" },
-            lastTime = lastTime.ifBlank { "—" },
-            durationText = formatDuration(durationMs),
-            sampleRateHz = sampleRate,
-            stats = CsvViewerStats(
-                afr = afrRange.toRange(),
-                boost = boostRange.toRange(),
-                oilPressure = oilPressureRange.toRange(),
-                oilTemp = oilTempRange.toRange(),
-            ),
-        )
-    }
-
-    private fun emptyCsvViewerPreview(sourceColumns: String): CsvViewerPreview =
-        CsvViewerPreview(
-            totalRows = 0,
-            graphRows = emptyList(),
-            sourceColumns = sourceColumns,
-            firstTime = "—",
-            lastTime = "—",
-            durationText = "—",
-            sampleRateHz = Float.NaN,
-            stats = CsvViewerStats(
-                afr = CsvViewerRange(Float.NaN, Float.NaN),
-                boost = CsvViewerRange(Float.NaN, Float.NaN),
-                oilPressure = CsvViewerRange(Float.NaN, Float.NaN),
-                oilTemp = CsvViewerRange(Float.NaN, Float.NaN),
-            ),
-        )
-
-    private fun showCsvLogPreviewDialog(title: String, preview: CsvViewerPreview) {
-        val padding = csvViewerDp(12)
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(padding, padding, padding, padding)
-            minimumHeight = (resources.displayMetrics.heightPixels * 0.86f).toInt()
-            background = GradientDrawable().apply {
-                setColor(Color.rgb(8, 10, 14))
-                cornerRadius = 0f
-            }
-        }
-
-        val titleText = TextView(this).apply {
-            text = title
-            textSize = 15f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(238, 240, 246))
-            isSingleLine = false
-        }
-        root.addView(titleText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        val metaText = TextView(this).apply {
-            text = buildString {
-                append("rows=${preview.totalRows}")
-                append(" · graph=${preview.graphRows.size}")
-                append(" · ${preview.durationText}")
-                if (preview.sampleRateHz.isFinite()) {
-                    append(" · ${preview.sampleRateHz.formatOrDash(1)} Hz")
-                }
-                append("\n")
-                append("${preview.firstTime.takeLast(12)} → ${preview.lastTime.takeLast(12)}")
-                append("\n")
-                append(preview.sourceColumns)
-            }
-            textSize = 11f
-            setTextColor(Color.rgb(170, 178, 190))
-            setPadding(0, csvViewerDp(4), 0, csvViewerDp(8))
-        }
-        root.addView(metaText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        val summaryRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        summaryRow.addView(csvSummaryCard("AFR", preview.stats.afr, 2, ""), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        summaryRow.addView(csvSummaryCard("Boost", preview.stats.boost, 2, "bar"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        summaryRow.addView(csvSummaryCard("Oil P", preview.stats.oilPressure, 2, "bar"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        summaryRow.addView(csvSummaryCard("Oil T", preview.stats.oilTemp, 1, "°C"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(summaryRow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        val markers = csvGraphWarningMarkers()
-        val markerText = TextView(this).apply {
-            text = if (markers.isEmpty()) {
-                "No active warning/critical markers configured for these graph channels."
-            } else {
-                "Markers: " + markers.joinToString(" · ") { marker ->
-                    "${marker.seriesLabel} ${marker.label}"
-                }
-            }
-            textSize = 10.5f
-            setTextColor(Color.rgb(170, 178, 190))
-            setPadding(0, csvViewerDp(7), 0, 0)
-        }
-        root.addView(markerText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        val graph = CsvLogGraphView(this).apply {
-            setRows(preview.graphRows.map { row ->
-                CsvLogGraphPoint(
-                    time = row.time.takeLast(12),
-                    afr = row.afr,
-                    boost = row.boost,
-                    oilPressure = row.oilPressure,
-                    oilTemp = row.oilTemp,
-                )
-            })
-            setMarkers(markers)
-        }
-        root.addView(graph, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            csvViewerDp(560),
-        ).apply {
-            topMargin = csvViewerDp(10)
-            bottomMargin = csvViewerDp(10)
-        })
-
-        val outerScroll = ScrollView(this).apply {
-            isFillViewport = true
-            setBackgroundColor(Color.rgb(8, 10, 14))
-            addView(root, ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ))
-        }
-
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("CSV viewer")
-            .setView(outerScroll)
-            .setPositiveButton("Close", null)
-            .show()
-
-        dialog.window?.decorView?.setPadding(0, 0, 0, 0)
-        dialog.window?.setLayout(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT,
-        )
-    }
-
-    private fun csvGraphWarningMarkers(): List<CsvLogGraphMarker> {
-        val currentBoxes = currentPageConfig().boxes
-        val allBoxes = currentBoxes + dashboardPages.flatMap { it.boxes }
-
-        fun boxFor(sensor: DashboardSensor): DashboardBoxConfig? =
-            currentBoxes.firstOrNull { it.sensor == sensor }
-                ?: allBoxes.firstOrNull { it.sensor == sensor }
-
-        fun Float.markerText(decimals: Int): String =
-            fixed(decimals)
-
-        fun addMarkers(
-            target: MutableList<CsvLogGraphMarker>,
-            seriesLabel: String,
-            box: DashboardBoxConfig?,
-            decimals: Int,
-            lowSuffix: String = "",
-        ) {
-            if (box == null) return
-
-            if (box.warningLow.isFinite()) {
-                target += CsvLogGraphMarker(
-                    seriesLabel = seriesLabel,
-                    value = box.warningLow,
-                    label = "W≤${box.warningLow.markerText(decimals)}$lowSuffix",
-                    color = box.warningColor,
-                )
-            }
-            if (box.criticalLow.isFinite()) {
-                target += CsvLogGraphMarker(
-                    seriesLabel = seriesLabel,
-                    value = box.criticalLow,
-                    label = "C≤${box.criticalLow.markerText(decimals)}$lowSuffix",
-                    color = box.criticalColor,
-                )
-            }
-            if (box.warningHigh.isFinite()) {
-                target += CsvLogGraphMarker(
-                    seriesLabel = seriesLabel,
-                    value = box.warningHigh,
-                    label = "W≥${box.warningHigh.markerText(decimals)}",
-                    color = box.warningColor,
-                )
-            }
-            if (box.criticalHigh.isFinite()) {
-                target += CsvLogGraphMarker(
-                    seriesLabel = seriesLabel,
-                    value = box.criticalHigh,
-                    label = "C≥${box.criticalHigh.markerText(decimals)}",
-                    color = box.criticalColor,
-                )
-            }
-        }
-
-        val markers = mutableListOf<CsvLogGraphMarker>()
-        addMarkers(markers, "AFR", boxFor(DashboardSensor.AFR), decimals = 2)
-        addMarkers(markers, "Boost", boxFor(DashboardSensor.BOOST), decimals = 2)
-
-        val oilPressureBox = boxFor(DashboardSensor.OIL_PRESSURE)
-        val oilPressureSuffix = if (
-            oilPressureBox != null &&
-            oilPressureBox.oilPressureBoostAlarm &&
-            oilPressureBox.oilPressureBoostArmBar.isFinite()
-        ) {
-            "@${oilPressureBox.oilPressureBoostArmBar.markerText(2)}b"
-        } else {
-            ""
-        }
-        addMarkers(markers, "Oil P", oilPressureBox, decimals = 2, lowSuffix = oilPressureSuffix)
-
-        addMarkers(markers, "Oil T", boxFor(DashboardSensor.OIL_TEMP), decimals = 1)
-        return markers
-    }
-
-    private fun csvSummaryCard(label: String, range: CsvViewerRange, decimals: Int, suffix: String): TextView =
-        TextView(this).apply {
-            text = buildString {
-                appendLine(label)
-                append(range.min.formatOrDash(decimals))
-                append(" → ")
-                append(range.max.formatOrDash(decimals))
-                if (suffix.isNotBlank()) append(" $suffix")
-            }
-            textSize = 10.5f
-            setTextColor(Color.rgb(234, 236, 242))
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(csvViewerDp(5), csvViewerDp(7), csvViewerDp(5), csvViewerDp(7))
-            background = GradientDrawable().apply {
-                setColor(Color.rgb(18, 21, 28))
-                cornerRadius = csvViewerDp(9).toFloat()
-                setStroke(1, Color.rgb(50, 56, 68))
-            }
-        }
-
-    private fun csvViewerDp(value: Int): Int =
-        (value.toFloat() * resources.displayMetrics.density + 0.5f).toInt()
-
-    private fun durationMs(startMs: Long?, endMs: Long?): Long? =
-        if (startMs != null && endMs != null && endMs >= startMs) {
-            endMs - startMs
-        } else {
-            null
-        }
-
-    private fun formatDuration(ms: Long): String {
-        if (ms <= 0L) return "—"
-        val totalSeconds = ms / 1000L
-        val minutes = totalSeconds / 60L
-        val seconds = totalSeconds % 60L
-        val hours = minutes / 60L
-        val minutePart = minutes % 60L
-        return if (hours > 0L) {
-            String.format(Locale.US, "%dh %02dm %02ds", hours, minutePart, seconds)
-        } else {
-            String.format(Locale.US, "%dm %02ds", minutes, seconds)
-        }
-    }
-
-    private fun compactCsvTime(raw: String): String {
-        val value = raw.trim().trim('"')
-        val tIndex = value.indexOf('T')
-        if (tIndex >= 0 && tIndex + 1 < value.length) {
-            return value.substring(tIndex + 1)
-                .substringBefore('+')
-                .substringBefore('Z')
-        }
-        return value
-    }
-
-    private fun parseCsvLine(line: String): List<String> {
-        val fields = mutableListOf<String>()
-        val current = StringBuilder()
-        var quoted = false
-        var index = 0
-
-        while (index < line.length) {
-            val char = line[index]
-            when {
-                char == '"' && quoted && index + 1 < line.length && line[index + 1] == '"' -> {
-                    current.append('"')
-                    index++
-                }
-                char == '"' -> quoted = !quoted
-                char == ',' && !quoted -> {
-                    fields += current.toString()
-                    current.setLength(0)
-                }
-                else -> current.append(char)
-            }
-            index++
-        }
-        fields += current.toString()
-        return fields
-    }
-
-    private fun String?.toFloatOrNan(): Float =
-        this?.trim()?.trim('"')?.toFloatOrNull() ?: Float.NaN
-
-    private fun String?.toLongOrNullCompat(): Long? =
-        this?.trim()?.trim('"')?.toLongOrNull()
-
-    private fun Float.formatOrDash(decimals: Int): String =
-        fixed(decimals)
-
-    private fun startCsvLoggingInternal() {
-        runCatching {
-            csvLogger.startInternal()
-        }.onFailure { error ->
-            appendLog("CSV logging start failed: ${error.message}")
-        }
-    }
-
-    private fun startCsvLoggingAppExternal() {
-        runCatching {
-            csvLogger.startAppExternal()
-        }.onFailure { error ->
-            appendLog("CSV logging start failed: ${error.message}")
-        }
-    }
-
-    private fun startCsvLoggingTree(uri: Uri) {
-        runCatching {
-            csvLogger.startTree(uri)
-        }.onFailure { error ->
-            appendLog("CSV logging start failed: ${error.message}")
-        }
-    }
-
-    private fun pickCsvLoggingFolder() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-            addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
-        }
-        startActivityForResult(intent, DATA_LOG_TREE_REQUEST)
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?,
+    ) {
         super.onActivityResult(requestCode, resultCode, data)
-
-        if (requestCode == DATA_LOG_VIEW_FILE_REQUEST) {
-            if (resultCode != RESULT_OK) return
-            val uri = data?.data ?: run {
-                appendLog("CSV viewer file selection returned no URI")
-                return
-            }
-            viewPickedCsvLog(uri)
-            return
+        if (::csvLogController.isInitialized) {
+            csvLogController.onActivityResult(requestCode, resultCode, data)
         }
-
-        if (requestCode != DATA_LOG_TREE_REQUEST || resultCode != RESULT_OK) return
-
-        val uri = data?.data ?: run {
-            appendLog("CSV logging folder selection returned no URI")
-            return
-        }
-
-        val flags = data.flags and (
-            Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
-
-        runCatching {
-            contentResolver.takePersistableUriPermission(uri, flags)
-        }.onFailure { error ->
-            appendLog("Could not persist CSV logging folder permission: ${error.message}")
-        }
-
-        dataLogTreeUri = uri
-        saveDashboardPrefs()
-        startCsvLoggingTree(uri)
     }
 
-        private fun requestSettingsData() {
+    private fun requestSettingsData() {
         listOf(
             TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
             TransmitterConstants.UtcompPid.GPIO_SETTINGS,
@@ -3762,12 +2990,19 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         } else {
             null
         }
-        val showStats = stats != null && minMaxKey != null && shouldShowMinMax(minMaxKey)
-        binding.maxText?.visibility = if (showStats) View.VISIBLE else View.GONE
-        binding.minText?.visibility = if (showStats) View.VISIBLE else View.GONE
-        if (showStats && stats != null) {
-            val maxText = formatBoxValue(stats.max, box.decimalPlaces)
-            val minText = formatBoxValue(stats.min, box.decimalPlaces)
+        val visibleStats = if (
+            stats != null && minMaxKey != null && shouldShowMinMax(minMaxKey)
+        ) {
+            stats
+        } else {
+            null
+        }
+        val statsVisibility = if (visibleStats != null) View.VISIBLE else View.GONE
+        binding.maxText?.visibility = statsVisibility
+        binding.minText?.visibility = statsVisibility
+        visibleStats?.let { currentStats ->
+            val maxText = formatBoxValue(currentStats.max, box.decimalPlaces)
+            val minText = formatBoxValue(currentStats.min, box.decimalPlaces)
             if (binding.maxText?.text?.toString() != maxText) binding.maxText?.text = maxText
             if (binding.minText?.text?.toString() != minText) binding.minText?.text = minText
         }

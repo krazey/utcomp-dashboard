@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Move CSV logging/viewer orchestration out of `MainActivity`.
+- Parse only displayed CSV columns when building graph previews.
+- Move dashboard configuration JSON serialization into a focused codec.
+- Remove the redundant min/max null check reported by the Kotlin compiler.
+
 ## 1.0.0
 
 - Rename the application and project to UTCOMP Dashboard.

@@ -25,7 +25,9 @@ USB connection state and decoded snapshots are delivered through callbacks
 instead of being inferred from log text. Both dashboard modes retain their view
 hierarchies and update only live values, colors, min/max labels, and overlays.
 The CSV writer streams rows through a reusable builder path instead of creating
-large temporary field lists.
+large temporary field lists. CSV preview loading runs outside the activity and
+extracts only the displayed columns from wide log rows. Dashboard configuration
+JSON is handled by a focused codec rather than the UI controller.
 
 The Kotlin namespace is `de.krazey.utcomp.dashboard`. The Android
 `applicationId` intentionally remains `de.krazey.utcomp.probe` so existing
