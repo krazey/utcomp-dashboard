@@ -9,10 +9,8 @@ import android.widget.FrameLayout
 import android.text.style.RelativeSizeSpan
 import android.text.Spanned
 import android.text.SpannableString
-import android.widget.EditText
-import android.text.InputType
-import android.app.AlertDialog
 import de.krazey.utcomp.dashboard.dashboard.DashboardConfigJson
+import de.krazey.utcomp.dashboard.dashboard.DashboardEditorController
 import de.krazey.utcomp.dashboard.dashboard.DefaultDashboardPages
 import de.krazey.utcomp.dashboard.dashboard.DashboardSensor
 import de.krazey.utcomp.dashboard.dashboard.DashboardPageConfig
@@ -126,6 +124,7 @@ class MainActivity : Activity() {
     private lateinit var logScroll: ScrollView
     private lateinit var csvLogger: UtcompCsvLogger
     private lateinit var csvLogController: CsvLogController
+    private lateinit var dashboardEditorController: DashboardEditorController
     private var dataLogTreeUri: Uri? = null
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
@@ -368,6 +367,15 @@ class MainActivity : Activity() {
             },
             currentPageConfig = ::currentPageConfig,
             dashboardPages = { dashboardPages },
+        )
+        dashboardEditorController = DashboardEditorController(
+            context = this,
+            currentPageConfig = ::currentPageConfig,
+            updateCurrentPage = ::updateCurrentPage,
+            updateBoxConfig = ::updateBoxConfig,
+            onSmoothingChanged = { boxIndex, box ->
+                smoothedValuesByBox.remove(smoothedValueKey(boxIndex, box))
+            },
         )
         usb = UtcompUsbTransport(
             context = this,
@@ -956,7 +964,7 @@ class MainActivity : Activity() {
         lastBoxEditorLaunchMs = now
         cancelPendingDashboardSingleTap()
         lastDashboardBoxTapMs = 0L
-        showBoxEditor(boxIndex)
+        dashboardEditorController.showBoxEditor(boxIndex)
     }
 
 
@@ -1360,32 +1368,6 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         }
     }
 
-    private data class NamedColor(
-        val name: String,
-        val color: Int,
-    )
-
-    private fun DashboardSensor.defaultDisplayDecimals(): Int =
-        when (this) {
-            DashboardSensor.AFR -> 2
-            DashboardSensor.BOOST,
-            DashboardSensor.OIL_PRESSURE,
-            DashboardSensor.BATTERY -> 2
-            DashboardSensor.OIL_TEMP,
-            DashboardSensor.OUTSIDE_TEMP,
-            DashboardSensor.INSIDE_TEMP -> 1
-            DashboardSensor.TIME -> 0
-        }
-
-    private fun DashboardSensor.defaultDisplaySmoothing(): Float =
-        when (this) {
-            DashboardSensor.AFR,
-            DashboardSensor.BOOST,
-            DashboardSensor.OIL_PRESSURE -> 0.35f
-            else -> 1.0f
-        }
-
-
     private fun displayValueForBox(box: DashboardBoxConfig, boxIndex: Int, rawValue: Float?): Float? {
         val value = rawValue ?: return null
         if (value.isNaN() || value.isInfinite()) return value
@@ -1424,511 +1406,6 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         span.setSpan(RelativeSizeSpan(0.62f), dot, valueText.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         return span
     }
-
-    private fun decimalsText(decimals: Int): String =
-        when (decimals.coerceIn(0, 2)) {
-            0 -> "0 decimals"
-            1 -> "1 decimal"
-            else -> "2 decimals"
-        }
-
-    private fun smoothingText(alpha: Float): String =
-        when {
-            alpha >= 0.999f -> "off"
-            alpha >= 0.45f -> "light"
-            alpha >= 0.20f -> "medium"
-            else -> "heavy"
-        }
-
-    private fun smoothingValues(): FloatArray =
-        floatArrayOf(1.0f, 0.5f, 0.25f, 0.10f)
-
-    private fun smoothingLabels(current: Float): Array<String> {
-        val values = smoothingValues()
-        val names = arrayOf("Off", "Light", "Medium", "Heavy")
-        return names.mapIndexed { index, name ->
-            val marker = if (kotlin.math.abs(values[index] - current) < 0.01f) " ✓" else ""
-            "$name$marker"
-        }.toTypedArray()
-    }
-
-    private fun showDecimalsPicker(boxIndex: Int, box: DashboardBoxConfig) {
-        val labels = arrayOf(0, 1, 2).map { decimals ->
-            val marker = if (box.decimalPlaces.coerceIn(0, 2) == decimals) " ✓" else ""
-            "${decimalsText(decimals)}$marker"
-        }.toTypedArray()
-
-        AlertDialog.Builder(this)
-            .setTitle("Decimal digits")
-            .setItems(labels) { _, which ->
-                updateBoxConfig(boxIndex) { it.copy(decimalPlaces = which) }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun showSmoothingPicker(boxIndex: Int, box: DashboardBoxConfig) {
-        val values = smoothingValues()
-        AlertDialog.Builder(this)
-            .setTitle("Smoothing")
-            .setItems(smoothingLabels(box.smoothingAlpha)) { _, which ->
-                smoothedValuesByBox.remove(smoothedValueKey(boxIndex, box))
-                updateBoxConfig(boxIndex) { it.copy(smoothingAlpha = values[which]) }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun enabledText(enabled: Boolean): String =
-        if (enabled) "enabled" else "disabled"
-
-    private fun shownText(shown: Boolean): String =
-        if (shown) "shown" else "hidden"
-
-    private fun formatScale(scale: Float): String =
-        "${(scale * 100f).toInt()}%"
-
-    private fun showScalePicker(
-        title: String,
-        current: Float,
-        onSelected: (Float) -> Unit,
-    ) {
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-            setSingleLine(true)
-            hint = "100"
-            setText(trimFloat(current * 100f))
-            selectAll()
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setMessage("Enter percent. Examples: 80, 100, 125, 150.\nAllowed range: 25–400%.")
-            .setView(input)
-            .setPositiveButton("Save") { _, _ ->
-                val percent = input.text.toString()
-                    .trim()
-                    .replace(",", ".")
-                    .toFloatOrNull()
-
-                if (percent != null) {
-                    onSelected((percent / 100f).coerceIn(0.25f, 4.0f))
-                }
-            }
-            .setNeutralButton("Default") { _, _ -> onSelected(1.0f) }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun showFloatSettingEditor(
-        title: String,
-        current: Float,
-        unit: String,
-        onSelected: (Float) -> Unit,
-    ) {
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER or
-                InputType.TYPE_NUMBER_FLAG_DECIMAL or
-                InputType.TYPE_NUMBER_FLAG_SIGNED
-            setSingleLine(true)
-            hint = unit
-            if (!current.isNaN()) {
-                setText(trimFloat(current))
-                selectAll()
-            }
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setMessage("Current: ${formatThreshold(current, unit)}")
-            .setView(input)
-            .setPositiveButton("Save") { _, _ ->
-                val parsed = input.text.toString()
-                    .trim()
-                    .replace(",", ".")
-                    .toFloatOrNull()
-
-                if (parsed != null) onSelected(parsed)
-            }
-            .setNeutralButton("Off") { _, _ -> onSelected(Float.NaN) }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun defaultOilPressureBoostArmBar(sensor: DashboardSensor): Float =
-        when (sensor) {
-            DashboardSensor.OIL_PRESSURE -> 0.30f
-            else -> Float.NaN
-        }
-
-    private fun defaultOilPressureWarningBar(sensor: DashboardSensor): Float =
-        when (sensor) {
-            DashboardSensor.OIL_PRESSURE -> 4.50f
-            else -> Float.NaN
-        }
-
-    private fun defaultOilPressureCriticalBar(sensor: DashboardSensor): Float =
-        when (sensor) {
-            DashboardSensor.OIL_PRESSURE -> 4.00f
-            else -> Float.NaN
-        }
-
-    private fun showOilPressureBoostAlarmEditor(boxIndex: Int, box: DashboardBoxConfig) {
-        val actions = arrayOf(
-            "Boost-armed low alarm: ${enabledText(box.oilPressureBoostAlarm)}",
-            "Arm low alarm at boost: ${formatThreshold(box.oilPressureBoostArmBar, "BAR")}",
-            "Warning low pressure: ${formatThreshold(box.warningLow, "BAR")}",
-            "Critical low pressure: ${formatThreshold(box.criticalLow, "BAR")}",
-            "Reset UTCOMP-like oil pressure defaults",
-        )
-
-        AlertDialog.Builder(this)
-            .setTitle("Oil pressure alarm")
-            .setMessage(
-                oilPressureBoostAlarmSummary(box) +
-                    "\n\nWarning/critical pressure here edits the normal Low alarm thresholds."
-            )
-            .setItems(actions) { _, which ->
-                when (which) {
-                    0 -> updateBoxConfig(boxIndex) {
-                        it.copy(oilPressureBoostAlarm = !it.oilPressureBoostAlarm)
-                    }
-                    1 -> showFloatSettingEditor(
-                        "Arm low oil pressure alarm at boost",
-                        box.oilPressureBoostArmBar,
-                        "BAR",
-                    ) { value ->
-                        updateBoxConfig(boxIndex) { it.copy(oilPressureBoostArmBar = value) }
-                    }
-                    2 -> showFloatSettingEditor(
-                        "Warning low oil pressure",
-                        box.warningLow,
-                        "BAR",
-                    ) { value ->
-                        updateBoxConfig(boxIndex) { it.copy(warningLow = value) }
-                    }
-                    3 -> showFloatSettingEditor(
-                        "Critical low oil pressure",
-                        box.criticalLow,
-                        "BAR",
-                    ) { value ->
-                        updateBoxConfig(boxIndex) { it.copy(criticalLow = value) }
-                    }
-                    4 -> updateBoxConfig(boxIndex) {
-                        it.copy(
-                            oilPressureBoostAlarm = true,
-                            oilPressureBoostArmBar = defaultOilPressureBoostArmBar(DashboardSensor.OIL_PRESSURE),
-                            warningLow = defaultOilPressureWarningBar(DashboardSensor.OIL_PRESSURE),
-                            criticalLow = defaultOilPressureCriticalBar(DashboardSensor.OIL_PRESSURE),
-                            warningHigh = Float.NaN,
-                            criticalHigh = Float.NaN,
-                        )
-                    }
-                }
-            }
-            .setNegativeButton("Close", null)
-            .show()
-    }
-
-
-    private fun showHighThresholdEditor(
-        title: String,
-        boxIndex: Int,
-        box: DashboardBoxConfig,
-        current: Float,
-        update: DashboardBoxConfig.(Float) -> DashboardBoxConfig,
-    ) {
-        showFloatSettingEditor(title, current, box.sensor.unit) { newValue ->
-            updateBoxConfig(boxIndex) { it.update(newValue) }
-        }
-    }
-
-
-    private fun showColorPicker(
-        title: String,
-        current: Int,
-        palette: List<NamedColor>,
-        onSelected: (Int) -> Unit,
-    ) {
-        val labels = palette.map { namedColor ->
-            val marker = if (namedColor.color == current) " ✓" else ""
-            "${namedColor.name}$marker"
-        }.toTypedArray()
-
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setItems(labels) { _, which -> onSelected(palette[which].color) }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun confirmApplyStyleToPage(boxIndex: Int) {
-        val pageConfig = currentPageConfig()
-        val box = pageConfig.boxes.getOrNull(boxIndex) ?: return
-
-        AlertDialog.Builder(this)
-            .setTitle("Apply style to page?")
-            .setMessage("Apply ${box.sensor.label} visual style to all boxes on ${pageConfig.title}?\n\nAlarm thresholds and alarm behavior are preserved.")
-            .setPositiveButton("Apply") { _, _ ->
-                updateCurrentPage { it.withBoxDefaultsAppliedToPage(box) }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun trimFloat(value: Float): String =
-        if (value % 1.0f == 0.0f) value.toInt().toString() else value.fixed(1)
-
-    private fun colorName(color: Int): String =
-        allNamedColors().firstOrNull { namedColor -> namedColor.color == color }?.name
-            ?: "#%06X".format(Locale.US, 0xFFFFFF and color)
-
-    private fun valueColorPalette(): List<NamedColor> =
-        listOf(
-            NamedColor("White", Color.WHITE),
-            NamedColor("Black", Color.BLACK),
-            NamedColor("Ice blue", Color.rgb(120, 210, 255)),
-            NamedColor("Warm yellow", Color.rgb(255, 220, 110)),
-            NamedColor("Green", Color.rgb(80, 220, 120)),
-            NamedColor("Soft red", Color.rgb(255, 120, 120)),
-        )
-
-    private fun backgroundColorPalette(): List<NamedColor> =
-        listOf(
-            NamedColor("Dark blue", Color.rgb(11, 14, 20)),
-            NamedColor("Blue gray", Color.rgb(16, 20, 30)),
-            NamedColor("Black", Color.rgb(0, 0, 0)),
-            NamedColor("Dark purple", Color.rgb(18, 10, 22)),
-            NamedColor("Dark teal", Color.rgb(8, 24, 28)),
-            NamedColor("Dark amber", Color.rgb(28, 18, 8)),
-        )
-
-    private fun warningColorPalette(): List<NamedColor> =
-        listOf(
-            NamedColor("Orange", Color.rgb(255, 170, 48)),
-            NamedColor("Yellow", Color.rgb(255, 220, 70)),
-            NamedColor("Blue", Color.rgb(120, 210, 255)),
-            NamedColor("Purple", Color.rgb(180, 110, 255)),
-        )
-
-    private fun alarmValueColorPalette(): List<NamedColor> =
-        listOf(
-            NamedColor("White", Color.WHITE),
-            NamedColor("Black", Color.BLACK),
-            NamedColor("Warm yellow", Color.rgb(255, 220, 110)),
-            NamedColor("Ice blue", Color.rgb(120, 210, 255)),
-            NamedColor("Green", Color.rgb(80, 220, 120)),
-            NamedColor("Soft red", Color.rgb(255, 120, 120)),
-        )
-
-    private fun criticalColorPalette(): List<NamedColor> =
-        listOf(
-            NamedColor("Red", Color.rgb(255, 72, 72)),
-            NamedColor("Pink", Color.rgb(255, 0, 120)),
-            NamedColor("Orange red", Color.rgb(255, 120, 0)),
-            NamedColor("Magenta", Color.rgb(220, 40, 255)),
-        )
-
-    private fun allNamedColors(): List<NamedColor> =
-        valueColorPalette() +
-            alarmValueColorPalette() +
-            backgroundColorPalette() +
-            warningColorPalette() +
-            criticalColorPalette()
-
-    private fun showBoxEditor(boxIndex: Int) {
-        val pageConfig = currentPageConfig()
-        val box = pageConfig.boxes.getOrNull(boxIndex) ?: return
-
-        val oilBoostText = if (box.sensor == DashboardSensor.OIL_PRESSURE) {
-            oilPressureBoostAlarmSummary(box)
-        } else {
-            "only for Oil pressure"
-        }
-
-        val actions = arrayOf(
-            "Sensor: ${box.sensor.label}",
-            "Value size: ${formatScale(box.valueScale)}",
-            "Icon size: ${formatScale(box.iconScale)}",
-            "Icon/value gap: ${formatScale(box.iconValueGapScale)}",
-            "Decimals: ${decimalsText(box.decimalPlaces)}",
-            "Split decimals: ${enabledText(box.splitValueDigits)}",
-            "Smoothing: ${smoothingText(box.smoothingAlpha)}",
-            "Normal value color: ${colorName(box.valueColor)}",
-            "Background color: ${colorName(box.backgroundColor)}",
-            "Warning low: ${formatThreshold(box.warningLow, box.sensor.unit)}",
-            "Critical low: ${formatThreshold(box.criticalLow, box.sensor.unit)}",
-            "Warning high: ${formatThreshold(box.warningHigh, box.sensor.unit)}",
-            "Critical high: ${formatThreshold(box.criticalHigh, box.sensor.unit)}",
-            "Oil pressure boost arm: $oilBoostText",
-            "Warning background: ${colorName(box.warningColor)}",
-            "Warning value color: ${colorName(box.warningValueColor)}",
-            "Critical background: ${colorName(box.criticalColor)}",
-            "Critical value color: ${colorName(box.criticalValueColor)}",
-            "Alarm background: ${enabledText(box.alarmColorsBackground)}",
-            "Alarm value color: ${enabledText(box.alarmColorsValue)}",
-            "Icon: ${shownText(box.showIcon)}",
-            "Unit: ${shownText(box.showUnit)}",
-            "Min/max: ${shownText(box.showMinMax)}",
-            "Apply visual style to all boxes on page",
-            "Set default alarms for ${box.sensor.label}",
-            "Disable alarms for ${box.sensor.label}",
-            "Reset this box style",
-        )
-
-        AlertDialog.Builder(this)
-            .setTitle("Edit ${pageConfig.title}: ${box.sensor.label}")
-            .setItems(actions) { _, which ->
-                when (which) {
-                    0 -> showSensorPicker(boxIndex)
-                    1 -> showScalePicker(
-                        title = "Value size",
-                        current = box.valueScale,
-                    ) { selected -> updateBoxConfig(boxIndex) { it.copy(valueScale = selected) } }
-                    2 -> showScalePicker(
-                        title = "Icon size",
-                        current = box.iconScale,
-                    ) { selected -> updateBoxConfig(boxIndex) { it.copy(iconScale = selected) } }
-                    3 -> showScalePicker(
-                        title = "Icon/value gap",
-                        current = box.iconValueGapScale,
-                    ) { selected -> updateBoxConfig(boxIndex) { it.copy(iconValueGapScale = selected) } }
-                    4 -> showDecimalsPicker(boxIndex, box)
-                    5 -> updateBoxConfig(boxIndex) { it.copy(splitValueDigits = !it.splitValueDigits) }
-                    6 -> showSmoothingPicker(boxIndex, box)
-                    7 -> showColorPicker(
-                        title = "Normal value color",
-                        current = box.valueColor,
-                        palette = valueColorPalette(),
-                    ) { selected -> updateBoxConfig(boxIndex) { it.copy(valueColor = selected, foregroundColor = selected) } }
-                    8 -> showColorPicker(
-                        title = "Background color",
-                        current = box.backgroundColor,
-                        palette = backgroundColorPalette(),
-                    ) { selected -> updateBoxConfig(boxIndex) { it.copy(backgroundColor = selected) } }
-                    9 -> showHighThresholdEditor(
-                        title = "Warning low",
-                        boxIndex = boxIndex,
-                        box = box,
-                        current = box.warningLow,
-                    ) { newValue -> copy(warningLow = newValue) }
-                    10 -> showHighThresholdEditor(
-                        title = "Critical low",
-                        boxIndex = boxIndex,
-                        box = box,
-                        current = box.criticalLow,
-                    ) { newValue -> copy(criticalLow = newValue) }
-                    11 -> showHighThresholdEditor(
-                        title = "Warning high",
-                        boxIndex = boxIndex,
-                        box = box,
-                        current = box.warningHigh,
-                    ) { newValue -> copy(warningHigh = newValue) }
-                    12 -> showHighThresholdEditor(
-                        title = "Critical high",
-                        boxIndex = boxIndex,
-                        box = box,
-                        current = box.criticalHigh,
-                    ) { newValue -> copy(criticalHigh = newValue) }
-                    13 -> if (box.sensor == DashboardSensor.OIL_PRESSURE) {
-                        showOilPressureBoostAlarmEditor(boxIndex, box)
-                    } else {
-                        showSensorPicker(boxIndex)
-                    }
-                    14 -> showColorPicker(
-                        title = "Warning background",
-                        current = box.warningColor,
-                        palette = warningColorPalette(),
-                    ) { selected -> updateBoxConfig(boxIndex) { it.copy(warningColor = selected) } }
-                    15 -> showColorPicker(
-                        title = "Warning value color",
-                        current = box.warningValueColor,
-                        palette = alarmValueColorPalette(),
-                    ) { selected -> updateBoxConfig(boxIndex) { it.copy(warningValueColor = selected) } }
-                    16 -> showColorPicker(
-                        title = "Critical background",
-                        current = box.criticalColor,
-                        palette = criticalColorPalette(),
-                    ) { selected ->
-                        updateBoxConfig(boxIndex) {
-                            it.copy(
-                                criticalColor = selected,
-                                alarmColor = selected,
-                                maxColor = selected,
-                            )
-                        }
-                    }
-                    17 -> showColorPicker(
-                        title = "Critical value color",
-                        current = box.criticalValueColor,
-                        palette = alarmValueColorPalette(),
-                    ) { selected -> updateBoxConfig(boxIndex) { it.copy(criticalValueColor = selected) } }
-                    18 -> updateBoxConfig(boxIndex) { it.copy(alarmColorsBackground = !it.alarmColorsBackground) }
-                    19 -> updateBoxConfig(boxIndex) { it.copy(alarmColorsValue = !it.alarmColorsValue) }
-                    20 -> updateBoxConfig(boxIndex) { it.copy(showIcon = !it.showIcon) }
-                    21 -> updateBoxConfig(boxIndex) { it.copy(showUnit = !it.showUnit) }
-                    22 -> updateBoxConfig(boxIndex) { it.copy(showMinMax = !it.showMinMax) }
-                    23 -> confirmApplyStyleToPage(boxIndex)
-                    24 -> updateBoxConfig(boxIndex) { withDefaultAlarmThresholds(it) }
-                    25 -> updateBoxConfig(boxIndex) { clearAlarmThresholds(it) }
-                    26 -> updateBoxConfig(boxIndex) { resetBoxStyle(it) }
-                }
-            }
-            .setNegativeButton("Close", null)
-            .show()
-    }
-
-
-    private fun showSensorPicker(boxIndex: Int) {
-        val sensors = DashboardSensor.entries
-        AlertDialog.Builder(this)
-            .setTitle("Select sensor")
-            .setItems(sensors.map { it.label }.toTypedArray()) { _, which ->
-                val selected = sensors[which]
-                updateBoxConfig(boxIndex) {
-                    withDefaultAlarmThresholds(
-                        it.copy(
-                            sensor = selected,
-                            scaleMin = selected.defaultMin,
-                            scaleMax = selected.defaultMax,
-                        ),
-                        selected,
-                    )
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun resetBoxStyle(box: DashboardBoxConfig): DashboardBoxConfig =
-        withDefaultAlarmThresholds(
-            box.copy(
-                valueScale = 1.0f,
-                iconScale = 1.0f,
-                decimalPlaces = box.sensor.defaultDisplayDecimals(),
-                splitValueDigits = true,
-                smoothingAlpha = box.sensor.defaultDisplaySmoothing(),
-                backgroundColor = Color.rgb(11, 14, 20),
-                foregroundColor = Color.WHITE,
-                valueColor = Color.WHITE,
-                unitColor = Color.rgb(210, 216, 225),
-                alarmColor = Color.rgb(255, 72, 72),
-                minColor = Color.rgb(80, 170, 255),
-                maxColor = Color.rgb(255, 72, 72),
-                warningColor = Color.rgb(255, 170, 48),
-                criticalColor = Color.rgb(255, 72, 72),
-                warningValueColor = Color.BLACK,
-                criticalValueColor = Color.WHITE,
-                alarmColorsBackground = true,
-                alarmColorsValue = true,
-                showIcon = true,
-                showUnit = true,
-                showMinMax = true,
-            ),
-        )
-
-    private fun formatThreshold(value: Float, unit: String): String =
-        if (value.isNaN()) "off" else fmt(value, if (unit.isBlank()) "" else "$unit")
 
     private fun Int.floorMod(mod: Int): Int =
         ((this % mod) + mod) % mod
@@ -1995,16 +1472,6 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
     }
 
 
-    private fun oilPressureBoostAlarmSummary(box: DashboardBoxConfig): String {
-        if (box.sensor != DashboardSensor.OIL_PRESSURE) return "not applicable"
-        if (!box.oilPressureBoostAlarm) return "disabled"
-
-        return "armed >= ${trimFloat(box.oilPressureBoostArmBar)} BAR boost, " +
-            "warn low <= ${trimFloat(box.warningLow)} BAR, " +
-            "crit low <= ${trimFloat(box.criticalLow)} BAR"
-    }
-
-
     private fun thresholdHitHigh(value: Float, threshold: Float): Boolean =
         !threshold.isNaN() && value >= threshold
 
@@ -2032,38 +1499,6 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
                 BoxAlarmLevel.NORMAL -> box.valueColor
             }
         }
-
-    private fun defaultWarningHighFor(sensor: DashboardSensor): Float =
-        when (sensor) {
-            DashboardSensor.OIL_TEMP -> 120.0f
-            else -> Float.NaN
-        }
-
-    private fun defaultCriticalHighFor(sensor: DashboardSensor): Float =
-        when (sensor) {
-            DashboardSensor.OIL_TEMP -> 130.0f
-            else -> Float.NaN
-        }
-
-    private fun clearAlarmThresholds(box: DashboardBoxConfig): DashboardBoxConfig =
-        box.copy(
-            warningLow = Float.NaN,
-            criticalLow = Float.NaN,
-            warningHigh = Float.NaN,
-            criticalHigh = Float.NaN,
-        )
-
-    private fun withDefaultAlarmThresholds(box: DashboardBoxConfig, sensor: DashboardSensor = box.sensor): DashboardBoxConfig =
-        box.copy(
-            warningHigh = defaultWarningHighFor(sensor),
-            criticalHigh = defaultCriticalHighFor(sensor),
-            warningLow = if (sensor == DashboardSensor.OIL_PRESSURE) defaultOilPressureWarningBar(sensor) else Float.NaN,
-            criticalLow = if (sensor == DashboardSensor.OIL_PRESSURE) defaultOilPressureCriticalBar(sensor) else Float.NaN,
-            oilPressureBoostAlarm = sensor == DashboardSensor.OIL_PRESSURE,
-            oilPressureBoostArmBar = defaultOilPressureBoostArmBar(sensor),
-            oilPressureWarningBar = defaultOilPressureWarningBar(sensor),
-            oilPressureCriticalBar = defaultOilPressureCriticalBar(sensor),
-        )
 
     private fun sourceSubtitleFor(sensor: DashboardSensor): String =
         UtcompDeviceConfig.subtitleFor(sensor)
