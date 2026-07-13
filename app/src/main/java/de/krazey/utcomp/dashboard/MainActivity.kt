@@ -11,6 +11,7 @@ import android.text.SpannableString
 import de.krazey.utcomp.dashboard.dashboard.DashboardConfigJson
 import de.krazey.utcomp.dashboard.dashboard.DashboardEditorController
 import de.krazey.utcomp.dashboard.dashboard.DashboardPageEditorController
+import de.krazey.utcomp.dashboard.dashboard.RalliartHeaderEditorController
 import de.krazey.utcomp.dashboard.dashboard.DefaultDashboardPages
 import de.krazey.utcomp.dashboard.dashboard.DashboardSensor
 import de.krazey.utcomp.dashboard.dashboard.DashboardPageConfig
@@ -77,6 +78,8 @@ class MainActivity : Activity(), DashboardRenderHost {
         private const val DASHBOARD_TOUCH_DEFER_RETRY_MS = 80L
         private const val DASHBOARD_DOUBLE_TAP_MS = 320L
         private const val DASHBOARD_SWIPE_CLICK_SUPPRESS_MS = 280L
+        private val MENU_BORDER_COLOR = Color.rgb(38, 78, 104)
+        private val MENU_PANEL_COLOR = Color.rgb(15, 18, 24)
 
         const val TAG = "UTCOMPDashboard"
     }
@@ -108,6 +111,7 @@ class MainActivity : Activity(), DashboardRenderHost {
     private lateinit var csvLogController: CsvLogController
     private lateinit var dashboardEditorController: DashboardEditorController
     private lateinit var dashboardPageEditorController: DashboardPageEditorController
+    private lateinit var ralliartHeaderEditorController: RalliartHeaderEditorController
     private lateinit var ralliartRenderer: RalliartDashboardRenderer
     private lateinit var simpleRenderer: SimpleDashboardRenderer
     private var dataLogTreeUri: Uri? = null
@@ -280,6 +284,11 @@ class MainActivity : Activity(), DashboardRenderHost {
             pages = { dashboardPages },
             currentPageIndex = { currentPageIndex },
             onPagesChanged = ::replaceDashboardPages,
+        )
+        ralliartHeaderEditorController = RalliartHeaderEditorController(
+            context = this,
+            currentPageConfig = { ralliartPageConfig },
+            updateCurrentPage = ::updateCurrentPage,
         )
         usb = UtcompUsbTransport(
             context = this,
@@ -471,7 +480,7 @@ class MainActivity : Activity(), DashboardRenderHost {
 
         controlsPanel = controls.apply {
             visibility = View.GONE
-            background = roundedBg(Color.rgb(15, 18, 24), 18f)
+            background = roundedBg(MENU_PANEL_COLOR, 18f, MENU_BORDER_COLOR, 2)
             setPadding(8, 8, 8, 8)
         }
         root.addView(controlsPanel, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -540,15 +549,23 @@ class MainActivity : Activity(), DashboardRenderHost {
     }
 
     private fun button(label: String, onClick: () -> Unit): Button = Button(this).apply {
+        val density = resources.displayMetrics.density
         text = label
-        textSize = 14f
+        textSize = 16f
         isAllCaps = false
-        minimumHeight = (56f * resources.displayMetrics.density).toInt()
+        minimumHeight = (64f * density).toInt()
+        setTextColor(Color.WHITE)
+        background = roundedBg(
+            color = Color.BLACK,
+            radius = 14f,
+            strokeColor = MENU_BORDER_COLOR,
+            strokeWidth = (2f * density).toInt().coerceAtLeast(2),
+        )
         setPadding(
-            (8f * resources.displayMetrics.density).toInt(),
-            (6f * resources.displayMetrics.density).toInt(),
-            (8f * resources.displayMetrics.density).toInt(),
-            (6f * resources.displayMetrics.density).toInt(),
+            (10f * density).toInt(),
+            (8f * density).toInt(),
+            (10f * density).toInt(),
+            (8f * density).toInt(),
         )
         setOnClickListener { onClick() }
         layoutParams = LinearLayout.LayoutParams(
@@ -556,7 +573,7 @@ class MainActivity : Activity(), DashboardRenderHost {
             LinearLayout.LayoutParams.WRAP_CONTENT,
             1f,
         ).apply {
-            val margin = (2f * resources.displayMetrics.density).toInt()
+            val margin = (3f * density).toInt()
             setMargins(margin, margin, margin, margin)
         }
     }
@@ -949,6 +966,10 @@ class MainActivity : Activity(), DashboardRenderHost {
                 "MERGE: tap a green cell · tap the blue source or CANCEL to stop"
             uiMode == UiMode.DEBUG ->
                 "Tap or long press: menu"
+            editMode && uiMode == UiMode.FANCY ->
+                "Tap a gauge or the Ralliart top bar to edit"
+            editMode ->
+                "Tap a dashboard box to edit"
             else ->
                 "Tap: min/max · Quick double tap: menu · Long press: menu"
         }
@@ -1116,6 +1137,37 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
     }
 
+
+    override fun attachRalliartHeaderActions(view: View) {
+        view.isClickable = true
+        view.setOnClickListener {
+            if (dashboardClickSuppressed()) return@setOnClickListener
+            if (editMode) {
+                openRalliartHeaderEditorOnce()
+            } else {
+                handleDashboardBoxTapForChrome(null, "ralliart-header")
+            }
+        }
+        view.setOnLongClickListener {
+            cancelPendingDashboardSingleTap()
+            lastDashboardBoxTapMs = 0L
+            if (editMode) {
+                openRalliartHeaderEditorOnce()
+            } else {
+                revealTopBarChrome(autoHide = true)
+            }
+            true
+        }
+    }
+
+    private fun openRalliartHeaderEditorOnce() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastBoxEditorLaunchMs < 700L) return
+        lastBoxEditorLaunchMs = now
+        cancelPendingDashboardSingleTap()
+        lastDashboardBoxTapMs = 0L
+        ralliartHeaderEditorController.showEditor()
+    }
 
     private fun toggleControls() {
         controlsVisible = !controlsVisible
@@ -1817,11 +1869,16 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
 
 
 
-    private fun roundedBg(color: Int, radius: Float): GradientDrawable =
+    private fun roundedBg(
+        color: Int,
+        radius: Float,
+        strokeColor: Int = MENU_BORDER_COLOR,
+        strokeWidth: Int = 2,
+    ): GradientDrawable =
         GradientDrawable().apply {
             setColor(color)
             cornerRadius = radius
-            setStroke(2, Color.rgb(38, 78, 104))
+            setStroke(strokeWidth, strokeColor)
         }
 
 

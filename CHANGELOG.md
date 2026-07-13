@@ -18,6 +18,8 @@
 - Add fast first reconnects and structured USB close diagnostics.
 - Fix debug-mode title and restore dashboard touch access to the menu.
 - Increase the main controls-menu button size and touch targets.
+- Restyle controls-menu actions as larger black buttons with blue borders.
+- Add editable Ralliart top-bar text sizing and field visibility.
 
 ## 1.0.0
 

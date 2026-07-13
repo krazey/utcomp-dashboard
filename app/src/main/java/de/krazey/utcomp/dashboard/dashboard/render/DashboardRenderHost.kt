@@ -65,6 +65,8 @@ interface DashboardRenderHost {
         editorTitle: String,
     )
 
+    fun attachRalliartHeaderActions(view: View)
+
     fun mergeVisualStateForBox(boxIndex: Int): DashboardMergeVisualState
 
     fun mergeVisualStateForCell(row: Int, column: Int): DashboardMergeVisualState

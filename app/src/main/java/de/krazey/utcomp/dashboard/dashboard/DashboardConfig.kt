@@ -191,6 +191,15 @@ data class DashboardPageConfig(
     val boxes: List<DashboardBoxConfig>,
     val minMaxAlwaysVisible: Boolean = false,
     val showSourceLine: Boolean = true,
+    /**
+     * Ralliart-only top status bar settings. Simple pages intentionally ignore
+     * these values so the fixed Ralliart style remains independently editable.
+     */
+    val ralliartHeaderTextScale: Float = 1.0f,
+    val ralliartHeaderShowOutside: Boolean = true,
+    val ralliartHeaderShowInside: Boolean = true,
+    val ralliartHeaderShowBattery: Boolean = true,
+    val ralliartHeaderShowClock: Boolean = true,
 ) {
     fun withBoxDefaultsAppliedToPage(sourceBox: DashboardBoxConfig): DashboardPageConfig =
         copy(
@@ -259,7 +268,12 @@ data class DashboardPageConfig(
             }
         }
 
-        return copy(rows = safeRows, columns = safeColumns, boxes = accepted)
+        return copy(
+            rows = safeRows,
+            columns = safeColumns,
+            boxes = accepted,
+            ralliartHeaderTextScale = ralliartHeaderTextScale.coerceIn(0.5f, 2.0f),
+        )
     }
 
     fun occupiedCells(excludingBoxIndex: Int = -1): Set<Int> {

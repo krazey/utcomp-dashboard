@@ -173,5 +173,30 @@ fun main() {
     check(editedRalliart.boxes.first().valueScale == 0.8f)
     check(editedRalliart.boxes.first().showMinMax)
 
+    val customizedHeader = DefaultDashboardPages.ralliart.copy(
+        ralliartHeaderTextScale = 1.5f,
+        ralliartHeaderShowOutside = false,
+        ralliartHeaderShowInside = true,
+        ralliartHeaderShowBattery = false,
+        ralliartHeaderShowClock = true,
+    ).normalized()
+    check(customizedHeader.ralliartHeaderTextScale == 1.5f)
+    check(!customizedHeader.ralliartHeaderShowOutside)
+    check(customizedHeader.ralliartHeaderShowInside)
+    check(!customizedHeader.ralliartHeaderShowBattery)
+    check(customizedHeader.ralliartHeaderShowClock)
+
+    val clampedHeader = customizedHeader.copy(
+        ralliartHeaderTextScale = 8.0f,
+    ).normalized()
+    check(clampedHeader.ralliartHeaderTextScale == 2.0f)
+
+    val migratedHeader = DefaultDashboardPages.ralliart.copy(
+        ralliartHeaderTextScale = 1.3f,
+        ralliartHeaderShowClock = false,
+    ).withSensorSettingsFrom(customizedSimple)
+    check(migratedHeader.ralliartHeaderTextScale == 1.3f)
+    check(!migratedHeader.ralliartHeaderShowClock)
+
     println("Dashboard layout tests passed")
 }

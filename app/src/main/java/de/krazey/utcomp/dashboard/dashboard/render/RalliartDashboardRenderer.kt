@@ -75,10 +75,10 @@ internal class RalliartDashboardRenderer(
         var renderedAfr = ""
         var renderedOilPressure = ""
         var renderedOilTemp = ""
-        var headerOutsideBits = 0
-        var headerInsideBits = 0
-        var headerBatteryBits = 0
-        var headerClock = ""
+        var headerOutsideBits = Int.MIN_VALUE
+        var headerInsideBits = Int.MIN_VALUE
+        var headerBatteryBits = Int.MIN_VALUE
+        var headerClock = "\u0000"
 
         fun updateAfrOverlay() {
             val total = afrOverlay.width
@@ -312,7 +312,7 @@ internal class RalliartDashboardRenderer(
             root.addView(it, layoutParams(OIL_TEMP_HIT_BOX))
         }
         val headerText = TextView(activity).apply {
-            textSize = 16f
+            textSize = 16f * key.config.ralliartHeaderTextScale.coerceIn(0.5f, 2.0f)
             includeFontPadding = false
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.END or Gravity.CENTER_VERTICAL
@@ -406,6 +406,7 @@ internal class RalliartDashboardRenderer(
         addHitZone(root, AFR_HIT_BOX, afrSlot, "Ralliart • AFR")
         addHitZone(root, OIL_PRESSURE_HIT_BOX, oilPressureSlot, "Ralliart • Oil pressure")
         addHitZone(root, OIL_TEMP_HIT_BOX, oilTempSlot, "Ralliart • Oil temp")
+        addHeaderHitZone(root)
 
         val created = Binding(
             key = key,
@@ -463,6 +464,15 @@ internal class RalliartDashboardRenderer(
         }
         host.attachBoxActions(hitZone, slot.boxIndex, minMaxKey, editorTitle)
         root.addView(hitZone, layoutParams(bounds))
+    }
+
+    private fun addHeaderHitZone(root: FrameLayout) {
+        val hitZone = ClickableLinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, 0)
+        }
+        host.attachRalliartHeaderActions(hitZone)
+        root.addView(hitZone, layoutParams(HEADER_STATUS_BOX))
     }
 
     private fun createValueText(size: Float): TextView =
@@ -629,10 +639,23 @@ internal class RalliartDashboardRenderer(
     }
 
     private fun updateHeader(binding: Binding, snapshot: UtcompDataSnapshot) {
-        val outsideBits = snapshot.temperatureDsA.toBits()
-        val insideBits = snapshot.temperatureDsB.toBits()
-        val batteryBits = snapshot.adcInValCh0.toBits()
-        val clock = host.currentClockText()
+        val config = binding.key.config
+        val outsideBits = if (config.ralliartHeaderShowOutside) {
+            snapshot.temperatureDsA.toBits()
+        } else {
+            0
+        }
+        val insideBits = if (config.ralliartHeaderShowInside) {
+            snapshot.temperatureDsB.toBits()
+        } else {
+            0
+        }
+        val batteryBits = if (config.ralliartHeaderShowBattery) {
+            snapshot.adcInValCh0.toBits()
+        } else {
+            0
+        }
+        val clock = if (config.ralliartHeaderShowClock) host.currentClockText() else ""
         if (
             binding.headerOutsideBits == outsideBits &&
             binding.headerInsideBits == insideBits &&
@@ -642,9 +665,22 @@ internal class RalliartDashboardRenderer(
             return
         }
 
-        val header = "OUT ${formatTopValue(snapshot.temperatureDsA, "°C")}   |   " +
-            "IN ${formatTopValue(snapshot.temperatureDsB, "°C")}   |   " +
-            "${formatTopValue(snapshot.adcInValCh0, " V")}   |   $clock"
+        val header = StringBuilder(96).apply {
+            fun appendField(value: String) {
+                if (isNotEmpty()) append("   |   ")
+                append(value)
+            }
+            if (config.ralliartHeaderShowOutside) {
+                appendField("OUT ${formatTopValue(snapshot.temperatureDsA, "°C")}")
+            }
+            if (config.ralliartHeaderShowInside) {
+                appendField("IN ${formatTopValue(snapshot.temperatureDsB, "°C")}")
+            }
+            if (config.ralliartHeaderShowBattery) {
+                appendField(formatTopValue(snapshot.adcInValCh0, " V"))
+            }
+            if (config.ralliartHeaderShowClock) appendField(clock)
+        }.toString()
         binding.headerText.text = header
         binding.headerOutsideBits = outsideBits
         binding.headerInsideBits = insideBits
@@ -686,7 +722,7 @@ internal class RalliartDashboardRenderer(
         const val MAX_CACHED_LAYOUTS = 16
         const val CANVAS_WIDTH = 1024
         const val CANVAS_HEIGHT = 600
-        val HEADER_STATUS_BOX = intArrayOf(670, 18, 332, 24)
+        val HEADER_STATUS_BOX = intArrayOf(315, 14, 687, 36)
         val BOOST_HIT_BOX = intArrayOf(32, 70, 472, 472)
         val BOOST_VALUE_BOX = intArrayOf(120, 266, 310, 92)
         val BOOST_NEEDLE_BOX = intArrayOf(49, 87, 452, 452)

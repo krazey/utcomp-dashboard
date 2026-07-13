@@ -34,6 +34,11 @@ internal object DashboardConfigJson {
             put("columns", pageConfig.columns)
             put("minMaxAlwaysVisible", pageConfig.minMaxAlwaysVisible)
             put("showSourceLine", pageConfig.showSourceLine)
+            putFloat(this, "ralliartHeaderTextScale", pageConfig.ralliartHeaderTextScale)
+            put("ralliartHeaderShowOutside", pageConfig.ralliartHeaderShowOutside)
+            put("ralliartHeaderShowInside", pageConfig.ralliartHeaderShowInside)
+            put("ralliartHeaderShowBattery", pageConfig.ralliartHeaderShowBattery)
+            put("ralliartHeaderShowClock", pageConfig.ralliartHeaderShowClock)
             put(
                 "boxes",
                 JSONArray().apply {
@@ -127,6 +132,27 @@ internal object DashboardConfigJson {
             showSourceLine = json.optBoolean(
                 "showSourceLine",
                 fallback.showSourceLine,
+            ),
+            ralliartHeaderTextScale = optFloat(
+                json,
+                "ralliartHeaderTextScale",
+                fallback.ralliartHeaderTextScale,
+            ),
+            ralliartHeaderShowOutside = json.optBoolean(
+                "ralliartHeaderShowOutside",
+                fallback.ralliartHeaderShowOutside,
+            ),
+            ralliartHeaderShowInside = json.optBoolean(
+                "ralliartHeaderShowInside",
+                fallback.ralliartHeaderShowInside,
+            ),
+            ralliartHeaderShowBattery = json.optBoolean(
+                "ralliartHeaderShowBattery",
+                fallback.ralliartHeaderShowBattery,
+            ),
+            ralliartHeaderShowClock = json.optBoolean(
+                "ralliartHeaderShowClock",
+                fallback.ralliartHeaderShowClock,
             ),
         ).normalized()
     }
