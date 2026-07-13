@@ -18,6 +18,8 @@ import de.krazey.utcomp.dashboard.dashboard.DefaultDashboardPages
 import de.krazey.utcomp.dashboard.dashboard.DashboardSensor
 import de.krazey.utcomp.dashboard.dashboard.DashboardPageConfig
 import de.krazey.utcomp.dashboard.dashboard.DashboardBoxConfig
+import de.krazey.utcomp.dashboard.logging.AppDiagnostics
+import de.krazey.utcomp.dashboard.logging.AppDiagnosticsController
 import de.krazey.utcomp.dashboard.logging.CsvLogController
 import de.krazey.utcomp.dashboard.logging.UtcompCsvLogger
 import android.app.Activity
@@ -81,6 +83,11 @@ class MainActivity : Activity(), DashboardRenderHost {
         private const val DASHBOARD_TOUCH_DEFER_RETRY_MS = 80L
         private const val DASHBOARD_DOUBLE_TAP_MS = 320L
         private const val DASHBOARD_SWIPE_CLICK_SUPPRESS_MS = 280L
+        private const val UI_HEARTBEAT_MS = 500L
+        private const val UI_STALL_LOG_THRESHOLD_MS = 450L
+        private const val SLOW_RENDER_LOG_THRESHOLD_MS = 45L
+        private const val PERF_LOG_MIN_INTERVAL_MS = 2_000L
+        private const val USB_POLL_STALL_THRESHOLD_MS = 250L
         private val MENU_BORDER_COLOR = Color.rgb(38, 78, 104)
 
         const val TAG = "UTCOMPDashboard"
@@ -112,6 +119,7 @@ class MainActivity : Activity(), DashboardRenderHost {
     private lateinit var logScroll: ScrollView
     private lateinit var csvLogger: UtcompCsvLogger
     private lateinit var csvLogController: CsvLogController
+    private lateinit var appDiagnosticsController: AppDiagnosticsController
     private lateinit var dashboardEditorController: DashboardEditorController
     private lateinit var dashboardPageEditorController: DashboardPageEditorController
     private lateinit var ralliartHeaderEditorController: RalliartHeaderEditorController
@@ -125,6 +133,33 @@ class MainActivity : Activity(), DashboardRenderHost {
     private var cachedClockMinute = Long.MIN_VALUE
     private var cachedClockText = ""
     private val handler = Handler(Looper.getMainLooper())
+    private var uiHeartbeatExpectedAtMs = 0L
+    private var uiHeartbeatRunning = false
+    private var lastUiStallLogAtMs = 0L
+    private var lastSlowRenderLogAtMs = 0L
+    private val uiHeartbeatRunnable = object : Runnable {
+        override fun run() {
+            if (!uiHeartbeatRunning) return
+
+            val nowMs = SystemClock.uptimeMillis()
+            val delayMs = nowMs - uiHeartbeatExpectedAtMs
+            if (
+                delayMs >= UI_STALL_LOG_THRESHOLD_MS &&
+                nowMs - lastUiStallLogAtMs >= PERF_LOG_MIN_INTERVAL_MS
+            ) {
+                lastUiStallLogAtMs = nowMs
+                AppDiagnostics.warning(
+                    "PERF",
+                    "Main thread heartbeat delayed ${delayMs}ms " +
+                        "mode=$uiMode page=${currentPageConfig().title} " +
+                        "controls=$controlsVisible edit=$editMode",
+                )
+            }
+
+            uiHeartbeatExpectedAtMs = nowMs + UI_HEARTBEAT_MS
+            handler.postDelayed(this, UI_HEARTBEAT_MS)
+        }
+    }
     @Volatile
     private var dataMode = DataMode.USB
     private var simTestMode = SimTestMode.OFF
@@ -154,12 +189,15 @@ class MainActivity : Activity(), DashboardRenderHost {
     }
 
     private var lastSlowUsbRequestMs = 0L
+    private var lastUsbPollRunAtMs = 0L
+    private var lastUsbPollStallLogAtMs = 0L
 
     private val autoUsbRunnable = object : Runnable {
         override fun run() {
             if (dataMode != DataMode.USB || !autoRefresh) return
 
             if (!connected) {
+                lastUsbPollRunAtMs = 0L
                 runCatching { usb.requestPermissionAndConnect(logDiscovery = false) }
                     .onFailure { appendLog("USB reconnect attempt failed: ${it.message}") }
                 if (dataMode == DataMode.USB && autoRefresh && !connected) {
@@ -172,6 +210,24 @@ class MainActivity : Activity(), DashboardRenderHost {
             }
 
             val nowMs = SystemClock.elapsedRealtime()
+            val pollGapMs = if (lastUsbPollRunAtMs > 0L) {
+                nowMs - lastUsbPollRunAtMs
+            } else {
+                0L
+            }
+            lastUsbPollRunAtMs = nowMs
+            if (
+                pollGapMs >= USB_POLL_STALL_THRESHOLD_MS &&
+                nowMs - lastUsbPollStallLogAtMs >= PERF_LOG_MIN_INTERVAL_MS
+            ) {
+                lastUsbPollStallLogAtMs = nowMs
+                AppDiagnostics.warning(
+                    "PERF",
+                    "USB poll loop delayed ${pollGapMs}ms connected=$connected " +
+                        "mode=$dataMode auto=$autoRefresh",
+                )
+            }
+
             runCatching {
                 requestFastLiveData()
 
@@ -251,10 +307,22 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppDiagnostics.info(
+            "LIFECYCLE",
+            "MainActivity.onCreate savedState=${savedInstanceState != null} " +
+                "display=${resources.displayMetrics.widthPixels}x" +
+                "${resources.displayMetrics.heightPixels} " +
+                "density=${resources.displayMetrics.densityDpi}",
+        )
         loadDashboardPrefs()
+        AppDiagnostics.info(
+            "STATE",
+            "Loaded style=$uiMode page=${simplePageConfig().title} pages=${dashboardPages.size}",
+        )
         applyFastSensorSmoothingMigrationIfNeeded()
         dataMode = DataMode.USB
         simTestMode = SimTestMode.OFF
+        appDiagnosticsController = AppDiagnosticsController(this)
         csvLogger = UtcompCsvLogger(this, ::appendLog)
         csvLogController = CsvLogController(
             activity = this,
@@ -291,6 +359,7 @@ class MainActivity : Activity(), DashboardRenderHost {
             toggleAutomaticPolling = ::toggleAutoRefresh,
             requestLiveSnapshot = { requestLiveData(logEach = true) },
             refreshDeviceInformation = { requestDeviceInformation(logEach = true) },
+            showAppDiagnostics = { appDiagnosticsController.showMenu() },
             clearProtocolLog = { logText.text = "" },
         )
         dashboardEditorController = DashboardEditorController(
@@ -376,12 +445,21 @@ class MainActivity : Activity(), DashboardRenderHost {
     }
 
 
+    override fun onResume() {
+        super.onResume()
+        AppDiagnostics.info("LIFECYCLE", "MainActivity.onResume")
+        startUiHeartbeat()
+    }
+
     override fun onPause() {
+        stopUiHeartbeat()
+        AppDiagnostics.info("LIFECYCLE", "MainActivity.onPause")
         saveDashboardPrefs()
         super.onPause()
     }
 
     override fun onDestroy() {
+        AppDiagnostics.info("LIFECYCLE", "MainActivity.onDestroy changingConfig=$isChangingConfigurations")
         dashboardRenderHandler.removeCallbacks(dashboardRenderRunnable)
         dashboardRenderHandler.removeCallbacks(decodedRenderRunnable)
         decodedRenderPosted.set(false)
@@ -815,6 +893,7 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     private fun stopUsbAutoConnect() {
         autoUsbHandler.removeCallbacks(autoUsbRunnable)
+        lastUsbPollRunAtMs = 0L
     }
 
     private fun startSimTicker() {
@@ -1191,11 +1270,13 @@ class MainActivity : Activity(), DashboardRenderHost {
     private fun cycleUiMode() {
         cancelMerge(render = false)
         clearTransientMinMaxDisplay()
+        val previousMode = uiMode
         uiMode = when (uiMode) {
             UiMode.FANCY -> UiMode.SIMPLE
             UiMode.SIMPLE -> UiMode.DEBUG
             UiMode.DEBUG -> UiMode.FANCY
         }
+        AppDiagnostics.info("UI", "Style changed $previousMode -> $uiMode")
         saveDashboardViewPrefs()
         renderDashboard()
     }
@@ -1216,6 +1297,10 @@ class MainActivity : Activity(), DashboardRenderHost {
         cancelMerge(render = false)
         clearTransientMinMaxDisplay()
         currentPageIndex = (currentPageIndex + 1) % dashboardPages.size
+        AppDiagnostics.info(
+            "UI",
+            "Simple page changed to index=$currentPageIndex title=${simplePageConfig().title}",
+        )
         saveDashboardViewPrefs()
         renderDashboard()
     }
@@ -1226,6 +1311,10 @@ class MainActivity : Activity(), DashboardRenderHost {
         clearTransientMinMaxDisplay()
         currentPageIndex =
             (currentPageIndex + dashboardPages.size - 1) % dashboardPages.size
+        AppDiagnostics.info(
+            "UI",
+            "Simple page changed to index=$currentPageIndex title=${simplePageConfig().title}",
+        )
         saveDashboardViewPrefs()
         renderDashboard()
     }
@@ -1251,6 +1340,10 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
 
         if (changed) {
+            AppDiagnostics.info(
+                "USB",
+                "Connection state changed connected=$isConnected auto=$autoRefresh mode=$dataMode",
+            )
             runOnUiThread { renderDashboardNow() }
         }
     }
@@ -1270,6 +1363,12 @@ class MainActivity : Activity(), DashboardRenderHost {
         data: Intent?,
     ) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (
+            ::appDiagnosticsController.isInitialized &&
+            appDiagnosticsController.onActivityResult(requestCode, resultCode, data)
+        ) {
+            return
+        }
         if (::csvLogController.isInitialized) {
             csvLogController.onActivityResult(requestCode, resultCode, data)
         }
@@ -1340,6 +1439,7 @@ class MainActivity : Activity(), DashboardRenderHost {
             Log.d(TAG, line)
         } else {
             Log.i(TAG, line)
+            AppDiagnostics.capture(diagnosticCategory(line), line)
         }
 
         if (highFrequencyLine) return
@@ -1368,6 +1468,45 @@ class MainActivity : Activity(), DashboardRenderHost {
                 logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
             }
         }
+    }
+
+    private fun diagnosticCategory(line: String): String = when {
+        line.startsWith("USB", ignoreCase = true) -> "USB"
+        line.startsWith("CSV", ignoreCase = true) -> "CSV"
+        line.startsWith("SIM", ignoreCase = true) -> "SIM"
+        line.startsWith("Merge", ignoreCase = true) ||
+            line.startsWith("Edit", ignoreCase = true) ||
+            line.startsWith("Min/max", ignoreCase = true) ||
+            line.startsWith("Sensor source", ignoreCase = true) -> "UI"
+        else -> "APP"
+    }
+
+    private fun startUiHeartbeat() {
+        if (uiHeartbeatRunning) return
+        uiHeartbeatRunning = true
+        val nowMs = SystemClock.uptimeMillis()
+        uiHeartbeatExpectedAtMs = nowMs + UI_HEARTBEAT_MS
+        handler.postDelayed(uiHeartbeatRunnable, UI_HEARTBEAT_MS)
+    }
+
+    private fun stopUiHeartbeat() {
+        uiHeartbeatRunning = false
+        handler.removeCallbacks(uiHeartbeatRunnable)
+    }
+
+    private fun recordRenderDuration(startedAtNs: Long) {
+        val durationMs = (SystemClock.elapsedRealtimeNanos() - startedAtNs) / 1_000_000L
+        if (durationMs < SLOW_RENDER_LOG_THRESHOLD_MS) return
+
+        val nowMs = SystemClock.uptimeMillis()
+        if (nowMs - lastSlowRenderLogAtMs < PERF_LOG_MIN_INTERVAL_MS) return
+        lastSlowRenderLogAtMs = nowMs
+        AppDiagnostics.warning(
+            "PERF",
+            "Slow dashboard render ${durationMs}ms " +
+                "mode=$uiMode page=${currentPageConfig().title} " +
+                "controls=$controlsVisible edit=$editMode",
+        )
     }
 
     private fun simSnapshotForMode(): UtcompDataSnapshot {
@@ -1483,6 +1622,7 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     private fun renderDashboard() {
         if (!::dashboardRoot.isInitialized || !::statusText.isInitialized) return
+        val renderStartedAtNs = SystemClock.elapsedRealtimeNanos()
 
         if (::controlsPanel.isInitialized) {
             controlsPanel.visibility = if (controlsVisible) View.VISIBLE else View.GONE
@@ -1528,6 +1668,7 @@ class MainActivity : Activity(), DashboardRenderHost {
             UiMode.SIMPLE -> renderSimple(renderSnapshot)
             UiMode.DEBUG -> renderDebug(renderSnapshot)
         }
+        recordRenderDuration(renderStartedAtNs)
     }
 
     private fun prepareDashboardMode() {
@@ -1755,7 +1896,7 @@ class MainActivity : Activity(), DashboardRenderHost {
             appendLine("fuelPb=${s.fuelLeftPb} fuelLpg=${s.fuelLeftLpg}")
             appendLine("tripDist=${s.tripDist} tripCost=${s.tripCost}")
             appendLine()
-            appendLine("MENU → Diagnostics: polling and manual protocol requests")
+            appendLine("MENU → Diagnostics: app log, polling and protocol requests")
         }
         if (textView.text.toString() != text) textView.text = text
     }

@@ -31,6 +31,7 @@ internal class DashboardControlsController(
     private val toggleAutomaticPolling: () -> Unit,
     private val requestLiveSnapshot: () -> Unit,
     private val refreshDeviceInformation: () -> Unit,
+    private val showAppDiagnostics: () -> Unit,
     private val clearProtocolLog: () -> Unit,
 ) {
     private companion object {
@@ -126,8 +127,15 @@ internal class DashboardControlsController(
                     onClick = refreshDeviceInformation,
                 ),
                 DarkActionItem(
+                    title = "App diagnostics log",
+                    description =
+                        "View, export or clear app lifecycle, UI performance, USB recovery, " +
+                            "CSV and error events without collecting logcat.",
+                    onClick = showAppDiagnostics,
+                ),
+                DarkActionItem(
                     title = "Clear protocol log",
-                    description = "Clear the bounded on-screen diagnostics log.",
+                    description = "Clear the bounded on-screen protocol/debug log.",
                     onClick = clearProtocolLog,
                 ),
             ),

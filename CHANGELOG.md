@@ -26,6 +26,7 @@
 - Move protocol-only actions into a descriptive diagnostics menu.
 - Refresh firmware and input mappings automatically after USB connects.
 - Restyle the CSV logging menu with the dark dashboard action design.
+- Add persistent, exportable app diagnostics with crash and UI-stall tracking.
 
 ## 1.0.0
 

@@ -51,7 +51,11 @@ automatically after USB connects.
 The normal controls panel contains only driver-facing dashboard actions. Manual
 protocol requests and the automatic polling switch are grouped in a descriptive
 Diagnostics menu, while simulation remains available from the top bar. CSV log
-actions use the same dark, large-touch-target menu design.
+actions use the same dark, large-touch-target menu design. App diagnostics are
+recorded to a bounded private log with one rotated history file. The Diagnostics
+menu can view, export, or clear lifecycle, USB recovery, CSV, UI-stall,
+slow-render, memory-pressure, and uncaught-exception events without requiring an
+app-focused logcat capture.
 
 The Kotlin namespace is `de.krazey.utcomp.dashboard`. The Android
 `applicationId` intentionally remains `de.krazey.utcomp.probe` so existing
