@@ -2,6 +2,7 @@ package de.krazey.utcomp.dashboard.logging
 
 import java.io.BufferedReader
 import java.util.Locale
+import java.util.concurrent.CancellationException
 
 internal data class CsvViewerRow(
     val time: String,
@@ -26,7 +27,7 @@ internal data class CsvViewerStats(
 )
 
 internal data class CsvViewerPreview(
-    val totalRows: Int,
+    val totalRows: Long,
     val graphRows: List<CsvViewerRow>,
     val sourceColumns: String,
     val firstTime: String,
@@ -37,6 +38,8 @@ internal data class CsvViewerPreview(
 )
 
 internal object CsvLogPreviewReader {
+    private const val PROGRESS_ROW_INTERVAL = 16_384L
+
     private class RangeAccumulator {
         private var minValue = Float.NaN
         private var maxValue = Float.NaN
@@ -50,7 +53,12 @@ internal object CsvLogPreviewReader {
         fun toRange(): CsvViewerRange = CsvViewerRange(minValue, maxValue)
     }
 
-    fun read(reader: BufferedReader, maxGraphPoints: Int): CsvViewerPreview {
+    fun read(
+        reader: BufferedReader,
+        maxGraphPoints: Int,
+        isCancelled: () -> Boolean = { false },
+        onProgress: (Long) -> Unit = {},
+    ): CsvViewerPreview {
         require(maxGraphPoints > 0) { "maxGraphPoints must be positive" }
 
         val headerLine = reader.readLine() ?: return emptyPreview("empty file")
@@ -91,10 +99,10 @@ internal object CsvLogPreviewReader {
         )
         val fieldSelector = CsvFieldSelector(selectedIndexes)
         val graphRows = ArrayList<CsvViewerRow>(maxGraphPoints)
-        var graphStride = 1
-        var total = 0
+        var graphStride = 1L
+        var total = 0L
         var firstTime = ""
-        var lastTime = ""
+        var lastTimeRaw = ""
         var firstWallTimeMs: Long? = null
         var lastWallTimeMs: Long? = null
         var firstElapsedMs: Long? = null
@@ -106,6 +114,8 @@ internal object CsvLogPreviewReader {
         val oilTempRange = RangeAccumulator()
 
         while (true) {
+            if (isCancelled()) throw CancellationException("CSV viewer closed")
+
             val line = reader.readLine() ?: break
             if (line.isBlank()) continue
 
@@ -114,49 +124,62 @@ internal object CsvLogPreviewReader {
 
             val wallTimeMs = fields[0].toLongOrNullCompat()
             val elapsedMs = fields[1].toLongOrNullCompat()
-            val displayTime = compactCsvTime(fields[2].orEmpty())
-            val row = CsvViewerRow(
-                time = displayTime,
-                wallTimeMs = wallTimeMs,
-                elapsedRealtimeMs = elapsedMs,
-                afr = fields[3].toFloatOrNan(),
-                boost = fields[4].toFloatOrNan(),
-                oilPressure = fields[5].toFloatOrNan(),
-                oilTemp = fields[6].toFloatOrNan(),
-            )
+            val rawTime = fields[2].orEmpty()
+            val afr = fields[3].toFloatOrNan()
+            val boost = fields[4].toFloatOrNan()
+            val oilPressure = fields[5].toFloatOrNan()
+            val oilTemp = fields[6].toFloatOrNan()
 
-            if (firstTime.isBlank()) firstTime = displayTime
-            lastTime = displayTime
+            if (firstTime.isBlank()) firstTime = compactCsvTime(rawTime)
+            lastTimeRaw = rawTime
             if (firstWallTimeMs == null && wallTimeMs != null) firstWallTimeMs = wallTimeMs
             if (wallTimeMs != null) lastWallTimeMs = wallTimeMs
             if (firstElapsedMs == null && elapsedMs != null) firstElapsedMs = elapsedMs
             if (elapsedMs != null) lastElapsedMs = elapsedMs
 
-            afrRange.add(row.afr)
-            boostRange.add(row.boost)
-            oilPressureRange.add(row.oilPressure)
-            oilTempRange.add(row.oilTemp)
+            afrRange.add(afr)
+            boostRange.add(boost)
+            oilPressureRange.add(oilPressure)
+            oilTempRange.add(oilTemp)
 
-            if (total % graphStride == 0) {
-                graphRows += row
+            // Construct graph row objects only for retained samples. Very large logs
+            // still scan every value for statistics, but no longer allocate a row per line.
+            if (total % graphStride == 0L) {
+                graphRows += CsvViewerRow(
+                    time = compactCsvTime(rawTime),
+                    wallTimeMs = wallTimeMs,
+                    elapsedRealtimeMs = elapsedMs,
+                    afr = afr,
+                    boost = boost,
+                    oilPressure = oilPressure,
+                    oilTemp = oilTemp,
+                )
                 if (graphRows.size > maxGraphPoints * 2) {
-                    val compacted = ArrayList<CsvViewerRow>(maxGraphPoints + 1)
-                    for (index in graphRows.indices step 2) {
-                        compacted += graphRows[index]
+                    var writeIndex = 0
+                    var readIndex = 0
+                    while (readIndex < graphRows.size) {
+                        graphRows[writeIndex++] = graphRows[readIndex]
+                        readIndex += 2
                     }
-                    graphRows.clear()
-                    graphRows.addAll(compacted)
-                    graphStride *= 2
+                    while (graphRows.size > writeIndex) {
+                        graphRows.removeAt(graphRows.lastIndex)
+                    }
+                    graphStride *= 2L
                 }
             }
+
+            if (total % PROGRESS_ROW_INTERVAL == 0L) {
+                onProgress(total)
+            }
         }
+        onProgress(total)
 
         if (graphRows.size > maxGraphPoints) {
-            val keepEvery = graphRows.size.toFloat() / maxGraphPoints.toFloat()
+            val keepEvery = graphRows.size.toDouble() / maxGraphPoints.toDouble()
             val compacted = ArrayList<CsvViewerRow>(maxGraphPoints)
-            var next = 0f
+            var next = 0.0
             for (index in graphRows.indices) {
-                if (index + 0.001f >= next) {
+                if (index + 0.001 >= next) {
                     compacted += graphRows[index]
                     next += keepEvery
                 }
@@ -169,8 +192,8 @@ internal object CsvLogPreviewReader {
             durationMs(firstWallTimeMs, lastWallTimeMs)
                 ?: durationMs(firstElapsedMs, lastElapsedMs)
                 ?: 0L
-        val sampleRate = if (durationMs > 0L && total > 1) {
-            (total - 1).toFloat() / (durationMs.toFloat() / 1000f)
+        val sampleRate = if (durationMs > 0L && total > 1L) {
+            (total - 1L).toFloat() / (durationMs.toFloat() / 1000f)
         } else {
             Float.NaN
         }
@@ -180,7 +203,7 @@ internal object CsvLogPreviewReader {
             graphRows = graphRows.toList(),
             sourceColumns = sourceColumns,
             firstTime = firstTime.ifBlank { "—" },
-            lastTime = lastTime.ifBlank { "—" },
+            lastTime = compactCsvTime(lastTimeRaw).ifBlank { "—" },
             durationText = formatDuration(durationMs),
             sampleRateHz = sampleRate,
             stats = CsvViewerStats(
@@ -286,7 +309,7 @@ internal object CsvLogPreviewReader {
 
     private fun emptyPreview(sourceColumns: String): CsvViewerPreview =
         CsvViewerPreview(
-            totalRows = 0,
+            totalRows = 0L,
             graphRows = emptyList(),
             sourceColumns = sourceColumns,
             firstTime = "—",

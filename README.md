@@ -28,8 +28,10 @@ connection state and decoded snapshots are delivered through callbacks instead
 of being inferred from log text. Both dashboard modes retain their view
 hierarchies and update only live values, colors, min/max labels, and overlays.
 The CSV writer streams rows through a reusable builder path instead of creating
-large temporary field lists. CSV preview loading runs outside the activity and
-extracts only the displayed columns from wide log rows. Dashboard configuration
+large temporary field lists. CSV viewing runs in a full-screen dark activity and
+streams wide files with bounded graph memory, visible row progress, and no
+per-line graph object allocation. The top-bar LOG button starts or stops capture
+using the destination selected in the Data Log menu. Dashboard configuration
 JSON is handled by a focused codec rather than the UI controller. The simple
 dashboard uses a retained weighted grid with configurable pages from 1×1 through
 4×4. Boxes can span adjacent cells, so values can be merged into wider or taller
@@ -51,7 +53,8 @@ automatically after USB connects.
 The normal controls panel contains only driver-facing dashboard actions. Manual
 protocol requests and the automatic polling switch are grouped in a descriptive
 Diagnostics menu, while simulation remains available from the top bar. CSV log
-actions use the same dark, large-touch-target menu design. App diagnostics are
+actions and remaining in-app dialogs use the same dark, large-touch-target
+design. App diagnostics are
 recorded to a bounded private log with one rotated history file. The Diagnostics
 menu can view, export, or clear lifecycle, USB recovery, CSV, UI-stall,
 slow-render, memory-pressure, and uncaught-exception events without requiring an

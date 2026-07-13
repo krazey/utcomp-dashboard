@@ -19,6 +19,7 @@ import kotlin.concurrent.thread
 class UtcompCsvLogger(
     private val context: Context,
     private val uiLog: (String) -> Unit,
+    private val onStateChanged: (Boolean) -> Unit = {},
 ) : Closeable {
     companion object {
         private const val QUEUE_CAPACITY = 10_000
@@ -160,6 +161,7 @@ class UtcompCsvLogger(
         sequence = 0L
         currentTarget = target
         running = true
+        notifyStateChanged(true)
 
         writerThread = thread(name = "utcomp-csv-logger", isDaemon = true) {
             runWriter(writer, target)
@@ -197,12 +199,13 @@ class UtcompCsvLogger(
     fun stop() {
         if (!running && writerThread == null) return
 
+        val stoppedTarget = currentTarget
         running = false
         writerThread?.join(1200)
         writerThread = null
 
-        val stoppedTarget = currentTarget
         currentTarget = "off"
+        notifyStateChanged(false)
         uiLog("CSV data logging stopped: rows=$writtenRows dropped=$droppedRows target=$stoppedTarget")
     }
 
@@ -243,7 +246,10 @@ class UtcompCsvLogger(
         } catch (t: Throwable) {
             uiLog("CSV logging failed for $target: ${t.message}")
         } finally {
+            val shouldNotify = running || currentTarget == target
             running = false
+            if (currentTarget == target) currentTarget = "off"
+            if (shouldNotify) notifyStateChanged(false)
         }
     }
 
@@ -364,6 +370,13 @@ class UtcompCsvLogger(
             append(character)
         }
         append('"')
+    }
+
+    private fun notifyStateChanged(isRunning: Boolean) {
+        runCatching { onStateChanged(isRunning) }
+            .onFailure { error ->
+                uiLog("CSV state callback failed: ${error.message}")
+            }
     }
 
     private fun makeFileName(): String =

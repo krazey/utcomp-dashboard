@@ -27,6 +27,10 @@
 - Refresh firmware and input mappings automatically after USB connects.
 - Restyle the CSV logging menu with the dark dashboard action design.
 - Add persistent, exportable app diagnostics with crash and UI-stall tracking.
+- Replace the CSV preview dialog with a full-screen dark viewer.
+- Stream large CSV files with bounded graph memory and visible load progress.
+- Add a top-bar CSV LOG/STOP shortcut with a configurable destination.
+- Apply the dark application theme to remaining Android dialogs and popups.
 
 ## 1.0.0
 

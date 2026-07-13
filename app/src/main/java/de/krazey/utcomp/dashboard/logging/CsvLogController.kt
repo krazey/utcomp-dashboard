@@ -1,17 +1,10 @@
 package de.krazey.utcomp.dashboard.logging
 
 import android.app.Activity
-import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
-import android.view.Gravity
-import android.view.ViewGroup
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
 import de.krazey.utcomp.dashboard.dashboard.DashboardBoxConfig
 import de.krazey.utcomp.dashboard.dashboard.DashboardPageConfig
 import de.krazey.utcomp.dashboard.dashboard.DashboardSensor
@@ -19,9 +12,6 @@ import de.krazey.utcomp.dashboard.util.fixed
 import de.krazey.utcomp.dashboard.view.CsvLogGraphMarker
 import de.krazey.utcomp.dashboard.view.DarkActionDialog
 import de.krazey.utcomp.dashboard.view.DarkActionItem
-import de.krazey.utcomp.dashboard.view.CsvLogGraphPoint
-import de.krazey.utcomp.dashboard.view.CsvLogGraphView
-import java.io.BufferedReader
 import java.io.File
 import kotlin.concurrent.thread
 
@@ -37,23 +27,93 @@ internal class CsvLogController(
     private companion object {
         private const val DATA_LOG_TREE_REQUEST = 42_100
         private const val DATA_LOG_VIEW_FILE_REQUEST = 42_101
-        private const val CSV_VIEW_GRAPH_MAX_POINTS = 1600
+        private const val PREFS_NAME = "utcomp_csv_logging"
+        private const val PREF_QUICK_TARGET = "quick_target"
+    }
+
+    private enum class QuickTarget(
+        val storedValue: String,
+        val label: String,
+        val description: String,
+    ) {
+        INTERNAL(
+            storedValue = "internal",
+            label = "Internal app storage",
+            description = "Protected app storage; quickest and always available.",
+        ),
+        APP_EXTERNAL(
+            storedValue = "app_external",
+            label = "App external storage",
+            description = "App-specific external storage under Android/data.",
+        ),
+        SAVED_FOLDER(
+            storedValue = "saved_folder",
+            label = "Saved folder",
+            description = "Previously selected SD card or document folder.",
+        ),
+    }
+
+    private val prefs = activity.getSharedPreferences(
+        PREFS_NAME,
+        Context.MODE_PRIVATE,
+    )
+
+    val isLogging: Boolean
+        get() = logger.isRunning
+
+    fun quickActionLabel(): String =
+        if (logger.isRunning) "■ STOP" else "● LOG"
+
+    fun quickActionDescription(): String =
+        if (logger.isRunning) {
+            "Stop active high-resolution CSV logging"
+        } else {
+            "Start high-resolution CSV logging in ${quickTarget().label}"
+        }
+
+    fun toggleQuickLogging() {
+        if (logger.isRunning) {
+            stopLoggingAsync()
+        } else {
+            startQuickLogging()
+        }
     }
 
     fun showMenu() {
-        val savedFolder = savedTreeUri()
+        val target = quickTarget()
         val items = mutableListOf<DarkActionItem>()
 
+        if (logger.isRunning) {
+            items += DarkActionItem(
+                title = "Stop CSV logging",
+                description = "Finish and close the active high-resolution log.",
+                accentColor = Color.rgb(255, 150, 150),
+                onClick = ::stopLoggingAsync,
+            )
+        } else {
+            items += DarkActionItem(
+                title = "Start logging now",
+                description = "Quick destination: ${target.label}.",
+                accentColor = Color.rgb(150, 230, 175),
+                onClick = ::startQuickLogging,
+            )
+        }
+
+        items += DarkActionItem(
+            title = "Quick-log destination",
+            description = "Current: ${target.label}. ${target.description}",
+            onClick = ::showQuickTargetMenu,
+        )
         items += DarkActionItem(
             title = "View latest internal log",
-            description = "Open the newest CSV stored in the app's private storage.",
+            description = "Open the newest private CSV in the full-screen viewer.",
             onClick = {
                 viewLatestCsvLog("internal", File(activity.filesDir, "utcomp-logs"))
             },
         )
         items += DarkActionItem(
             title = "View latest external log",
-            description = "Open the newest CSV stored in the app-specific external folder.",
+            description = "Open the newest app-external CSV in the full-screen viewer.",
             onClick = {
                 val externalRoot = activity.getExternalFilesDir("utcomp-logs")
                     ?: activity.filesDir
@@ -62,41 +122,9 @@ internal class CsvLogController(
         )
         items += DarkActionItem(
             title = "Choose CSV file",
-            description = "Open any compatible CSV log with the graph viewer.",
+            description = "Open any compatible CSV using bounded-memory streaming.",
             onClick = ::pickCsvLogToView,
         )
-
-        if (logger.isRunning) {
-            items += DarkActionItem(
-                title = "Stop CSV logging",
-                description = "Finish and close the active high-resolution log.",
-                accentColor = Color.rgb(255, 150, 150),
-                onClick = logger::stop,
-            )
-        } else {
-            items += DarkActionItem(
-                title = "Start logging: internal storage",
-                description = "Write to protected app storage.",
-                onClick = ::startCsvLoggingInternal,
-            )
-            items += DarkActionItem(
-                title = "Start logging: app external storage",
-                description = "Write to the app-specific external storage folder.",
-                onClick = ::startCsvLoggingAppExternal,
-            )
-            if (savedFolder != null) {
-                items += DarkActionItem(
-                    title = "Start logging: saved folder",
-                    description = "Use the previously selected SD card or document folder.",
-                    onClick = { startCsvLoggingTree(savedFolder) },
-                )
-            }
-            items += DarkActionItem(
-                title = "Choose folder and start logging",
-                description = "Select an SD card or document folder and remember it.",
-                onClick = ::pickCsvLoggingFolder,
-            )
-        }
 
         DarkActionDialog.show(
             activity = activity,
@@ -143,8 +171,87 @@ internal class CsvLogController(
         }
 
         onTreeUriChanged(uri)
-        startCsvLoggingTree(uri)
+        setQuickTarget(QuickTarget.SAVED_FOLDER)
+        appendLog("CSV quick-log destination set to saved folder: $uri")
         return true
+    }
+
+    private fun showQuickTargetMenu() {
+        val current = quickTarget()
+        val items = mutableListOf<DarkActionItem>()
+
+        fun targetItem(target: QuickTarget) = DarkActionItem(
+            title = if (target == current) "✓ ${target.label}" else target.label,
+            description = target.description,
+            accentColor = if (target == current) {
+                Color.rgb(150, 230, 175)
+            } else {
+                Color.WHITE
+            },
+            onClick = {
+                setQuickTarget(target)
+                appendLog("CSV quick-log destination set to ${target.label}")
+            },
+        )
+
+        items += targetItem(QuickTarget.INTERNAL)
+        items += targetItem(QuickTarget.APP_EXTERNAL)
+        if (savedTreeUri() != null) {
+            items += targetItem(QuickTarget.SAVED_FOLDER)
+        }
+        items += DarkActionItem(
+            title = "Choose folder",
+            description = "Select and remember a folder, then use it for quick logging.",
+            onClick = ::pickCsvLoggingFolder,
+        )
+
+        DarkActionDialog.show(
+            activity = activity,
+            title = "Quick-log destination",
+            subtitle = "The top-bar LOG button uses this destination.",
+            items = items,
+        )
+    }
+
+    private fun quickTarget(): QuickTarget {
+        val stored = prefs.getString(
+            PREF_QUICK_TARGET,
+            QuickTarget.APP_EXTERNAL.storedValue,
+        )
+        val target = QuickTarget.entries.firstOrNull { it.storedValue == stored }
+            ?: QuickTarget.APP_EXTERNAL
+        return if (target == QuickTarget.SAVED_FOLDER && savedTreeUri() == null) {
+            QuickTarget.APP_EXTERNAL
+        } else {
+            target
+        }
+    }
+
+    private fun setQuickTarget(target: QuickTarget) {
+        prefs.edit().putString(PREF_QUICK_TARGET, target.storedValue).apply()
+    }
+
+    private fun stopLoggingAsync() {
+        thread(name = "utcomp-csv-stop", isDaemon = true) {
+            logger.stop()
+        }
+    }
+
+    private fun startQuickLogging() {
+        when (quickTarget()) {
+            QuickTarget.INTERNAL -> startCsvLoggingInternal()
+            QuickTarget.APP_EXTERNAL -> startCsvLoggingAppExternal()
+            QuickTarget.SAVED_FOLDER -> {
+                val uri = savedTreeUri()
+                if (uri == null) {
+                    appendLog("Saved CSV folder unavailable; using app external storage")
+                    setQuickTarget(QuickTarget.APP_EXTERNAL)
+                    startCsvLoggingAppExternal()
+                } else {
+                    startCsvLoggingTree(uri)
+                }
+            }
+        }
     }
 
     private fun viewLatestCsvLog(label: String, dir: File) {
@@ -157,10 +264,13 @@ internal class CsvLogController(
             return
         }
 
-        appendLog("Loading CSV viewer from $label: ${file.name}")
-        loadCsvLogPreview(title = "$label: ${file.name}") {
-            file.bufferedReader()
-        }
+        appendLog("Opening full-screen CSV viewer from $label: ${file.name}")
+        CsvLogViewerActivity.launchFile(
+            activity = activity,
+            title = "$label: ${file.name}",
+            file = file,
+            markers = graphWarningMarkers(),
+        )
     }
 
     private fun pickCsvLogToView() {
@@ -183,193 +293,12 @@ internal class CsvLogController(
 
     private fun viewPickedCsvLog(uri: Uri) {
         val title = "picked: ${uri.lastPathSegment ?: uri}"
-        appendLog("Loading CSV viewer from picked file: $uri")
-        loadCsvLogPreview(title = title) {
-            activity.contentResolver.openInputStream(uri)?.bufferedReader()
-                ?: error("Could not open selected CSV")
-        }
-    }
-
-    private fun loadCsvLogPreview(
-        title: String,
-        openReader: () -> BufferedReader,
-    ) {
-        thread(name = "utcomp-csv-viewer") {
-            val result = runCatching {
-                openReader().use { reader ->
-                    CsvLogPreviewReader.read(reader, CSV_VIEW_GRAPH_MAX_POINTS)
-                }
-            }
-
-            activity.runOnUiThread {
-                result
-                    .onSuccess { preview -> showCsvLogPreviewDialog(title, preview) }
-                    .onFailure { error ->
-                        appendLog("CSV viewer failed: ${error.message}")
-                    }
-            }
-        }
-    }
-
-    private fun showCsvLogPreviewDialog(
-        title: String,
-        preview: CsvViewerPreview,
-    ) {
-        val padding = dp(12)
-        val root = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(padding, padding, padding, padding)
-            minimumHeight =
-                (activity.resources.displayMetrics.heightPixels * 0.86f).toInt()
-            background = GradientDrawable().apply {
-                setColor(Color.rgb(8, 10, 14))
-                cornerRadius = 0f
-            }
-        }
-
-        val titleText = TextView(activity).apply {
-            text = title
-            textSize = 15f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(238, 240, 246))
-            isSingleLine = false
-        }
-        root.addView(
-            titleText,
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        )
-
-        val metaText = TextView(activity).apply {
-            text = buildString {
-                append("rows=${preview.totalRows}")
-                append(" · graph=${preview.graphRows.size}")
-                append(" · ${preview.durationText}")
-                if (preview.sampleRateHz.isFinite()) {
-                    append(" · ${preview.sampleRateHz.fixed(1)} Hz")
-                }
-                append('\n')
-                append("${preview.firstTime.takeLast(12)} → ")
-                append(preview.lastTime.takeLast(12))
-                append('\n')
-                append(preview.sourceColumns)
-            }
-            textSize = 11f
-            setTextColor(Color.rgb(170, 178, 190))
-            setPadding(0, dp(4), 0, dp(8))
-        }
-        root.addView(
-            metaText,
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        )
-
-        val summaryRow = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        summaryRow.addView(
-            summaryCard("AFR", preview.stats.afr, 2, ""),
-            LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f,
-            ),
-        )
-        summaryRow.addView(
-            summaryCard("Boost", preview.stats.boost, 2, "bar"),
-            LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f,
-            ),
-        )
-        summaryRow.addView(
-            summaryCard("Oil P", preview.stats.oilPressure, 2, "bar"),
-            LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f,
-            ),
-        )
-        summaryRow.addView(
-            summaryCard("Oil T", preview.stats.oilTemp, 1, "°C"),
-            LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f,
-            ),
-        )
-        root.addView(
-            summaryRow,
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        )
-
-        val markers = graphWarningMarkers()
-        val markerText = TextView(activity).apply {
-            text = if (markers.isEmpty()) {
-                "No active warning/critical markers configured for these " +
-                    "graph channels."
-            } else {
-                "Markers: " + markers.joinToString(" · ") { marker ->
-                    "${marker.seriesLabel} ${marker.label}"
-                }
-            }
-            textSize = 10.5f
-            setTextColor(Color.rgb(170, 178, 190))
-            setPadding(0, dp(7), 0, 0)
-        }
-        root.addView(
-            markerText,
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        )
-
-        val graph = CsvLogGraphView(activity).apply {
-            setRows(preview.graphRows.map { row ->
-                CsvLogGraphPoint(
-                    time = row.time.takeLast(12),
-                    afr = row.afr,
-                    boost = row.boost,
-                    oilPressure = row.oilPressure,
-                    oilTemp = row.oilTemp,
-                )
-            })
-            setMarkers(markers)
-        }
-        root.addView(
-            graph,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(560),
-            ).apply {
-                topMargin = dp(10)
-                bottomMargin = dp(10)
-            },
-        )
-
-        val outerScroll = ScrollView(activity).apply {
-            isFillViewport = true
-            setBackgroundColor(Color.rgb(8, 10, 14))
-            addView(
-                root,
-                ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ),
-            )
-        }
-
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle("CSV viewer")
-            .setView(outerScroll)
-            .setPositiveButton("Close", null)
-            .show()
-
-        dialog.window?.decorView?.setPadding(0, 0, 0, 0)
-        dialog.window?.setLayout(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT,
+        appendLog("Opening full-screen CSV viewer from picked file: $uri")
+        CsvLogViewerActivity.launchUri(
+            activity = activity,
+            title = title,
+            uri = uri,
+            markers = graphWarningMarkers(),
         )
     }
 
@@ -460,35 +389,6 @@ internal class CsvLogController(
         )
         return markers
     }
-
-    private fun summaryCard(
-        label: String,
-        range: CsvViewerRange,
-        decimals: Int,
-        suffix: String,
-    ): TextView = TextView(activity).apply {
-        text = buildString {
-            appendLine(label)
-            append(range.min.fixed(decimals))
-            append(" → ")
-            append(range.max.fixed(decimals))
-            if (suffix.isNotBlank()) append(" $suffix")
-        }
-        textSize = 10.5f
-        setTextColor(Color.rgb(234, 236, 242))
-        typeface = Typeface.DEFAULT_BOLD
-        gravity = Gravity.CENTER
-        setPadding(dp(5), dp(7), dp(5), dp(7))
-        background = GradientDrawable().apply {
-            setColor(Color.rgb(18, 21, 28))
-            cornerRadius = dp(9).toFloat()
-            setStroke(1, Color.rgb(50, 56, 68))
-        }
-    }
-
-    private fun dp(value: Int): Int =
-        (value.toFloat() * activity.resources.displayMetrics.density + 0.5f)
-            .toInt()
 
     private fun startCsvLoggingInternal() {
         runCatching {

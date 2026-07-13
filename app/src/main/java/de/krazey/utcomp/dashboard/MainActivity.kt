@@ -276,6 +276,7 @@ class MainActivity : Activity(), DashboardRenderHost {
     private var lastBoxEditorLaunchMs = 0L
 
     private var topBarActionButtons: List<Button> = emptyList()
+    private var csvLogButton: Button? = null
     private var gearButton: Button? = null
     private val topBarHideHandler = Handler(Looper.getMainLooper())
     private val topBarHideRunnable = Runnable {
@@ -323,7 +324,11 @@ class MainActivity : Activity(), DashboardRenderHost {
         dataMode = DataMode.USB
         simTestMode = SimTestMode.OFF
         appDiagnosticsController = AppDiagnosticsController(this)
-        csvLogger = UtcompCsvLogger(this, ::appendLog)
+        csvLogger = UtcompCsvLogger(
+            context = this,
+            uiLog = ::appendLog,
+            onStateChanged = ::onCsvLoggingStateChanged,
+        )
         csvLogController = CsvLogController(
             activity = this,
             logger = csvLogger,
@@ -528,6 +533,23 @@ class MainActivity : Activity(), DashboardRenderHost {
             )
             setOnClickListener { toggleEditMode() }
             this@MainActivity.editModeButton = this
+        }, LinearLayout.LayoutParams(dp(86f), dp(48f)).apply {
+            setMargins(0, 0, dp(6f), 0)
+        })
+
+        topBar.addView(Button(this).apply {
+            text = "● LOG"
+            textSize = 12f
+            isAllCaps = false
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            background = roundedBg(
+                Color.rgb(16, 20, 30),
+                dp(18f).toFloat(),
+                strokeWidth = dp(2f),
+            )
+            setOnClickListener { csvLogController.toggleQuickLogging() }
+            this@MainActivity.csvLogButton = this
         }, LinearLayout.LayoutParams(dp(86f), dp(48f)).apply {
             setMargins(0, 0, dp(6f), 0)
         })
@@ -1013,7 +1035,7 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     private fun topBarChromeButtons(): List<Button> =
         topBarActionButtons.ifEmpty {
-            listOfNotNull(simModeButton, editModeButton, gearButton)
+            listOfNotNull(simModeButton, editModeButton, csvLogButton, gearButton)
         }
 
     private fun topBarHintText(): String =
@@ -1064,10 +1086,44 @@ class MainActivity : Activity(), DashboardRenderHost {
             }
             setTooltipCompat(contentDescription)
         }
+        updateCsvLogButton()
         gearButton?.apply {
             contentDescription = "Open controls menu"
             setTooltipCompat(contentDescription)
         }
+    }
+
+    private fun onCsvLoggingStateChanged(isRunning: Boolean) {
+        runOnUiThread {
+            updateCsvLogButton()
+            if (isRunning) revealTopBarChrome(autoHide = true)
+        }
+    }
+
+    private fun updateCsvLogButton() {
+        val button = csvLogButton ?: return
+        if (!::csvLogController.isInitialized) return
+
+        button.text = csvLogController.quickActionLabel()
+        button.contentDescription = csvLogController.quickActionDescription()
+        button.setTooltipCompat(button.contentDescription)
+        button.setTextColor(
+            if (csvLogController.isLogging) {
+                Color.rgb(255, 160, 160)
+            } else {
+                Color.WHITE
+            },
+        )
+        button.background = roundedBg(
+            color = Color.BLACK,
+            radius = dp(18f).toFloat(),
+            strokeColor = if (csvLogController.isLogging) {
+                Color.rgb(180, 62, 62)
+            } else {
+                MENU_BORDER_COLOR
+            },
+            strokeWidth = dp(2f),
+        )
     }
 
     private fun updateTopBarChromeVisibility() {
