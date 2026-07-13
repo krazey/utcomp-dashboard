@@ -16,6 +16,8 @@
 - Move live USB polling off the Android main looper.
 - Retry transient polling-request write failures before reopening USB.
 - Add fast first reconnects and structured USB close diagnostics.
+- Fix debug-mode title and restore dashboard touch access to the menu.
+- Increase the main controls-menu button size and touch targets.
 
 ## 1.0.0
 

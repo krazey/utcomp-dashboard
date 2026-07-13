@@ -541,10 +541,24 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     private fun button(label: String, onClick: () -> Unit): Button = Button(this).apply {
         text = label
-        textSize = 11f
+        textSize = 14f
         isAllCaps = false
+        minimumHeight = (56f * resources.displayMetrics.density).toInt()
+        setPadding(
+            (8f * resources.displayMetrics.density).toInt(),
+            (6f * resources.displayMetrics.density).toInt(),
+            (8f * resources.displayMetrics.density).toInt(),
+            (6f * resources.displayMetrics.density).toInt(),
+        )
         setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        layoutParams = LinearLayout.LayoutParams(
+            0,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            1f,
+        ).apply {
+            val margin = (2f * resources.displayMetrics.density).toInt()
+            setMargins(margin, margin, margin, margin)
+        }
     }
 
     private val dashboardPrefs: SharedPreferences
@@ -930,10 +944,13 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
 
     private fun topBarHintText(): String =
-        if (mergeSession != null) {
-            "MERGE: tap a green cell · tap the blue source or CANCEL to stop"
-        } else {
-            "Tap: min/max · Quick double tap: menu · Long press: menu"
+        when {
+            mergeSession != null ->
+                "MERGE: tap a green cell · tap the blue source or CANCEL to stop"
+            uiMode == UiMode.DEBUG ->
+                "Tap or long press: menu"
+            else ->
+                "Tap: min/max · Quick double tap: menu · Long press: menu"
         }
 
     private fun View.setTooltipCompat(text: CharSequence?) {
@@ -1454,8 +1471,12 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         val renderSnapshot = simRenderSnapshot ?: s
 
         statusText.text = buildString {
-            append(currentPageConfig().title)
-            append("  •  $uiMode")
+            if (uiMode == UiMode.DEBUG) {
+                append("Debug snapshot")
+            } else {
+                append(currentPageConfig().title)
+                append("  •  $uiMode")
+            }
             append("  •  $dataMode")
             append("  •  USB ${if (connected) "OK" else "—"}")
             if (autoRefresh) append("  •  AUTO")
@@ -1478,6 +1499,9 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
         dashboardRoot.minimumWidth = 0
         dashboardRoot.minimumHeight = 0
         dashboardRoot.setPadding(0, 0, 0, 0)
+        dashboardRoot.isClickable = false
+        dashboardRoot.setOnClickListener(null)
+        dashboardRoot.setOnLongClickListener(null)
         debugTextView = null
         lastRenderedUiMode = uiMode
     }
@@ -1650,8 +1674,26 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             textSize = 12f
             setTextColor(Color.rgb(220, 225, 235))
             typeface = Typeface.MONOSPACE
-            setTextIsSelectable(true)
+            setTextIsSelectable(false)
         }.also { created ->
+            val openMenu = View.OnClickListener {
+                if (!dashboardClickSuppressed()) {
+                    cancelPendingDashboardSingleTap()
+                    revealTopBarChrome(autoHide = true)
+                }
+            }
+            val openMenuLong = View.OnLongClickListener {
+                openMenu.onClick(it)
+                true
+            }
+
+            dashboardRoot.isClickable = true
+            dashboardRoot.setOnClickListener(openMenu)
+            dashboardRoot.setOnLongClickListener(openMenuLong)
+            created.isClickable = true
+            created.setOnClickListener(openMenu)
+            created.setOnLongClickListener(openMenuLong)
+
             dashboardRoot.removeAllViews()
             dashboardRoot.addView(
                 created,
