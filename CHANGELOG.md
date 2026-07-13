@@ -38,6 +38,8 @@
 - Add a full-screen single-value live signal inspector with raw and smoothed traces.
 - Report rolling noise statistics and use the dashboard smoothing algorithm interactively.
 - Sample each inspected value only when its actual UTCOMP source packet updates.
+- Make full protocol tracing opt-in and show only the latest protocol event by default.
+- Add automatic and manual periodic-noise rejection to the live signal inspector.
 
 ## 1.0.0
 

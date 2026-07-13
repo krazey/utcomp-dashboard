@@ -35,6 +35,8 @@ class LiveSignalInspectorController(
         const val PREFS_NAME = "utcomp_live_signal"
         const val PREF_SIGNAL_ID = "signalId"
         const val PREF_ALPHA = "smoothingAlpha"
+        const val PREF_FILTER_MODE = "periodicFilterMode"
+        const val PREF_FILTER_FREQUENCY = "periodicFilterFrequency"
         const val PREF_WINDOW_MS = "windowMs"
         const val MIN_SAMPLE_INTERVAL_MS = 45L
         val WINDOW_OPTIONS_MS = longArrayOf(10_000L, 30_000L, 60_000L, 120_000L)
@@ -70,10 +72,20 @@ class LiveSignalInspectorController(
     private var smoothingText: TextView? = null
     private var signalButton: Button? = null
     private var windowButton: Button? = null
+    private var filterButton: Button? = null
     private var smoothingSeekBar: SeekBar? = null
 
     init {
         buffer.setSmoothingAlpha(prefs.getFloat(PREF_ALPHA, 0.35f))
+        val savedMode = prefs.getString(PREF_FILTER_MODE, null)
+            ?.let { name ->
+                PeriodicNoiseFilterMode.entries.firstOrNull { it.name == name }
+            }
+            ?: PeriodicNoiseFilterMode.OFF
+        buffer.setPeriodicFilter(
+            mode = savedMode,
+            manualFrequencyHz = prefs.getFloat(PREF_FILTER_FREQUENCY, 0.38f),
+        )
     }
 
     fun show() {
@@ -99,6 +111,7 @@ class LiveSignalInspectorController(
             smoothingText = null
             signalButton = null
             windowButton = null
+            filterButton = null
             smoothingSeekBar = null
             samplePosted.set(false)
             mainHandler.removeCallbacks(drainPendingSample)
@@ -118,7 +131,8 @@ class LiveSignalInspectorController(
         AppDiagnostics.info(
             "LIVE",
             "Live signal inspector opened signal=${selectedSignal.id} " +
-                "alpha=${buffer.smoothingAlpha} windowMs=$windowMs",
+                "alpha=${buffer.smoothingAlpha} filter=${buffer.periodicMode} " +
+                "windowMs=$windowMs",
         )
         offerSnapshot(snapshotProvider())
     }
@@ -198,6 +212,9 @@ class LiveSignalInspectorController(
         val selectWindowButton = toolbarButton("30 s") { cycleWindow() }
         windowButton = selectWindowButton
         toolbar.addView(selectWindowButton, toolbarButtonParams(92f))
+        val selectFilterButton = toolbarButton("FILTER OFF") { showPeriodicFilterMenu() }
+        filterButton = selectFilterButton
+        toolbar.addView(selectFilterButton, toolbarButtonParams(112f))
         toolbar.addView(toolbarButton("RESET") { resetCapture() }, toolbarButtonParams(92f))
         toolbar.addView(
             toolbarButton("✕ EXIT") { owner.dismiss() },
@@ -237,7 +254,7 @@ class LiveSignalInspectorController(
         rawValueText = rawPanel.second
         valueRow.addView(rawPanel.first, weightedPanelParams())
         val smoothedPanel = valuePanel(
-            title = "SMOOTHED",
+            title = "OUTPUT",
             titleColor = SMOOTHED_COLOR,
         )
         smoothedValueText = smoothedPanel.second
@@ -256,7 +273,7 @@ class LiveSignalInspectorController(
             valueRow,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(88f),
+                dp(100f),
             ).apply { setMargins(0, dp(4f), 0, dp(6f)) },
         )
 
@@ -413,7 +430,8 @@ class LiveSignalInspectorController(
         DarkActionDialog.show(
             activity = activity,
             title = group.label,
-            subtitle = "The blue trace is raw; the orange trace uses the selected alpha.",
+            subtitle =
+                "Blue is raw. Orange is periodic-filter output followed by the selected alpha.",
             items = LiveSignalCatalog.byGroup(group).map { definition ->
                 DarkActionItem(
                     title = definition.label,
@@ -443,6 +461,123 @@ class LiveSignalInspectorController(
         AppDiagnostics.info("LIVE", "Live signal changed to ${definition.id}")
         appendLog("Live signal inspector: ${definition.label}")
         offerSnapshot(snapshotProvider())
+    }
+
+    private fun showPeriodicFilterMenu() {
+        val estimate = buffer.periodicEstimate
+        val autoDescription = buildString {
+            append("Detect and reject a stable 0.25-0.55 Hz component. ")
+            append("Useful for the measured common analog wave, but it may also reduce ")
+            append("a genuine closed-loop AFR oscillation. Inspector only.")
+            if (estimate.mode == PeriodicNoiseFilterMode.AUTO &&
+                estimate.frequencyHz.isFinite()
+            ) {
+                append(" Current estimate ")
+                append(formatFrequency(estimate.frequencyHz))
+                append(" at ")
+                append(formatPercent(estimate.confidence))
+                append(" confidence.")
+            }
+        }
+        DarkActionDialog.show(
+            activity = activity,
+            title = "Periodic noise filter",
+            subtitle =
+                "The filter runs before exponential smoothing and never changes dashboard cards.",
+            items = listOf(
+                DarkActionItem(
+                    title = "Off",
+                    description = "Show only ordinary exponential smoothing.",
+                    accentColor = if (buffer.periodicMode == PeriodicNoiseFilterMode.OFF) {
+                        SMOOTHED_COLOR
+                    } else {
+                        Color.WHITE
+                    },
+                    onClick = {
+                        setPeriodicFilter(PeriodicNoiseFilterMode.OFF)
+                    },
+                ),
+                DarkActionItem(
+                    title = "Automatic periodic rejection",
+                    description = autoDescription,
+                    accentColor = if (buffer.periodicMode == PeriodicNoiseFilterMode.AUTO) {
+                        SMOOTHED_COLOR
+                    } else {
+                        Color.WHITE
+                    },
+                    onClick = {
+                        setPeriodicFilter(PeriodicNoiseFilterMode.AUTO)
+                    },
+                ),
+                DarkActionItem(
+                    title = "Manual frequency",
+                    description =
+                        "Apply a fixed notch. Use 0.38 Hz for the supplied AFR/battery captures.",
+                    accentColor = if (buffer.periodicMode == PeriodicNoiseFilterMode.MANUAL) {
+                        SMOOTHED_COLOR
+                    } else {
+                        Color.WHITE
+                    },
+                    onClick = ::showManualFrequencyMenu,
+                ),
+            ),
+        )
+    }
+
+    private fun showManualFrequencyMenu() {
+        val options = floatArrayOf(0.30f, 0.35f, 0.38f, 0.40f, 0.45f, 0.50f)
+        DarkActionDialog.show(
+            activity = activity,
+            title = "Manual periodic frequency",
+            subtitle =
+                "The observed common AFR/battery wave is approximately 0.36-0.40 Hz.",
+            items = options.map { frequency ->
+                DarkActionItem(
+                    title = formatFrequency(frequency),
+                    description = "Reject a narrow band around ${formatFrequency(frequency)}.",
+                    accentColor = if (
+                        buffer.periodicMode == PeriodicNoiseFilterMode.MANUAL &&
+                        kotlin.math.abs(buffer.manualFrequencyHz - frequency) < 0.005f
+                    ) {
+                        SMOOTHED_COLOR
+                    } else {
+                        Color.WHITE
+                    },
+                    onClick = {
+                        setPeriodicFilter(
+                            mode = PeriodicNoiseFilterMode.MANUAL,
+                            manualFrequencyHz = frequency,
+                        )
+                    },
+                )
+            },
+            closeLabel = "Back",
+        )
+    }
+
+    private fun setPeriodicFilter(
+        mode: PeriodicNoiseFilterMode,
+        manualFrequencyHz: Float = buffer.manualFrequencyHz,
+    ) {
+        buffer.setPeriodicFilter(mode, manualFrequencyHz)
+        prefs.edit()
+            .putString(PREF_FILTER_MODE, mode.name)
+            .putFloat(PREF_FILTER_FREQUENCY, buffer.manualFrequencyHz)
+            .apply()
+        refreshLabels()
+        AppDiagnostics.info(
+            "LIVE",
+            "Periodic filter mode=$mode frequency=${buffer.manualFrequencyHz} " +
+                "signal=${selectedSignal.id}",
+        )
+        appendLog(
+            when (mode) {
+                PeriodicNoiseFilterMode.OFF -> "Live periodic filter disabled"
+                PeriodicNoiseFilterMode.AUTO -> "Live periodic filter set to automatic"
+                PeriodicNoiseFilterMode.MANUAL ->
+                    "Live periodic filter set to ${formatFrequency(buffer.manualFrequencyHz)}"
+            },
+        )
     }
 
     private fun setSmoothingAlpha(alpha: Float, persist: Boolean) {
@@ -484,9 +619,10 @@ class LiveSignalInspectorController(
         val definition = selectedSignal
         titleText?.text = "Live signal • ${definition.label}"
         descriptionText?.text =
-            "${definition.description}  Raw and smoothed traces share the same scale."
+            "${definition.description}  Raw and output traces share the same scale."
         signalButton?.text = "SIGNAL"
         windowButton?.text = "${windowMs / 1_000} s"
+        filterButton?.text = filterButtonText()
         graphView?.apply {
             unit = definition.unit
             decimals = definition.decimals
@@ -507,13 +643,15 @@ class LiveSignalInspectorController(
             buildString {
                 append("MIN  ${formatCompact(stats.rawMin, definition)}")
                 append("   MAX  ${formatCompact(stats.rawMax, definition)}\n")
-                append("P-P  ${formatCompact(stats.peakToPeak, definition)}")
+                append("RAW P-P  ${formatCompact(stats.peakToPeak, definition)}")
                 append("   σ  ${formatCompact(stats.rawStdDev, definition)}\n")
-                append("AVG  ${formatCompact(stats.rawAverage, definition)}")
-                append("   ${formatRate(stats.sampleRateHz)}")
+                append("OUT P-P  ${formatCompact(stats.outputPeakToPeak, definition)}")
+                append("   σ  ${formatCompact(stats.outputStdDev, definition)}\n")
+                append("${formatRate(stats.sampleRateHz)}")
                 append("   N=${stats.count}")
             }
         }
+        filterButton?.text = filterButtonText()
         refreshSmoothingLabel()
         graphView?.invalidate()
     }
@@ -526,10 +664,60 @@ class LiveSignalInspectorController(
             alpha >= 0.25f -> "medium"
             else -> "strong"
         }
+        val periodic = periodicStatusText()
         smoothingText?.text =
-            "Exponential smoothing: α=${formatAlpha(alpha)} ($label)  •  " +
-                "same algorithm as dashboard cards • inspector only"
+            "Output: $periodic → EMA α=${formatAlpha(alpha)} ($label)  •  " +
+                "inspector only"
     }
+
+    private fun filterButtonText(): String {
+        val estimate = buffer.periodicEstimate
+        return when (buffer.periodicMode) {
+            PeriodicNoiseFilterMode.OFF -> "FILTER OFF"
+            PeriodicNoiseFilterMode.AUTO -> {
+                if (estimate.active && estimate.frequencyHz.isFinite()) {
+                    "AUTO ${String.format(Locale.US, "%.2f", estimate.frequencyHz)}"
+                } else {
+                    "AUTO WAIT"
+                }
+            }
+            PeriodicNoiseFilterMode.MANUAL -> {
+                val frequency = estimate.frequencyHz.takeIf { it.isFinite() }
+                    ?: buffer.manualFrequencyHz
+                String.format(Locale.US, "%.2f Hz", frequency)
+            }
+        }
+    }
+
+    private fun periodicStatusText(): String {
+        val estimate = buffer.periodicEstimate
+        return when (buffer.periodicMode) {
+            PeriodicNoiseFilterMode.OFF -> "periodic filter off"
+            PeriodicNoiseFilterMode.MANUAL -> {
+                val frequency = estimate.frequencyHz.takeIf { it.isFinite() }
+                    ?: buffer.manualFrequencyHz
+                "manual notch ${formatFrequency(frequency)}"
+            }
+            PeriodicNoiseFilterMode.AUTO -> {
+                if (estimate.active && estimate.frequencyHz.isFinite()) {
+                    "auto notch ${formatFrequency(estimate.frequencyHz)} " +
+                        "(${formatPercent(estimate.confidence)} confidence)"
+                } else {
+                    "auto notch learning/bypassed"
+                }
+            }
+        }
+    }
+
+    private fun formatFrequency(value: Float): String =
+        if (value.isFinite()) String.format(Locale.US, "%.2f Hz", value) else "— Hz"
+
+    private fun formatPercent(value: Float): String =
+        if (value.isFinite()) {
+            String.format(Locale.US, "%.0f%%", value.coerceIn(0f, 1f) * 100f)
+        } else {
+            "—"
+        }
 
     private fun format(value: Float, definition: LiveSignalDefinition): String {
         if (!value.isFinite()) return "—"

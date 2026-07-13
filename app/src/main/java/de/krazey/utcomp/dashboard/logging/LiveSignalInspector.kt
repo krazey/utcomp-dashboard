@@ -2,6 +2,12 @@ package de.krazey.utcomp.dashboard.logging
 
 import de.krazey.utcomp.dashboard.protocol.TransmitterConstants
 import de.krazey.utcomp.dashboard.utcomp.UtcompDataSnapshot
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 enum class LiveSignalGroup(val label: String) {
@@ -148,6 +154,21 @@ object LiveSignalCatalog {
     fun byGroup(group: LiveSignalGroup): List<LiveSignalDefinition> = all.filter { it.group == group }
 }
 
+enum class PeriodicNoiseFilterMode {
+    OFF,
+    AUTO,
+    MANUAL,
+}
+
+data class PeriodicNoiseEstimate(
+    val mode: PeriodicNoiseFilterMode,
+    val active: Boolean,
+    val frequencyHz: Float,
+    val amplitude: Float,
+    val confidence: Float,
+    val sampleRateHz: Float,
+)
+
 data class LiveSignalStats(
     val count: Int,
     val rawCurrent: Float,
@@ -156,12 +177,31 @@ data class LiveSignalStats(
     val rawMax: Float,
     val rawAverage: Float,
     val rawStdDev: Float,
+    val outputMin: Float,
+    val outputMax: Float,
+    val outputAverage: Float,
+    val outputStdDev: Float,
     val sampleRateHz: Float,
 ) {
     val peakToPeak: Float
         get() = if (rawMin.isFinite() && rawMax.isFinite()) rawMax - rawMin else Float.NaN
+
+    val outputPeakToPeak: Float
+        get() = if (outputMin.isFinite() && outputMax.isFinite()) {
+            outputMax - outputMin
+        } else {
+            Float.NaN
+        }
 }
 
+/**
+ * Bounded live-signal history with optional periodic-noise rejection followed
+ * by the same exponential smoothing used by dashboard cards.
+ *
+ * AUTO searches only the 0.25-0.55 Hz band observed in the supplied captures.
+ * It remains disabled until a stable sinusoidal component explains enough of
+ * the recent variance. MANUAL always applies the selected notch frequency.
+ */
 class LiveSignalBuffer(
     private val capacity: Int = 2_500,
 ) {
@@ -169,13 +209,54 @@ class LiveSignalBuffer(
         require(capacity > 1)
     }
 
+    private companion object {
+        const val PERIODIC_WINDOW_MS = 20_000L
+        const val PERIODIC_REESTIMATE_MS = 1_000L
+        const val PERIODIC_MIN_DURATION_MS = 8_000L
+        const val PERIODIC_MIN_SAMPLES = 32
+        const val PERIODIC_MIN_HZ = 0.25f
+        const val PERIODIC_MAX_HZ = 0.55f
+        const val PERIODIC_STEP_HZ = 0.005f
+        const val PERIODIC_MIN_CONFIDENCE = 0.18f
+        const val PERIODIC_MIN_AMPLITUDE_FRACTION = 0.25f
+        const val NOTCH_Q = 3.0
+
+        fun smooth(previous: Float, raw: Float, alpha: Float): Float {
+            if (!previous.isFinite()) return raw
+            val safeAlpha = alpha.coerceIn(0.01f, 1f)
+            return previous + (raw - previous) * safeAlpha
+        }
+    }
+
     private val elapsedMs = LongArray(capacity)
     private val rawValues = FloatArray(capacity)
-    private val smoothedValues = FloatArray(capacity)
+    private val outputValues = FloatArray(capacity)
     private var start = 0
     private var count = 0
 
+    private var lastEstimateAtMs = Long.MIN_VALUE
+
+    private var b0 = 1.0
+    private var b1 = 0.0
+    private var b2 = 0.0
+    private var a1 = 0.0
+    private var a2 = 0.0
+    private var x1 = 0.0
+    private var x2 = 0.0
+    private var y1 = 0.0
+    private var y2 = 0.0
+    private var notchActive = false
+
     var smoothingAlpha: Float = 1f
+        private set
+
+    var periodicMode: PeriodicNoiseFilterMode = PeriodicNoiseFilterMode.OFF
+        private set
+
+    var manualFrequencyHz: Float = 0.38f
+        private set
+
+    var periodicEstimate: PeriodicNoiseEstimate = inactiveEstimate(PeriodicNoiseFilterMode.OFF)
         private set
 
     val size: Int
@@ -184,11 +265,24 @@ class LiveSignalBuffer(
     fun clear() {
         start = 0
         count = 0
+        lastEstimateAtMs = Long.MIN_VALUE
+        resetNotchState()
+        periodicEstimate = inactiveEstimate(periodicMode)
     }
 
     fun setSmoothingAlpha(alpha: Float) {
         smoothingAlpha = alpha.coerceIn(0.01f, 1f)
-        recomputeSmoothed()
+        recomputeOutput(forceEstimate = false)
+    }
+
+    fun setPeriodicFilter(
+        mode: PeriodicNoiseFilterMode,
+        manualFrequencyHz: Float = this.manualFrequencyHz,
+    ) {
+        periodicMode = mode
+        this.manualFrequencyHz = manualFrequencyHz.coerceIn(0.20f, 0.55f)
+        lastEstimateAtMs = Long.MIN_VALUE
+        recomputeOutput(forceEstimate = true)
     }
 
     fun add(timeMs: Long, rawValue: Float) {
@@ -204,19 +298,35 @@ class LiveSignalBuffer(
 
         elapsedMs[insertIndex] = timeMs
         rawValues[insertIndex] = rawValue
-        val previous = if (count <= 1) {
-            rawValue
-        } else {
-            smoothedValues[physicalIndex(count - 2)]
+
+        val shouldEstimate =
+            periodicMode != PeriodicNoiseFilterMode.OFF &&
+                (lastEstimateAtMs == Long.MIN_VALUE ||
+                    timeMs - lastEstimateAtMs >= PERIODIC_REESTIMATE_MS)
+
+        if (shouldEstimate) {
+            recomputeOutput(forceEstimate = true)
+            lastEstimateAtMs = timeMs
+            return
         }
-        smoothedValues[insertIndex] = smooth(previous, rawValue, smoothingAlpha)
+
+        val previous = if (count <= 1) {
+            Float.NaN
+        } else {
+            outputValues[physicalIndex(count - 2)]
+        }
+        outputValues[insertIndex] = processOutput(rawValue, previous)
     }
 
     fun timeAt(index: Int): Long = elapsedMs[physicalIndex(index)]
 
     fun rawAt(index: Int): Float = rawValues[physicalIndex(index)]
 
-    fun smoothedAt(index: Int): Float = smoothedValues[physicalIndex(index)]
+    /**
+     * Kept as smoothedAt() for the existing graph API. The value is the final
+     * output after optional periodic filtering and exponential smoothing.
+     */
+    fun smoothedAt(index: Int): Float = outputValues[physicalIndex(index)]
 
     fun firstVisibleIndex(windowMs: Long): Int {
         if (count == 0) return 0
@@ -233,51 +343,318 @@ class LiveSignalBuffer(
     fun stats(windowMs: Long): LiveSignalStats {
         if (count == 0) return emptyStats()
         val first = firstVisibleIndex(windowMs)
-        var min = Float.POSITIVE_INFINITY
-        var max = Float.NEGATIVE_INFINITY
-        var sum = 0.0
-        var sumSquares = 0.0
+
+        var rawMin = Float.POSITIVE_INFINITY
+        var rawMax = Float.NEGATIVE_INFINITY
+        var rawSum = 0.0
+        var rawSquares = 0.0
+        var outputMin = Float.POSITIVE_INFINITY
+        var outputMax = Float.NEGATIVE_INFINITY
+        var outputSum = 0.0
+        var outputSquares = 0.0
         var samples = 0
+
         for (index in first until count) {
-            val value = rawAt(index)
-            if (!value.isFinite()) continue
-            min = kotlin.math.min(min, value)
-            max = kotlin.math.max(max, value)
-            sum += value
-            sumSquares += value.toDouble() * value.toDouble()
+            val raw = rawAt(index)
+            val output = smoothedAt(index)
+            if (!raw.isFinite() || !output.isFinite()) continue
+
+            rawMin = min(rawMin, raw)
+            rawMax = max(rawMax, raw)
+            rawSum += raw
+            rawSquares += raw.toDouble() * raw.toDouble()
+
+            outputMin = min(outputMin, output)
+            outputMax = max(outputMax, output)
+            outputSum += output
+            outputSquares += output.toDouble() * output.toDouble()
             samples++
         }
         if (samples == 0) return emptyStats()
 
-        val average = (sum / samples).toFloat()
-        val variance = (sumSquares / samples - average.toDouble() * average.toDouble())
-            .coerceAtLeast(0.0)
+        val rawAverage = (rawSum / samples).toFloat()
+        val outputAverage = (outputSum / samples).toFloat()
+        val rawVariance =
+            (rawSquares / samples - rawAverage.toDouble() * rawAverage.toDouble())
+                .coerceAtLeast(0.0)
+        val outputVariance =
+            (outputSquares / samples - outputAverage.toDouble() * outputAverage.toDouble())
+                .coerceAtLeast(0.0)
         val durationMs = (timeAt(count - 1) - timeAt(first)).coerceAtLeast(0L)
         val rate = if (samples > 1 && durationMs > 0L) {
             (samples - 1) * 1_000f / durationMs
         } else {
             Float.NaN
         }
+
         return LiveSignalStats(
             count = samples,
             rawCurrent = rawAt(count - 1),
             smoothedCurrent = smoothedAt(count - 1),
-            rawMin = min,
-            rawMax = max,
-            rawAverage = average,
-            rawStdDev = sqrt(variance).toFloat(),
+            rawMin = rawMin,
+            rawMax = rawMax,
+            rawAverage = rawAverage,
+            rawStdDev = sqrt(rawVariance).toFloat(),
+            outputMin = outputMin,
+            outputMax = outputMax,
+            outputAverage = outputAverage,
+            outputStdDev = sqrt(outputVariance).toFloat(),
             sampleRateHz = rate,
         )
     }
 
-    private fun recomputeSmoothed() {
-        if (count == 0) return
-        var previous = rawAt(0)
-        smoothedValues[physicalIndex(0)] = previous
-        for (index in 1 until count) {
+    private fun recomputeOutput(forceEstimate: Boolean) {
+        if (count == 0) {
+            periodicEstimate = inactiveEstimate(periodicMode)
+            resetNotchState()
+            return
+        }
+
+        if (forceEstimate || periodicMode == PeriodicNoiseFilterMode.OFF) {
+            periodicEstimate = estimatePeriodicComponent()
+        }
+        configureNotch(periodicEstimate)
+        resetNotchState(keepCoefficients = true)
+        if (notchActive) primeNotch(rawAt(0))
+
+        var previous = Float.NaN
+        for (index in 0 until count) {
             val raw = rawAt(index)
-            previous = smooth(previous, raw, smoothingAlpha)
-            smoothedValues[physicalIndex(index)] = previous
+            previous = processOutput(raw, previous)
+            outputValues[physicalIndex(index)] = previous
+        }
+    }
+
+    private fun processOutput(raw: Float, previous: Float): Float {
+        val periodicFiltered = if (notchActive) processNotch(raw) else raw
+        return smooth(previous, periodicFiltered, smoothingAlpha)
+    }
+
+    private fun estimatePeriodicComponent(): PeriodicNoiseEstimate {
+        if (periodicMode == PeriodicNoiseFilterMode.OFF) {
+            return inactiveEstimate(periodicMode)
+        }
+
+        val sampleRate = estimateSampleRate()
+        if (!sampleRate.isFinite() || sampleRate <= 0f) {
+            return inactiveEstimate(periodicMode)
+        }
+
+        val maxUsableFrequency = min(PERIODIC_MAX_HZ, sampleRate * 0.45f)
+        if (maxUsableFrequency <= 0.20f) {
+            return inactiveEstimate(periodicMode).copy(sampleRateHz = sampleRate)
+        }
+
+        val first = firstVisibleIndex(PERIODIC_WINDOW_MS)
+        val durationMs = timeAt(count - 1) - timeAt(first)
+        if (count - first < PERIODIC_MIN_SAMPLES || durationMs < PERIODIC_MIN_DURATION_MS) {
+            val manualFrequency = manualFrequencyHz.coerceAtMost(maxUsableFrequency)
+            return PeriodicNoiseEstimate(
+                mode = periodicMode,
+                active = periodicMode == PeriodicNoiseFilterMode.MANUAL &&
+                    manualFrequency > 0f,
+                frequencyHz = if (periodicMode == PeriodicNoiseFilterMode.MANUAL) {
+                    manualFrequency
+                } else {
+                    Float.NaN
+                },
+                amplitude = Float.NaN,
+                confidence = Float.NaN,
+                sampleRateHz = sampleRate,
+            )
+        }
+
+        val lowerFrequency = min(PERIODIC_MIN_HZ, maxUsableFrequency)
+        val manualFrequency = manualFrequencyHz.coerceIn(0.20f, maxUsableFrequency)
+        val candidate = if (periodicMode == PeriodicNoiseFilterMode.MANUAL) {
+            fitFrequency(first, manualFrequency)
+        } else {
+            var best: FrequencyFit? = null
+            var frequency = lowerFrequency
+            while (frequency <= maxUsableFrequency + 0.0001f) {
+                val fit = fitFrequency(first, frequency)
+                if (fit != null && (best == null || fit.confidence > best.confidence)) {
+                    best = fit
+                }
+                frequency += PERIODIC_STEP_HZ
+            }
+            best
+        }
+
+        if (candidate == null) {
+            return inactiveEstimate(periodicMode).copy(sampleRateHz = sampleRate)
+        }
+
+        val active = if (periodicMode == PeriodicNoiseFilterMode.MANUAL) {
+            true
+        } else {
+            candidate.confidence >= PERIODIC_MIN_CONFIDENCE &&
+                candidate.amplitude >= candidate.standardDeviation *
+                    PERIODIC_MIN_AMPLITUDE_FRACTION
+        }
+
+        return PeriodicNoiseEstimate(
+            mode = periodicMode,
+            active = active,
+            frequencyHz = candidate.frequencyHz,
+            amplitude = candidate.amplitude,
+            confidence = candidate.confidence,
+            sampleRateHz = sampleRate,
+        )
+    }
+
+    private data class FrequencyFit(
+        val frequencyHz: Float,
+        val amplitude: Float,
+        val confidence: Float,
+        val standardDeviation: Float,
+    )
+
+    private fun fitFrequency(first: Int, frequencyHz: Float): FrequencyFit? {
+        val samples = count - first
+        if (samples < 4) return null
+
+        val lastTime = timeAt(count - 1)
+        var meanTime = 0.0
+        var meanValue = 0.0
+        for (index in first until count) {
+            meanTime += (timeAt(index) - lastTime) / 1_000.0
+            meanValue += rawAt(index)
+        }
+        meanTime /= samples
+        meanValue /= samples
+
+        var timeVariance = 0.0
+        var timeValueCovariance = 0.0
+        for (index in first until count) {
+            val time = (timeAt(index) - lastTime) / 1_000.0
+            val dt = time - meanTime
+            timeVariance += dt * dt
+            timeValueCovariance += dt * (rawAt(index) - meanValue)
+        }
+        val slope = if (timeVariance > 1e-12) {
+            timeValueCovariance / timeVariance
+        } else {
+            0.0
+        }
+
+        var ss = 0.0
+        var cc = 0.0
+        var sc = 0.0
+        var ys = 0.0
+        var yc = 0.0
+        var residualPower = 0.0
+        val angularFrequency = 2.0 * PI * frequencyHz
+
+        for (index in first until count) {
+            val time = (timeAt(index) - lastTime) / 1_000.0
+            val residual = rawAt(index) - (meanValue + slope * (time - meanTime))
+            val sine = sin(angularFrequency * time)
+            val cosine = cos(angularFrequency * time)
+            ss += sine * sine
+            cc += cosine * cosine
+            sc += sine * cosine
+            ys += residual * sine
+            yc += residual * cosine
+            residualPower += residual * residual
+        }
+
+        val determinant = ss * cc - sc * sc
+        if (abs(determinant) < 1e-12 || residualPower < 1e-12) return null
+
+        val sineCoefficient = (ys * cc - yc * sc) / determinant
+        val cosineCoefficient = (yc * ss - ys * sc) / determinant
+        var fittedPower = 0.0
+        for (index in first until count) {
+            val time = (timeAt(index) - lastTime) / 1_000.0
+            val fitted =
+                sineCoefficient * sin(angularFrequency * time) +
+                    cosineCoefficient * cos(angularFrequency * time)
+            fittedPower += fitted * fitted
+        }
+
+        return FrequencyFit(
+            frequencyHz = frequencyHz,
+            amplitude = sqrt(
+                sineCoefficient * sineCoefficient +
+                    cosineCoefficient * cosineCoefficient,
+            ).toFloat(),
+            confidence = (fittedPower / residualPower).coerceIn(0.0, 1.0).toFloat(),
+            standardDeviation = sqrt(residualPower / samples).toFloat(),
+        )
+    }
+
+    private fun estimateSampleRate(): Float {
+        if (count < 2) return Float.NaN
+        val first = firstVisibleIndex(PERIODIC_WINDOW_MS)
+        val durationMs = timeAt(count - 1) - timeAt(first)
+        return if (durationMs > 0L && count - first > 1) {
+            (count - first - 1) * 1_000f / durationMs
+        } else {
+            Float.NaN
+        }
+    }
+
+    private fun configureNotch(estimate: PeriodicNoiseEstimate) {
+        notchActive = false
+        b0 = 1.0
+        b1 = 0.0
+        b2 = 0.0
+        a1 = 0.0
+        a2 = 0.0
+
+        if (!estimate.active || !estimate.frequencyHz.isFinite() ||
+            !estimate.sampleRateHz.isFinite()
+        ) {
+            return
+        }
+
+        val sampleRate = estimate.sampleRateHz.toDouble()
+        val frequency = estimate.frequencyHz.toDouble()
+        if (sampleRate <= frequency * 2.1) return
+
+        val omega = 2.0 * PI * frequency / sampleRate
+        val cosine = cos(omega)
+        val alpha = sin(omega) / (2.0 * NOTCH_Q)
+        val a0 = 1.0 + alpha
+        b0 = 1.0 / a0
+        b1 = -2.0 * cosine / a0
+        b2 = 1.0 / a0
+        a1 = -2.0 * cosine / a0
+        a2 = (1.0 - alpha) / a0
+        notchActive = true
+    }
+
+    private fun primeNotch(value: Float) {
+        val initial = value.toDouble()
+        x1 = initial
+        x2 = initial
+        y1 = initial
+        y2 = initial
+    }
+
+    private fun processNotch(value: Float): Float {
+        val input = value.toDouble()
+        val output = b0 * input + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        x2 = x1
+        x1 = input
+        y2 = y1
+        y1 = output
+        return output.toFloat()
+    }
+
+    private fun resetNotchState(keepCoefficients: Boolean = false) {
+        x1 = 0.0
+        x2 = 0.0
+        y1 = 0.0
+        y2 = 0.0
+        if (!keepCoefficients) {
+            notchActive = false
+            b0 = 1.0
+            b1 = 0.0
+            b2 = 0.0
+            a1 = 0.0
+            a2 = 0.0
         }
     }
 
@@ -291,14 +668,20 @@ class LiveSignalBuffer(
         rawMax = Float.NaN,
         rawAverage = Float.NaN,
         rawStdDev = Float.NaN,
+        outputMin = Float.NaN,
+        outputMax = Float.NaN,
+        outputAverage = Float.NaN,
+        outputStdDev = Float.NaN,
         sampleRateHz = Float.NaN,
     )
 
-    companion object {
-        fun smooth(previous: Float, raw: Float, alpha: Float): Float {
-            if (!previous.isFinite()) return raw
-            val safeAlpha = alpha.coerceIn(0.01f, 1f)
-            return previous + (raw - previous) * safeAlpha
-        }
-    }
+    private fun inactiveEstimate(mode: PeriodicNoiseFilterMode) = PeriodicNoiseEstimate(
+        mode = mode,
+        active = false,
+        frequencyHz = Float.NaN,
+        amplitude = Float.NaN,
+        confidence = Float.NaN,
+        sampleRateHz = Float.NaN,
+    )
+
 }

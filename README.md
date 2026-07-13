@@ -56,7 +56,9 @@ automatically after USB connects.
 
 The normal controls panel contains only driver-facing dashboard actions. Manual
 protocol requests and the automatic polling switch are grouped in a descriptive
-Diagnostics menu, while simulation remains available from the top bar. CSV log
+Diagnostics menu, while simulation remains available from the top bar. Full
+packet/decode tracing is disabled by default; Diagnostics shows one recent event
+until full protocol logging is explicitly enabled. CSV log
 actions and remaining in-app dialogs use the same dark, large-touch-target
 design. App diagnostics are
 recorded to a bounded private log with one rotated history file. The Diagnostics
@@ -68,9 +70,13 @@ The Live Data action graphs one decoded value at its real packet update cadence.
 Raw and exponentially smoothed traces are shown together with rolling min/max,
 peak-to-peak noise, standard deviation, average, and sample rate. The smoothing
 slider uses the same alpha formula as dashboard cards, making it possible to
-choose a useful UI smoothing value before changing a page configuration. Signal,
-alpha, and time-window choices are persisted, while sample collection runs only
-while the full-screen inspector is open.
+choose a useful UI smoothing value before changing a page configuration. An
+optional periodic filter can either learn a stable 0.25-0.55 Hz component or use
+a manually selected notch frequency before the EMA stage. It is intentionally an
+inspector-only diagnostic because genuine closed-loop AFR movement can occupy a
+similar frequency range. Signal, filter, alpha, and time-window choices are
+persisted, while sample collection runs only while the full-screen inspector is
+open.
 
 The Kotlin namespace is `de.krazey.utcomp.dashboard`. The Android
 `applicationId` intentionally remains `de.krazey.utcomp.probe` so existing

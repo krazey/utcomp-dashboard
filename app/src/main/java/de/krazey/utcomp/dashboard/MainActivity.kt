@@ -116,6 +116,7 @@ class MainActivity : Activity(), DashboardRenderHost {
     private lateinit var dashboardControlsController: DashboardControlsController
     private lateinit var dashboardRoot: LinearLayout
     private lateinit var logTitleText: TextView
+    private lateinit var recentProtocolText: TextView
     private lateinit var logText: TextView
     private lateinit var logScroll: ScrollView
     private lateinit var csvLogger: UtcompCsvLogger
@@ -128,6 +129,7 @@ class MainActivity : Activity(), DashboardRenderHost {
     private lateinit var ralliartRenderer: RalliartDashboardRenderer
     private lateinit var simpleRenderer: SimpleDashboardRenderer
     private var dataLogTreeUri: Uri? = null
+    private var protocolLogEnabled = false
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private val clockFmt = SimpleDateFormat("HH:mm", Locale.US)
@@ -364,6 +366,7 @@ class MainActivity : Activity(), DashboardRenderHost {
                 DashboardDiagnosticsState(
                     usbConnected = connected,
                     automaticPolling = autoRefresh,
+                    protocolLogEnabled = protocolLogEnabled,
                     firmware = UtcompDecoder.snapshot.firmware,
                     simulationMode = simModeDescription(),
                 )
@@ -373,7 +376,11 @@ class MainActivity : Activity(), DashboardRenderHost {
             refreshDeviceInformation = { requestDeviceInformation(logEach = true) },
             showLiveSignalInspector = { liveSignalInspectorController.show() },
             showAppDiagnostics = { appDiagnosticsController.showMenu() },
-            clearProtocolLog = { logText.text = "" },
+            toggleProtocolLog = ::toggleProtocolLog,
+            clearProtocolLog = {
+                logText.text = ""
+                recentProtocolText.text = "Protocol: no recent event"
+            },
         )
         dashboardEditorController = DashboardEditorController(
             context = this,
@@ -642,6 +649,25 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
         root.addView(logTitleText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
+        recentProtocolText = TextView(this).apply {
+            text = "Protocol: no recent event"
+            textSize = 10.5f
+            setTextColor(Color.rgb(185, 190, 198))
+            typeface = Typeface.MONOSPACE
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(6f), dp(3f), dp(6f), dp(4f))
+            setBackgroundColor(Color.rgb(4, 5, 7))
+            visibility = View.GONE
+        }
+        root.addView(
+            recentProtocolText,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+
         logText = TextView(this).apply {
             textSize = 10f
             setTextColor(Color.rgb(185, 190, 198))
@@ -710,6 +736,7 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
 
         dataLogTreeUri = prefs.getString("dataLogTreeUri", null)?.let { Uri.parse(it) }
+        protocolLogEnabled = prefs.getBoolean("protocolLogEnabled", false)
 
         DashboardConfigJson.decode(prefs.getString("dashboardPagesJson", null))?.let { savedPages ->
             if (savedPages.isNotEmpty()) {
@@ -780,6 +807,7 @@ class MainActivity : Activity(), DashboardRenderHost {
                 putString("uiMode", uiMode.name)
                 putString("pageId", simplePageConfig().id)
                 putString("dataLogTreeUri", dataLogTreeUri?.toString())
+                putBoolean("protocolLogEnabled", protocolLogEnabled)
                 if (includePageConfig) {
                     putString("dashboardPagesJson", DashboardConfigJson.encode(dashboardPages))
                     putString(
@@ -1510,12 +1538,19 @@ class MainActivity : Activity(), DashboardRenderHost {
             AppDiagnostics.capture(diagnosticCategory(line), line)
         }
 
-        if (highFrequencyLine) return
+        if (highFrequencyLine && !protocolLogEnabled) return
 
         runOnUiThread {
             if (!::logText.isInitialized || !::logScroll.isInitialized) return@runOnUiThread
 
             val stamp = timeFmt.format(Date())
+            if (!highFrequencyLine && ::recentProtocolText.isInitialized) {
+                val compact = line.lineSequence().firstOrNull().orEmpty().take(220)
+                recentProtocolText.text = "$stamp  $compact"
+            }
+
+            if (!protocolLogEnabled) return@runOnUiThread
+
             val newEntry = "$stamp  $line\n"
 
             // Keep the on-screen debug TextView bounded. Without this, the radio eventually
@@ -1536,6 +1571,20 @@ class MainActivity : Activity(), DashboardRenderHost {
                 logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
             }
         }
+    }
+
+    private fun toggleProtocolLog() {
+        protocolLogEnabled = !protocolLogEnabled
+        if (::usb.isInitialized) usb.verboseLogging = protocolLogEnabled
+        saveDashboardViewPrefs()
+        appendLog(
+            if (protocolLogEnabled) {
+                "Full protocol log enabled"
+            } else {
+                "Full protocol log disabled"
+            },
+        )
+        renderDashboard()
     }
 
     private fun diagnosticCategory(line: String): String = when {
@@ -1701,11 +1750,22 @@ class MainActivity : Activity(), DashboardRenderHost {
         updateEditModeButton()
         updateSimModeButton()
 
-        val showDebugLog = controlsVisible || uiMode == UiMode.DEBUG
-        if (::usb.isInitialized) usb.verboseLogging = showDebugLog
-        if (::logTitleText.isInitialized) logTitleText.visibility = if (showDebugLog) View.VISIBLE else View.GONE
-        if (::logScroll.isInitialized) logScroll.visibility = if (showDebugLog) View.VISIBLE else View.GONE
-        if (::statusText.isInitialized) statusText.visibility = if (showDebugLog) View.VISIBLE else View.GONE
+        val showDiagnostics = controlsVisible || uiMode == UiMode.DEBUG
+        val showFullProtocolLog = showDiagnostics && protocolLogEnabled
+        if (::usb.isInitialized) usb.verboseLogging = protocolLogEnabled
+        if (::logTitleText.isInitialized) {
+            logTitleText.visibility = if (showFullProtocolLog) View.VISIBLE else View.GONE
+        }
+        if (::logScroll.isInitialized) {
+            logScroll.visibility = if (showFullProtocolLog) View.VISIBLE else View.GONE
+        }
+        if (::recentProtocolText.isInitialized) {
+            recentProtocolText.visibility =
+                if (showDiagnostics && !protocolLogEnabled) View.VISIBLE else View.GONE
+        }
+        if (::statusText.isInitialized) {
+            statusText.visibility = if (showDiagnostics) View.VISIBLE else View.GONE
+        }
 
         val s = UtcompDecoder.snapshot
         val simRenderSnapshot = if (simTestMode != SimTestMode.OFF || dataMode == DataMode.SIM) {

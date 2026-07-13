@@ -1,7 +1,9 @@
 package de.krazey.utcomp.dashboard.logging
 
 import de.krazey.utcomp.dashboard.utcomp.UtcompDataSnapshot
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.sin
 
 private fun assertNear(expected: Float, actual: Float, tolerance: Float = 0.0001f) {
     check(abs(expected - actual) <= tolerance) {
@@ -53,6 +55,38 @@ fun main() {
     check(shortStats.count == 3)
     assertNear(4f, shortStats.rawMin)
     assertNear(6f, shortStats.rawMax)
+
+    val periodic = LiveSignalBuffer(capacity = 500)
+    periodic.setSmoothingAlpha(1f)
+    periodic.setPeriodicFilter(PeriodicNoiseFilterMode.AUTO)
+    repeat(400) { index ->
+        val timeMs = index * 100L
+        val seconds = timeMs / 1_000.0
+        val raw = 14.7f + (0.30 * sin(2.0 * PI * 0.38 * seconds)).toFloat()
+        periodic.add(timeMs, raw)
+    }
+    val estimate = periodic.periodicEstimate
+    check(estimate.active) { "automatic periodic filter did not activate: $estimate" }
+    assertNear(0.38f, estimate.frequencyHz, tolerance = 0.02f)
+    val periodicStats = periodic.stats(windowMs = 20_000L)
+    check(periodicStats.outputStdDev < periodicStats.rawStdDev * 0.65f) {
+        "periodic filter did not reduce the sine: raw=${periodicStats.rawStdDev} " +
+            "output=${periodicStats.outputStdDev}"
+    }
+
+    periodic.setPeriodicFilter(PeriodicNoiseFilterMode.OFF)
+    val bypassStats = periodic.stats(windowMs = 20_000L)
+    assertNear(bypassStats.rawStdDev, bypassStats.outputStdDev, tolerance = 0.001f)
+
+    val manual = LiveSignalBuffer(capacity = 200)
+    manual.setSmoothingAlpha(1f)
+    manual.setPeriodicFilter(PeriodicNoiseFilterMode.MANUAL, 0.38f)
+    repeat(200) { index ->
+        val seconds = index / 10.0
+        manual.add(1_000L + index * 100L, (2.0 + sin(2.0 * PI * 0.38 * seconds)).toFloat())
+    }
+    check(manual.periodicEstimate.active)
+    assertNear(0.38f, manual.periodicEstimate.frequencyHz, tolerance = 0.001f)
 
     println("LiveSignalInspectorTest: OK")
 }

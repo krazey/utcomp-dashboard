@@ -14,6 +14,7 @@ import de.krazey.utcomp.dashboard.view.DarkActionItem
 internal data class DashboardDiagnosticsState(
     val usbConnected: Boolean,
     val automaticPolling: Boolean,
+    val protocolLogEnabled: Boolean,
     val firmware: String,
     val simulationMode: String,
 )
@@ -33,6 +34,7 @@ internal class DashboardControlsController(
     private val refreshDeviceInformation: () -> Unit,
     private val showLiveSignalInspector: () -> Unit,
     private val showAppDiagnostics: () -> Unit,
+    private val toggleProtocolLog: () -> Unit,
     private val clearProtocolLog: () -> Unit,
 ) {
     private companion object {
@@ -134,6 +136,17 @@ internal class DashboardControlsController(
                         "View, export or clear app lifecycle, UI performance, USB recovery, " +
                             "CSV and error events without collecting logcat.",
                     onClick = showAppDiagnostics,
+                ),
+                DarkActionItem(
+                    title = if (state.protocolLogEnabled) {
+                        "Disable full protocol log"
+                    } else {
+                        "Enable full protocol log"
+                    },
+                    description =
+                        "Full packet/decode tracing is disabled by default. When disabled, " +
+                            "Diagnostics shows only the most recent protocol event.",
+                    onClick = toggleProtocolLog,
                 ),
                 DarkActionItem(
                     title = "Clear protocol log",

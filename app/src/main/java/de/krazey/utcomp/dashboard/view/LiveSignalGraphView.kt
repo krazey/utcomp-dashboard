@@ -150,7 +150,7 @@ class LiveSignalGraphView(context: Context) : View(context) {
         textPaint.color = rawPaint.color
         canvas.drawText("RAW", plotRect.left, dp(21f), textPaint)
         textPaint.color = smoothedPaint.color
-        canvas.drawText("SMOOTHED", plotRect.left + dp(54f), dp(21f), textPaint)
+        canvas.drawText("OUTPUT", plotRect.left + dp(54f), dp(21f), textPaint)
         textPaint.color = Color.rgb(218, 224, 234)
 
         secondaryTextPaint.textAlign = Paint.Align.LEFT
