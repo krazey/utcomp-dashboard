@@ -30,7 +30,11 @@ hierarchies and update only live values, colors, min/max labels, and overlays.
 The CSV writer streams rows through a reusable builder path instead of creating
 large temporary field lists. CSV viewing runs in a full-screen dark activity and
 streams wide files with bounded graph memory, visible row progress, and no
-per-line graph object allocation. The top-bar LOG button starts or stops capture
+per-line graph object allocation. AFR, boost, oil pressure, and oil temperature
+remain the default graph rows, while additional logged channels can be selected
+and loaded on demand. Extra rows scroll vertically, and a horizontal drag opens
+a movable time window without losing the initial full-log overview. The top-bar
+LOG button starts or stops capture
 using the destination selected in the Data Log menu. Dashboard configuration
 JSON is handled by a focused codec rather than the UI controller. The simple
 dashboard uses a retained weighted grid with configurable pages from 1×1 through

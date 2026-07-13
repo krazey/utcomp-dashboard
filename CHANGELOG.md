@@ -31,6 +31,10 @@
 - Stream large CSV files with bounded graph memory and visible load progress.
 - Add a top-bar CSV LOG/STOP shortcut with a configurable destination.
 - Apply the dark application theme to remaining Android dialogs and popups.
+- Add selectable CSV graph rows while keeping AFR, boost, oil pressure, and oil temperature as defaults.
+- Make large CSV graphs vertically and horizontally scrollable without compressing extra rows.
+- Thin graph strokes on high-density displays and remove redundant cursor header text.
+- Remove deprecated direct status/navigation bar color assignments from the CSV viewer.
 
 ## 1.0.0
 

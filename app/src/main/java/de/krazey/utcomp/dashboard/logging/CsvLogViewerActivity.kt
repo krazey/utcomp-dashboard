@@ -1,10 +1,13 @@
 package de.krazey.utcomp.dashboard.logging
 
 import android.app.Activity
+import android.app.Dialog
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
@@ -14,13 +17,18 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import android.view.WindowManager
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import de.krazey.utcomp.dashboard.util.fixed
 import de.krazey.utcomp.dashboard.view.CsvLogGraphMarker
 import de.krazey.utcomp.dashboard.view.CsvLogGraphPoint
+import de.krazey.utcomp.dashboard.view.CsvLogGraphSeries
 import de.krazey.utcomp.dashboard.view.CsvLogGraphView
 import java.io.BufferedReader
 import java.io.File
@@ -28,6 +36,7 @@ import java.io.InputStreamReader
 import java.util.Locale
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /** Full-screen, bounded-memory viewer for high-resolution UTCOMP CSV logs. */
@@ -40,9 +49,11 @@ class CsvLogViewerActivity : Activity() {
         private const val EXTRA_MARKER_VALUES = "csv_marker_values"
         private const val EXTRA_MARKER_LABELS = "csv_marker_labels"
         private const val EXTRA_MARKER_COLORS = "csv_marker_colors"
+        private const val STATE_SELECTED_SERIES = "csv_selected_series"
         private const val READER_BUFFER_SIZE = 64 * 1024
         private const val MIN_GRAPH_POINTS = 1_600
         private const val MAX_GRAPH_POINTS = 4_000
+        private const val MAX_VISIBLE_SERIES = 12
 
         fun launchFile(
             activity: Activity,
@@ -90,17 +101,31 @@ class CsvLogViewerActivity : Activity() {
     }
 
     private val cancelled = AtomicBoolean(false)
+    private val loadGeneration = AtomicInteger(0)
+    private val selectedSeriesIds = linkedSetOf<String>()
+
     private lateinit var body: LinearLayout
     private lateinit var loadingStatus: TextView
     private lateinit var progressBar: ProgressBar
+    private lateinit var rowsButton: Button
+    private var currentPreview: CsvViewerPreview? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = Color.BLACK
-        window.navigationBarColor = Color.BLACK
+        savedInstanceState
+            ?.getStringArrayList(STATE_SELECTED_SERIES)
+            ?.let(selectedSeriesIds::addAll)
         buildUi()
         loadPreview()
         AppDiagnostics.info("CSV_VIEWER", "Opened full-screen CSV viewer")
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putStringArrayList(
+            STATE_SELECTED_SERIES,
+            ArrayList(selectedSeriesIds),
+        )
+        super.onSaveInstanceState(outState)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -110,6 +135,7 @@ class CsvLogViewerActivity : Activity() {
 
     override fun onDestroy() {
         cancelled.set(true)
+        loadGeneration.incrementAndGet()
         AppDiagnostics.info("CSV_VIEWER", "Closed full-screen CSV viewer")
         super.onDestroy()
     }
@@ -145,26 +171,22 @@ class CsvLogViewerActivity : Activity() {
                 0,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f,
-            ).apply { marginEnd = dp(10) },
+            ).apply { marginEnd = dp(8) },
+        )
+
+        rowsButton = toolbarButton("ROWS") {
+            currentPreview?.let(::showSeriesSelection)
+        }
+        toolbar.addView(
+            rowsButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dp(56),
+            ).apply { marginEnd = dp(8) },
         )
 
         toolbar.addView(
-            Button(this).apply {
-                text = "✕ EXIT"
-                textSize = 15f
-                isAllCaps = false
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(Color.WHITE)
-                minHeight = dp(56)
-                minWidth = dp(112)
-                background = roundedBackground(
-                    color = Color.BLACK,
-                    radius = dp(13).toFloat(),
-                    strokeColor = Color.rgb(38, 78, 104),
-                    strokeWidth = dp(2),
-                )
-                setOnClickListener { finish() }
-            },
+            toolbarButton("✕ EXIT") { finish() },
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 dp(56),
@@ -184,17 +206,6 @@ class CsvLogViewerActivity : Activity() {
             gravity = Gravity.CENTER
             setBackgroundColor(Color.rgb(5, 7, 11))
         }
-        progressBar = ProgressBar(this).apply { isIndeterminate = true }
-        loadingStatus = TextView(this).apply {
-            text = "Opening CSV log…"
-            textSize = 16f
-            setTextColor(Color.rgb(218, 224, 236))
-            gravity = Gravity.CENTER
-            setPadding(dp(8), dp(12), dp(8), dp(8))
-        }
-        body.addView(progressBar)
-        body.addView(loadingStatus)
-
         root.addView(
             body,
             LinearLayout.LayoutParams(
@@ -206,7 +217,44 @@ class CsvLogViewerActivity : Activity() {
         setContentView(root)
     }
 
+    private fun toolbarButton(label: String, onClick: () -> Unit): Button =
+        Button(this).apply {
+            text = label
+            textSize = 15f
+            isAllCaps = false
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            minHeight = dp(56)
+            minWidth = dp(108)
+            background = roundedBackground(
+                color = Color.BLACK,
+                radius = dp(13).toFloat(),
+                strokeColor = Color.rgb(38, 78, 104),
+                strokeWidth = dp(2),
+            )
+            setOnClickListener { onClick() }
+        }
+
+    private fun showLoading() {
+        body.removeAllViews()
+        body.gravity = Gravity.CENTER
+        progressBar = ProgressBar(this).apply { isIndeterminate = true }
+        loadingStatus = TextView(this).apply {
+            text = "Opening CSV log…"
+            textSize = 16f
+            setTextColor(Color.rgb(218, 224, 236))
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(12), dp(8), dp(8))
+        }
+        body.addView(progressBar)
+        body.addView(loadingStatus)
+    }
+
     private fun loadPreview() {
+        showLoading()
+        rowsButton.isEnabled = false
+        val generation = loadGeneration.incrementAndGet()
+        val requestedSeries = selectedSeriesIds.toSet()
         val maxGraphPoints = (
             resources.displayMetrics.widthPixels * 2
             ).coerceIn(MIN_GRAPH_POINTS, MAX_GRAPH_POINTS)
@@ -218,14 +266,26 @@ class CsvLogViewerActivity : Activity() {
                     CsvLogPreviewReader.read(
                         reader = reader,
                         maxGraphPoints = maxGraphPoints,
-                        isCancelled = cancelled::get,
-                        onProgress = { rows -> updateLoadingProgress(rows, startedMs) },
+                        selectedSeriesIds = requestedSeries,
+                        isCancelled = {
+                            cancelled.get() || generation != loadGeneration.get()
+                        },
+                        onProgress = { rows ->
+                            updateLoadingProgress(rows, startedMs, generation)
+                        },
                     )
                 }
             }
 
             runOnUiThread {
-                if (cancelled.get() || isFinishing || isDestroyed) return@runOnUiThread
+                if (
+                    cancelled.get() ||
+                    generation != loadGeneration.get() ||
+                    isFinishing ||
+                    isDestroyed
+                ) {
+                    return@runOnUiThread
+                }
                 result
                     .onSuccess(::showPreview)
                     .onFailure { error ->
@@ -255,13 +315,21 @@ class CsvLogViewerActivity : Activity() {
         )
     }
 
-    private fun updateLoadingProgress(rows: Long, startedMs: Long) {
+    private fun updateLoadingProgress(
+        rows: Long,
+        startedMs: Long,
+        generation: Int,
+    ) {
         val elapsedMs = (
             android.os.SystemClock.elapsedRealtime() - startedMs
             ).coerceAtLeast(1L)
         val rowsPerSecond = rows * 1000L / elapsedMs
         runOnUiThread {
-            if (!cancelled.get() && ::loadingStatus.isInitialized) {
+            if (
+                !cancelled.get() &&
+                generation == loadGeneration.get() &&
+                ::loadingStatus.isInitialized
+            ) {
                 loadingStatus.text = String.format(
                     Locale.US,
                     "Reading %,d rows…  %,d rows/s",
@@ -273,6 +341,12 @@ class CsvLogViewerActivity : Activity() {
     }
 
     private fun showPreview(preview: CsvViewerPreview) {
+        currentPreview = preview
+        selectedSeriesIds.clear()
+        selectedSeriesIds.addAll(preview.series.map { it.id })
+        rowsButton.text = "ROWS ${preview.series.size}"
+        rowsButton.isEnabled = preview.availableSeries.isNotEmpty()
+
         body.removeAllViews()
         body.gravity = Gravity.NO_GRAVITY
 
@@ -318,19 +392,39 @@ class CsvLogViewerActivity : Activity() {
         )
 
         val graph = CsvLogGraphView(this).apply {
-            setRows(preview.graphRows.map { row ->
-                CsvLogGraphPoint(
-                    time = row.time.takeLast(12),
-                    afr = row.afr,
-                    boost = row.boost,
-                    oilPressure = row.oilPressure,
-                    oilTemp = row.oilTemp,
-                )
-            })
+            setData(
+                newRows = preview.graphRows.map { row ->
+                    CsvLogGraphPoint(
+                        time = row.time.takeLast(12),
+                        values = row.values,
+                    )
+                },
+                newSeries = preview.series.map { item ->
+                    CsvLogGraphSeries(
+                        id = item.id,
+                        label = item.label,
+                        unit = item.unit,
+                        decimals = item.decimals,
+                        color = item.color,
+                    )
+                },
+            )
             setMarkers(intentMarkers())
         }
+        val graphScroll = ScrollView(this).apply {
+            isFillViewport = true
+            isVerticalScrollBarEnabled = true
+            setBackgroundColor(Color.rgb(5, 7, 11))
+            addView(
+                graph,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
         body.addView(
-            graph,
+            graphScroll,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 0,
@@ -341,13 +435,187 @@ class CsvLogViewerActivity : Activity() {
         AppDiagnostics.info(
             "CSV_VIEWER",
             "Loaded rows=${preview.totalRows} graph=${preview.graphRows.size} " +
+                "series=${preview.series.joinToString { it.id }} " +
                 "duration=${preview.durationText}",
         )
     }
 
+    private fun showSeriesSelection(preview: CsvViewerPreview) {
+        if (preview.availableSeries.isEmpty()) return
+
+        val dialog = Dialog(this)
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            background = roundedBackground(
+                color = Color.rgb(15, 18, 24),
+                radius = dp(18).toFloat(),
+                strokeColor = Color.rgb(38, 78, 104),
+                strokeWidth = dp(2),
+            )
+        }
+        panel.addView(
+            TextView(this).apply {
+                text = "CSV data rows"
+                textSize = 20f
+                setTextColor(Color.WHITE)
+                typeface = Typeface.DEFAULT_BOLD
+            },
+        )
+        panel.addView(
+            TextView(this).apply {
+                text = "Choose up to $MAX_VISIBLE_SERIES rows. The viewer reloads the file using only the selected columns."
+                textSize = 12.5f
+                setTextColor(Color.rgb(170, 180, 194))
+                setPadding(0, dp(3), 0, dp(10))
+            },
+        )
+
+        val checks = linkedMapOf<String, CheckBox>()
+        val selected = selectedSeriesIds.toMutableSet()
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        preview.availableSeries.forEach { item ->
+            val check = CheckBox(this).apply {
+                text = buildString {
+                    append(item.label)
+                    if (item.unit.isNotBlank()) append("  [${item.unit}]")
+                    append("\n${item.sourceColumn}")
+                }
+                textSize = 15f
+                setTextColor(Color.WHITE)
+                buttonTintList = ColorStateList(
+                    arrayOf(
+                        intArrayOf(android.R.attr.state_checked),
+                        intArrayOf(),
+                    ),
+                    intArrayOf(
+                        Color.rgb(82, 164, 255),
+                        Color.rgb(112, 120, 134),
+                    ),
+                )
+                isChecked = item.id in selected
+                minHeight = dp(54)
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                background = roundedBackground(
+                    color = Color.BLACK,
+                    radius = dp(10).toFloat(),
+                    strokeColor = Color.rgb(38, 78, 104),
+                    strokeWidth = dp(1),
+                )
+                setOnCheckedChangeListener { button, checked ->
+                    if (checked && selected.size >= MAX_VISIBLE_SERIES) {
+                        button.isChecked = false
+                        Toast.makeText(
+                            this@CsvLogViewerActivity,
+                            "Maximum $MAX_VISIBLE_SERIES data rows",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    } else if (checked) {
+                        selected += item.id
+                    } else {
+                        selected -= item.id
+                    }
+                }
+            }
+            checks[item.id] = check
+            list.addView(
+                check,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = dp(5) },
+            )
+        }
+
+        val scroll = ScrollView(this).apply {
+            isFillViewport = false
+            addView(
+                list,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+        panel.addView(
+            scroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            ),
+        )
+
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(10), 0, 0)
+        }
+        actions.addView(
+            dialogButton("DEFAULT") {
+                val defaults = CsvViewerSeriesCatalog.defaultSeriesIds
+                selected.clear()
+                preview.availableSeries.forEach { item ->
+                    val checked = item.id in defaults
+                    checks[item.id]?.isChecked = checked
+                    if (checked) selected += item.id
+                }
+            },
+            weightedAction(),
+        )
+        actions.addView(
+            dialogButton("CANCEL") { dialog.dismiss() },
+            weightedAction(),
+        )
+        actions.addView(
+            dialogButton("APPLY") {
+                if (selected.isEmpty()) {
+                    Toast.makeText(this, "Select at least one data row", Toast.LENGTH_SHORT).show()
+                } else {
+                    selectedSeriesIds.clear()
+                    preview.availableSeries
+                        .map { it.id }
+                        .filterTo(selectedSeriesIds) { it in selected }
+                    dialog.dismiss()
+                    loadPreview()
+                }
+            },
+            weightedAction(),
+        )
+        panel.addView(actions)
+
+        dialog.setContentView(panel)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            attributes = attributes.apply { dimAmount = 0.72f }
+        }
+        dialog.show()
+
+        val metrics = resources.displayMetrics
+        dialog.window?.setLayout(
+            (metrics.widthPixels * 0.92f).toInt(),
+            (metrics.heightPixels * 0.90f).toInt(),
+        )
+    }
+
+    private fun dialogButton(label: String, onClick: () -> Unit): Button =
+        toolbarButton(label, onClick).apply {
+            minWidth = 0
+            textSize = 14f
+        }
+
+    private fun weightedAction(): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(0, dp(56), 1f).apply {
+            val margin = dp(3)
+            setMargins(margin, 0, margin, 0)
+        }
+
     private fun showLoadError(error: Throwable) {
         body.removeAllViews()
         body.gravity = Gravity.CENTER
+        rowsButton.isEnabled = currentPreview != null
         body.addView(
             TextView(this).apply {
                 text = "Could not open CSV log\n\n${error.message ?: error.javaClass.simpleName}"

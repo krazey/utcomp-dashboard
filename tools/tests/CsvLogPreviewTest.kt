@@ -23,7 +23,7 @@ fun main() {
     val csv = buildString {
         appendLine(
             "wall_time_ms,wall_time_iso,elapsed_realtime_ms," +
-                "afr1,bar1,bar2,temperature_ntc1_c,unused",
+                "afr1,bar1,bar2,temperature_ntc1_c,rpm,vss_speed_200ms,egt1,unused",
         )
         for (index in 0 until 5_000) {
             append(1_000L + index * 20L)
@@ -31,7 +31,7 @@ fun main() {
             append((index / 50).toString().padStart(2, '0'))
             append("Z,")
             append(index * 20L)
-            append(",14.7,0.5,3.2,95.0,\"ignored,")
+            append(",14.7,0.5,3.2,95.0,3500,82.5,740.0,\"ignored,")
             append(index)
             appendLine("\"")
         }
@@ -46,7 +46,18 @@ fun main() {
     check(preview.stats.afr.min == 14.7f)
     check(preview.stats.boost.max == 0.5f)
     check(preview.sampleRateHz in 49.9f..50.1f)
+    check(preview.series.map { it.id } == listOf("afr1", "boost", "oil_pressure", "oil_temp"))
+    check(preview.graphRows.first().values.size == 4)
+    check(preview.availableSeries.any { it.id == "rpm" })
+    check(preview.availableSeries.any { it.id == "speed" })
 
+    val selectedPreview = CsvLogPreviewReader.read(
+        BufferedReader(StringReader(csv)),
+        maxGraphPoints = 1_600,
+        selectedSeriesIds = linkedSetOf("rpm", "speed", "egt1"),
+    )
+    check(selectedPreview.series.map { it.id } == listOf("rpm", "speed", "egt1"))
+    check(selectedPreview.graphRows.first().values.contentEquals(floatArrayOf(3500f, 82.5f, 740f)))
 
     var progressRows = 0L
     val largeCsv = buildString {

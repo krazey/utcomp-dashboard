@@ -1,6 +1,5 @@
 package de.krazey.utcomp.dashboard.view
 
-import de.krazey.utcomp.dashboard.util.fixed
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
@@ -9,17 +8,24 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.view.MotionEvent
 import android.view.View
+import de.krazey.utcomp.dashboard.util.fixed
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+/** A graph lane available in the CSV viewer. */
+data class CsvLogGraphSeries(
+    val id: String,
+    val label: String,
+    val unit: String,
+    val decimals: Int,
+    val color: Int,
+)
+
 data class CsvLogGraphPoint(
     val time: String,
-    val afr: Float,
-    val boost: Float,
-    val oilPressure: Float,
-    val oilTemp: Float,
+    val values: FloatArray,
 )
 
 data class CsvLogGraphMarker(
@@ -30,14 +36,12 @@ data class CsvLogGraphMarker(
 )
 
 class CsvLogGraphView(context: Context) : View(context) {
-    private data class Series(
-        val label: String,
-        val unit: String,
-        val color: Int,
-        val read: (CsvLogGraphPoint) -> Float,
-    )
+    companion object {
+        private const val DEFAULT_SCROLL_SPAN = 0.42f
+    }
 
     private val rows = ArrayList<CsvLogGraphPoint>()
+    private val series = ArrayList<CsvLogGraphSeries>()
     private val markers = ArrayList<CsvLogGraphMarker>()
 
     private var viewportStart = 0f
@@ -57,6 +61,7 @@ class CsvLogGraphView(context: Context) : View(context) {
     private var lastPinchDx = 1f
 
     private val density = resources.displayMetrics.density
+    private val strokeScale = density.coerceIn(1f, 1.55f)
     private val touchSlopPx = dp(12f)
 
     private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -65,12 +70,12 @@ class CsvLogGraphView(context: Context) : View(context) {
     }
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = dp(1.5f)
+        strokeWidth = stroke(1.2f)
         color = Color.rgb(54, 60, 72)
     }
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = dp(1f)
+        strokeWidth = stroke(0.8f)
         color = Color.argb(95, 92, 100, 118)
     }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -83,14 +88,16 @@ class CsvLogGraphView(context: Context) : View(context) {
     }
     private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = dp(3f)
+        strokeWidth = stroke(2.1f)
+        strokeJoin = Paint.Join.ROUND
+        strokeCap = Paint.Cap.ROUND
     }
     private val pointPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
     private val markerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = dp(2f)
+        strokeWidth = stroke(1.35f)
         alpha = 190
     }
     private val markerTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -99,7 +106,7 @@ class CsvLogGraphView(context: Context) : View(context) {
     }
     private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = dp(2.5f)
+        strokeWidth = stroke(1.6f)
         color = Color.argb(220, 238, 242, 255)
     }
     private val cursorFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -115,19 +122,19 @@ class CsvLogGraphView(context: Context) : View(context) {
     private val plotRect = RectF()
     private val path = Path()
 
-    private val series = listOf(
-        Series("AFR", "", Color.rgb(108, 210, 132)) { it.afr },
-        Series("Boost", "bar", Color.rgb(82, 164, 255)) { it.boost },
-        Series("Oil P", "bar", Color.rgb(255, 190, 76)) { it.oilPressure },
-        Series("Oil T", "°C", Color.rgb(255, 112, 112)) { it.oilTemp },
-    )
-
-    fun setRows(newRows: List<CsvLogGraphPoint>) {
+    fun setData(
+        newRows: List<CsvLogGraphPoint>,
+        newSeries: List<CsvLogGraphSeries>,
+    ) {
         rows.clear()
         rows.addAll(newRows)
+        series.clear()
+        series.addAll(newSeries)
         viewportStart = 0f
         viewportEnd = 1f
         selectedIndex = if (rows.isEmpty()) -1 else rows.lastIndex
+        minimumHeight = desiredGraphHeight()
+        requestLayout()
         invalidate()
     }
 
@@ -187,14 +194,13 @@ class CsvLogGraphView(context: Context) : View(context) {
                     }
 
                     graphDragActive = true
+                    if (!isTimeZoomed()) enterScrollMode(downX)
                     parent?.requestDisallowInterceptTouchEvent(true)
                 }
 
-                if (graphDragActive || absDx > touchSlopPx * 0.5f) {
+                if (graphDragActive) {
                     val dx = event.x - lastTouchX
-                    if (isTimeZoomed() && abs(dx) > 0.5f) {
-                        panByPixels(dx)
-                    }
+                    if (abs(dx) > 0.5f) panByPixels(dx)
                     updateCursorFromX(event.x)
                     lastTouchX = event.x
                     invalidate()
@@ -204,25 +210,21 @@ class CsvLogGraphView(context: Context) : View(context) {
             }
 
             MotionEvent.ACTION_POINTER_UP -> {
-                if (event.pointerCount <= 2) {
-                    pinchActive = false
-                }
+                if (event.pointerCount <= 2) pinchActive = false
                 return true
             }
 
             MotionEvent.ACTION_UP -> {
                 parent?.requestDisallowInterceptTouchEvent(false)
 
-                if (!verticalScrollActive && !pinchMoved) {
+                if (!verticalScrollActive && !pinchMoved && !graphDragActive) {
                     updateCursorFromX(event.x)
                     performClick()
 
                     val isDoubleTap =
                         event.eventTime - lastTapUpMs <= 320L &&
                             abs(event.x - lastTapX) <= dp(48f)
-                    if (isDoubleTap) {
-                        resetZoom()
-                    }
+                    if (isDoubleTap) resetZoom()
 
                     lastTapUpMs = event.eventTime
                     lastTapX = event.x
@@ -267,9 +269,9 @@ class CsvLogGraphView(context: Context) : View(context) {
             bgPaint,
         )
 
-        if (rows.isEmpty()) {
+        if (rows.isEmpty() || series.isEmpty()) {
             textPaint.textAlign = Paint.Align.CENTER
-            canvas.drawText("No CSV data", width / 2f, height / 2f, textPaint)
+            canvas.drawText("No CSV data rows selected", width / 2f, height / 2f, textPaint)
             return
         }
 
@@ -279,7 +281,10 @@ class CsvLogGraphView(context: Context) : View(context) {
         val bottomPad = dp(48f)
         val gap = dp(10f)
         val usableHeight = height - topPad - bottomPad
-        val laneHeight = (usableHeight - gap * (series.size - 1)) / series.size.toFloat()
+        val laneHeight = max(
+            dp(72f),
+            (usableHeight - gap * (series.size - 1)) / series.size.toFloat(),
+        )
         val plotLeft = leftPad
         val plotRight = width - rightPad
         val plotWidth = max(1f, plotRight - plotLeft)
@@ -287,10 +292,10 @@ class CsvLogGraphView(context: Context) : View(context) {
         val (startIndex, endIndex) = visibleIndexRange()
         val visibleCount = endIndex - startIndex + 1
 
-        drawHeader(canvas, startIndex, endIndex, plotLeft, plotRight)
+        drawHeader(canvas, plotLeft)
 
-        series.forEachIndexed { index, item ->
-            val top = topPad + index * (laneHeight + gap)
+        series.forEachIndexed { seriesIndex, item ->
+            val top = topPad + seriesIndex * (laneHeight + gap)
             val bottom = top + laneHeight
             plotRect.set(plotLeft, top, plotRight, bottom)
 
@@ -300,7 +305,7 @@ class CsvLogGraphView(context: Context) : View(context) {
             var rawMinValue = Float.NaN
             var rawMaxValue = Float.NaN
             for (rowIndex in startIndex..endIndex) {
-                val value = item.read(rows[rowIndex])
+                val value = valueAt(rows[rowIndex], seriesIndex)
                 if (!value.isFinite()) continue
                 rawMinValue = if (rawMinValue.isNaN()) value else min(rawMinValue, value)
                 rawMaxValue = if (rawMaxValue.isNaN()) value else max(rawMaxValue, value)
@@ -327,15 +332,13 @@ class CsvLogGraphView(context: Context) : View(context) {
             }
             canvas.drawText(rangeText, plotLeft + dp(8f), top + dp(22f), smallTextPaint)
 
-            if (span.isFinite()) {
-                drawMarkers(canvas, item, plotRect, minValue, span)
-            }
+            if (span.isFinite()) drawMarkers(canvas, item, plotRect, minValue, span)
 
             if (visibleCount >= 2 && span.isFinite()) {
                 path.reset()
                 var started = false
                 for (rowIndex in startIndex..endIndex) {
-                    val value = item.read(rows[rowIndex])
+                    val value = valueAt(rows[rowIndex], seriesIndex)
                     if (!value.isFinite()) {
                         started = false
                         continue
@@ -362,6 +365,7 @@ class CsvLogGraphView(context: Context) : View(context) {
                 drawCursorValueIfNeeded(
                     canvas = canvas,
                     series = item,
+                    seriesIndex = seriesIndex,
                     rect = plotRect,
                     startIndex = startIndex,
                     endIndex = endIndex,
@@ -371,44 +375,41 @@ class CsvLogGraphView(context: Context) : View(context) {
             }
         }
 
+        val chartBottom = topPad + series.size * laneHeight + (series.size - 1) * gap
         smallTextPaint.color = Color.rgb(150, 158, 174)
         smallTextPaint.textSize = dp(18f)
         smallTextPaint.textAlign = Paint.Align.LEFT
-        canvas.drawText(rows[startIndex].time, plotLeft, height - dp(12f), smallTextPaint)
+        canvas.drawText(rows[startIndex].time, plotLeft, chartBottom + dp(34f), smallTextPaint)
         smallTextPaint.textAlign = Paint.Align.RIGHT
-        canvas.drawText(rows[endIndex].time, plotRight, height - dp(12f), smallTextPaint)
+        canvas.drawText(rows[endIndex].time, plotRight, chartBottom + dp(34f), smallTextPaint)
 
-        drawCursorLine(canvas, startIndex, endIndex, plotLeft, plotRight, topPad, height - bottomPad)
+        drawCursorLine(
+            canvas = canvas,
+            startIndex = startIndex,
+            endIndex = endIndex,
+            plotLeft = plotLeft,
+            plotRight = plotRight,
+            top = topPad,
+            bottom = chartBottom,
+        )
     }
 
-    private fun drawHeader(canvas: Canvas, startIndex: Int, endIndex: Int, plotLeft: Float, plotRight: Float) {
+    private fun drawHeader(
+        canvas: Canvas,
+        plotLeft: Float,
+    ) {
         val xZoom = 1f / (viewportEnd - viewportStart).coerceAtLeast(0.0001f)
-        val selected = selectedIndex.takeIf { it in rows.indices }
-        val selectedRow = selected?.let { rows[it] }
 
-        smallTextPaint.textSize = dp(18f)
+        smallTextPaint.textSize = dp(17f)
         smallTextPaint.textAlign = Paint.Align.LEFT
         smallTextPaint.color = Color.rgb(176, 184, 198)
         canvas.drawText(
-            "scroll vertically · tap/drag cursor · 2-finger X zoom · double-tap reset · x${xZoom.fixed(1)}",
+            "drag left/right · scroll vertically · pinch zoom · double-tap fit · x${xZoom.fixed(1)}",
             plotLeft,
             dp(24f),
             smallTextPaint,
         )
 
-        if (selectedRow != null) {
-            cursorTextPaint.textAlign = Paint.Align.RIGHT
-            cursorTextPaint.textSize = dp(18f)
-            canvas.drawText(
-                "cursor ${selectedRow.time.takeLast(12)}  AFR ${fmt(selectedRow.afr, series[0])}  Boost ${fmt(selectedRow.boost, series[1])}  OilP ${fmt(selectedRow.oilPressure, series[2])}  OilT ${fmt(selectedRow.oilTemp, series[3])}",
-                plotRight,
-                dp(24f),
-                cursorTextPaint,
-            )
-        } else {
-            smallTextPaint.textAlign = Paint.Align.RIGHT
-            canvas.drawText("${rows[startIndex].time.takeLast(12)} → ${rows[endIndex].time.takeLast(12)}", plotRight, dp(24f), smallTextPaint)
-        }
     }
 
     private fun drawCursorLine(
@@ -439,12 +440,14 @@ class CsvLogGraphView(context: Context) : View(context) {
         )
         cursorTextPaint.textAlign = Paint.Align.CENTER
         cursorTextPaint.textSize = dp(17f)
+        cursorTextPaint.color = Color.rgb(238, 242, 255)
         canvas.drawText(rows[selected].time.takeLast(12), x, bottom + dp(25f), cursorTextPaint)
     }
 
     private fun drawCursorValueIfNeeded(
         canvas: Canvas,
-        series: Series,
+        series: CsvLogGraphSeries,
+        seriesIndex: Int,
         rect: RectF,
         startIndex: Int,
         endIndex: Int,
@@ -454,15 +457,17 @@ class CsvLogGraphView(context: Context) : View(context) {
         val selected = selectedIndex
         if (selected !in startIndex..endIndex || endIndex <= startIndex) return
 
-        val value = series.read(rows[selected])
+        val value = valueAt(rows[selected], seriesIndex)
         if (!value.isFinite()) return
 
-        val x = rect.left + rect.width() * (selected - startIndex).toFloat() / (endIndex - startIndex).toFloat()
+        val x = rect.left +
+            rect.width() * (selected - startIndex).toFloat() /
+            (endIndex - startIndex).toFloat()
         val normalized = ((value - minValue) / span).coerceIn(0f, 1f)
         val y = rect.bottom - normalized * rect.height()
 
         pointPaint.color = series.color
-        canvas.drawCircle(x, y, dp(5.5f), pointPaint)
+        canvas.drawCircle(x, y, stroke(3.8f), pointPaint)
 
         val label = fmt(value, series)
         cursorTextPaint.textSize = dp(17f)
@@ -477,7 +482,13 @@ class CsvLogGraphView(context: Context) : View(context) {
         cursorTextPaint.color = Color.rgb(238, 242, 255)
     }
 
-    private fun drawMarkers(canvas: Canvas, series: Series, rect: RectF, minValue: Float, span: Float) {
+    private fun drawMarkers(
+        canvas: Canvas,
+        series: CsvLogGraphSeries,
+        rect: RectF,
+        minValue: Float,
+        span: Float,
+    ) {
         var visibleMarkerIndex = 0
         for (marker in markers) {
             if (marker.seriesLabel != series.label || !marker.value.isFinite()) continue
@@ -494,16 +505,15 @@ class CsvLogGraphView(context: Context) : View(context) {
             markerTextPaint.textAlign = Paint.Align.RIGHT
             val labelY = (y - dp(4f) - visibleMarkerIndex * dp(2f))
                 .coerceIn(rect.top + dp(16f), rect.bottom - dp(4f))
-            canvas.drawText(marker.label, rect.right - 8f, labelY, markerTextPaint)
+            canvas.drawText(marker.label, rect.right - dp(4f), labelY, markerTextPaint)
             visibleMarkerIndex++
         }
     }
 
     private fun drawGrid(canvas: Canvas, rect: RectF) {
-        val midY = rect.centerY()
-        canvas.drawLine(rect.left, midY, rect.right, midY, gridPaint)
-        for (i in 1 until 4) {
-            val x = rect.left + rect.width() * i / 4f
+        canvas.drawLine(rect.left, rect.centerY(), rect.right, rect.centerY(), gridPaint)
+        for (index in 1 until 4) {
+            val x = rect.left + rect.width() * index / 4f
             canvas.drawLine(x, rect.top, x, rect.bottom, gridPaint)
         }
     }
@@ -545,6 +555,15 @@ class CsvLogGraphView(context: Context) : View(context) {
         } else {
             event.x
         }
+
+    private fun enterScrollMode(focusX: Float) {
+        if (rows.size < 3 || isTimeZoomed()) return
+        val focusFrac = xToPlotFraction(focusX)
+        val span = DEFAULT_SCROLL_SPAN.coerceAtLeast(minViewportSpan())
+        val focusValue = focusFrac
+        viewportStart = (focusValue - span * focusFrac).coerceIn(0f, 1f - span)
+        viewportEnd = viewportStart + span
+    }
 
     private fun zoomTime(scale: Float, focusX: Float) {
         if (rows.size < 3) return
@@ -598,8 +617,12 @@ class CsvLogGraphView(context: Context) : View(context) {
         if (rows.size == 1) return 0 to 0
 
         val last = rows.lastIndex
-        var start = (viewportStart.coerceIn(0f, 1f) * last).roundToInt().coerceIn(0, last)
-        var end = (viewportEnd.coerceIn(0f, 1f) * last).roundToInt().coerceIn(0, last)
+        var start = (viewportStart.coerceIn(0f, 1f) * last)
+            .roundToInt()
+            .coerceIn(0, last)
+        var end = (viewportEnd.coerceIn(0f, 1f) * last)
+            .roundToInt()
+            .coerceIn(0, last)
 
         if (end <= start) end = (start + 1).coerceAtMost(last)
         if (end - start < 2 && rows.size > 2) {
@@ -635,25 +658,31 @@ class CsvLogGraphView(context: Context) : View(context) {
         return ((x - left) / max(1f, right - left)).coerceIn(0f, 1f)
     }
 
-    private fun isTimeZoomed(): Boolean =
-        viewportEnd - viewportStart < 0.995f
+    private fun isTimeZoomed(): Boolean = viewportEnd - viewportStart < 0.995f
 
     private fun minViewportSpan(): Float {
         if (rows.size <= 1) return 1f
         return min(1f, max(0.018f, 18f / rows.lastIndex.toFloat()))
     }
 
+    private fun desiredGraphHeight(): Int {
+        val laneCount = series.size.coerceAtLeast(1)
+        return (dp(46f) + dp(48f) + laneCount * dp(96f) +
+            (laneCount - 1).coerceAtLeast(0) * dp(10f)).roundToInt()
+    }
+
+    private fun valueAt(row: CsvLogGraphPoint, seriesIndex: Int): Float =
+        row.values.getOrElse(seriesIndex) { Float.NaN }
+
     private fun plotLeft(): Float = dp(92f)
 
     private fun dp(value: Float): Float = value * density
 
-    private fun fmt(value: Float, series: Series): String {
+    private fun stroke(value: Float): Float = value * strokeScale
+
+    private fun fmt(value: Float, series: CsvLogGraphSeries): String {
         if (!value.isFinite()) return "--"
-        val decimals = when (series.label) {
-            "Oil T" -> 1
-            else -> 2
-        }
-        val number = value.fixed(decimals)
+        val number = value.fixed(series.decimals)
         return if (series.unit.isBlank()) number else "$number ${series.unit}"
     }
 }
