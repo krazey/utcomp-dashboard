@@ -42,6 +42,11 @@
 - Add automatic and manual periodic-noise rejection to the live signal inspector.
 - Add adaptive counter-wave subtraction with learned frequency, amplitude, phase, baseline, drift, and configurable gain.
 - Log periodic-model snapshots for engine-off/on diagnostics without enabling raw protocol tracing.
+- Add explicit engine-off periodic-noise calibration with a saved common reference profile.
+- Track live reference frequency drift, phase, and amplitude without relearning signal coefficients.
+- Add per-box calibrated periodic cancellation for simple and Ralliart pages.
+- Replace dashboard alpha presets with time-based Off, Light, Medium, Strong, and Custom smoothing.
+- Preserve raw CSV values while using conditioned values for dashboard display and min/max tracking.
 
 ## 1.0.0
 

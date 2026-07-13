@@ -3,7 +3,7 @@
 UTCOMP Dashboard is an Android 13+ dashboard and data logger for the UTCOMP
 USB device. It provides configurable simple and Ralliart-style pages, alarm
 thresholds, simulation, min/max tracking, high-resolution CSV logging, and an
-interactive CSV graph viewer, and a full-screen live signal inspector.
+interactive CSV graph viewer and a full-screen live signal inspector.
 
 ## Requirements
 
@@ -67,23 +67,24 @@ slow-render, memory-pressure, and uncaught-exception events without requiring an
 app-focused logcat capture.
 
 The Live Data action graphs one decoded value at its real packet update cadence.
-Raw and exponentially smoothed traces are shown together with rolling min/max,
-peak-to-peak noise, standard deviation, average, and sample rate. The smoothing
-slider uses the same alpha formula as dashboard cards, making it possible to
-choose a useful UI smoothing value before changing a page configuration. An
-optional periodic filter can either learn a stable 0.25-0.55 Hz component or use
-a manually selected frequency before the EMA stage. The original automatic and
-manual notch modes remain available. Adaptive counter-wave modes additionally
-fit the signal baseline and linear drift, learn the periodic amplitude and
-phase, and subtract only the modeled wave at a configurable gain. Automatic
-counter-wave activation requires several stable analysis windows and becomes
-more conservative while RPM is above zero. The learned frequency, amplitude,
-phase, baseline, drift, confidence, stability count, and applied gain are shown
-in Live Data and periodically recorded in app diagnostics for engine-off/on
-comparisons. Filtering is intentionally inspector-only because genuine
-closed-loop AFR movement can occupy a similar frequency range. Signal, filter,
-alpha, counter-wave gain, and time-window choices are persisted, while sample
-collection runs only while the full-screen inspector is open.
+Raw and filtered traces are shown together with rolling min/max, peak-to-peak
+noise, standard deviation, average, and sample rate. Experimental live-fit notch
+and counter-wave modes remain available for diagnostics, but the reusable
+periodic correction is learned only during an explicit 35-second engine-off
+calibration. That capture learns one common interference frequency from ADC 0
+and separate amplitude/phase relationships for every signal with sufficient
+sample rate and confidence. During normal use only small reference-frequency drift, phase, and amplitude
+are tracked; engine-running values never change the saved per-signal profile.
+
+Dashboard boxes can enable the saved correction independently per page/style.
+The processing order is calibrated periodic cancellation followed by time-based
+EMA smoothing. Smoothing offers Off, Light, Medium, Strong, and Custom time
+constants, so channels with different packet rates have comparable response
+times. Displayed min/max values use the conditioned signal, while alarms retain
+the raw sensor value. CSV capture remains canonical raw data for later offline
+analysis. Signal, diagnostic filter, calibration, smoothing, counter-wave gain,
+and time-window choices are persisted, while Live Data sample collection runs
+only while the full-screen inspector is open.
 
 The Kotlin namespace is `de.krazey.utcomp.dashboard`. The Android
 `applicationId` intentionally remains `de.krazey.utcomp.probe` so existing

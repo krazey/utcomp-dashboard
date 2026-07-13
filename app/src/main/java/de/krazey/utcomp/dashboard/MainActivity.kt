@@ -18,10 +18,14 @@ import de.krazey.utcomp.dashboard.dashboard.DefaultDashboardPages
 import de.krazey.utcomp.dashboard.dashboard.DashboardSensor
 import de.krazey.utcomp.dashboard.dashboard.DashboardPageConfig
 import de.krazey.utcomp.dashboard.dashboard.DashboardBoxConfig
+import de.krazey.utcomp.dashboard.dashboard.DashboardPeriodicNoiseFilter
+import de.krazey.utcomp.dashboard.dashboard.DashboardSmoothingMode
+import de.krazey.utcomp.dashboard.dashboard.smoothingAlphaForInterval
 import de.krazey.utcomp.dashboard.logging.AppDiagnostics
 import de.krazey.utcomp.dashboard.logging.AppDiagnosticsController
 import de.krazey.utcomp.dashboard.logging.CsvLogController
 import de.krazey.utcomp.dashboard.logging.LiveSignalInspectorController
+import de.krazey.utcomp.dashboard.logging.PeriodicNoiseCalibrationManager
 import de.krazey.utcomp.dashboard.logging.UtcompCsvLogger
 import android.app.Activity
 import android.content.Intent
@@ -79,6 +83,7 @@ class MainActivity : Activity(), DashboardRenderHost {
     private companion object {
         private const val USB_FAST_POLL_MS = 50L
         private const val USB_SLOW_POLL_MS = 1000L
+        private const val USB_CALIBRATION_POLL_MS = 500L
         private const val DASHBOARD_RENDER_MS = 125L
         private const val DASHBOARD_TOUCH_RENDER_GRACE_MS = 220L
         private const val DASHBOARD_TOUCH_DEFER_RETRY_MS = 80L
@@ -123,6 +128,7 @@ class MainActivity : Activity(), DashboardRenderHost {
     private lateinit var csvLogController: CsvLogController
     private lateinit var appDiagnosticsController: AppDiagnosticsController
     private lateinit var liveSignalInspectorController: LiveSignalInspectorController
+    private lateinit var periodicNoiseCalibrationManager: PeriodicNoiseCalibrationManager
     private lateinit var dashboardEditorController: DashboardEditorController
     private lateinit var dashboardPageEditorController: DashboardPageEditorController
     private lateinit var ralliartHeaderEditorController: RalliartHeaderEditorController
@@ -193,6 +199,7 @@ class MainActivity : Activity(), DashboardRenderHost {
     }
 
     private var lastSlowUsbRequestMs = 0L
+    private var lastCalibrationUsbRequestMs = 0L
     private var lastUsbPollRunAtMs = 0L
     private var lastUsbPollStallLogAtMs = 0L
 
@@ -238,6 +245,18 @@ class MainActivity : Activity(), DashboardRenderHost {
                 if (nowMs - lastSlowUsbRequestMs >= USB_SLOW_POLL_MS) {
                     lastSlowUsbRequestMs = nowMs
                     requestSlowLiveData()
+                }
+
+                if (
+                    ::periodicNoiseCalibrationManager.isInitialized &&
+                    periodicNoiseCalibrationManager.needsFastReferencePolling() &&
+                    nowMs - lastCalibrationUsbRequestMs >= USB_CALIBRATION_POLL_MS
+                ) {
+                    lastCalibrationUsbRequestMs = nowMs
+                    requestUsb(TransmitterConstants.UtcompPid.GENERAL_DATA1, false)
+                    if (periodicNoiseCalibrationManager.isLearning()) {
+                        requestUsb(TransmitterConstants.UtcompPid.TEMPERATURES_DATA, false)
+                    }
                 }
             }.onFailure { appendLog("USB polling failed: ${it.message}") }
 
@@ -292,7 +311,13 @@ class MainActivity : Activity(), DashboardRenderHost {
     private var ralliartPageConfig = DefaultDashboardPages.ralliart
     private var mergeSession: MergeSession? = null
     private val minMaxByScope = LinkedHashMap<String, DashboardMinMax>()
-    private val smoothedValuesByBox = LinkedHashMap<Int, Float>()
+    private data class SmoothedValueState(
+        val value: Float,
+        val sampleTimeMs: Long,
+    )
+
+    private val smoothedValuesByBox = LinkedHashMap<Int, SmoothedValueState>()
+    private val sensorUpdateTimeMs = LongArray(DashboardSensor.entries.size)
     private var activeMinMaxCard: String? = null
     private var minMaxHideRunnable: Runnable? = null
 
@@ -328,10 +353,21 @@ class MainActivity : Activity(), DashboardRenderHost {
         dataMode = DataMode.USB
         simTestMode = SimTestMode.OFF
         appDiagnosticsController = AppDiagnosticsController(this)
+        periodicNoiseCalibrationManager = PeriodicNoiseCalibrationManager(this)
         liveSignalInspectorController = LiveSignalInspectorController(
             activity = this,
             snapshotProvider = { UtcompDecoder.snapshot },
             appendLog = ::appendLog,
+            calibrationManager = periodicNoiseCalibrationManager,
+            ensureAutomaticPolling = {
+                if (!autoRefresh) {
+                    autoRefresh = true
+                    saveDashboardPrefs()
+                }
+                setUsbDataMode()
+                startUsbAutoConnect(initialDelayMs = 0L)
+                usb.requestPermissionAndConnect()
+            },
         )
         csvLogger = UtcompCsvLogger(
             context = this,
@@ -390,6 +426,12 @@ class MainActivity : Activity(), DashboardRenderHost {
             onSmoothingChanged = { boxIndex, box ->
                 smoothedValuesByBox.remove(smoothedValueKey(boxIndex, box))
             },
+            isPeriodicNoiseCalibrationAvailable = { sensor ->
+                sensor.calibrationSignalId?.let(
+                    periodicNoiseCalibrationManager::hasCalibration,
+                ) == true
+            },
+            showPeriodicNoiseCalibration = { liveSignalInspectorController.show() },
             isLayoutEditable = { uiMode == UiMode.SIMPLE },
             onEditPageGrid = {
                 dashboardPageEditorController.showCurrentPageGridEditor()
@@ -708,13 +750,16 @@ class MainActivity : Activity(), DashboardRenderHost {
             pageConfig.copy(
                 boxes = pageConfig.boxes.map { box ->
                     if (
-                        box.smoothingAlpha >= 0.999f &&
+                        box.smoothingMode == DashboardSmoothingMode.OFF &&
                         (box.sensor == DashboardSensor.AFR ||
                             box.sensor == DashboardSensor.BOOST ||
                             box.sensor == DashboardSensor.OIL_PRESSURE)
                     ) {
                         touched = true
-                        box.copy(smoothingAlpha = 0.35f)
+                        box.copy(
+                            smoothingMode = DashboardSmoothingMode.MEDIUM,
+                            smoothingTimeSeconds = DashboardSmoothingMode.MEDIUM.presetTimeSeconds,
+                        )
                     } else {
                         box
                     }
@@ -869,6 +914,7 @@ class MainActivity : Activity(), DashboardRenderHost {
     }
 
     private fun updateBoxConfig(boxIndex: Int, transform: (DashboardBoxConfig) -> DashboardBoxConfig) {
+        smoothedValuesByBox.clear()
         updateCurrentPage { pageConfig ->
             val updatedBoxes = pageConfig.boxes.mapIndexed { index, box ->
                 if (index == boxIndex) transform(box) else box
@@ -1442,15 +1488,42 @@ class MainActivity : Activity(), DashboardRenderHost {
     }
 
     private fun onDecodedSnapshot(snapshot: UtcompDataSnapshot, sourcePid: Int) {
-        if (::liveSignalInspectorController.isInitialized) {
-            liveSignalInspectorController.offerSnapshot(snapshot, sourcePid)
+        val nowMs = SystemClock.elapsedRealtime()
+        updateSensorPacketTimes(sourcePid, nowMs)
+        if (::periodicNoiseCalibrationManager.isInitialized) {
+            periodicNoiseCalibrationManager.offerSnapshot(snapshot, sourcePid, nowMs)
         }
+        if (::liveSignalInspectorController.isInitialized) {
+            liveSignalInspectorController.offerSnapshot(snapshot, sourcePid, nowMs)
+        }
+        // CSV remains the canonical raw capture. Dashboard conditioning is
+        // deliberately applied only after this point.
         if (::csvLogger.isInitialized) {
             csvLogger.offer(snapshot, source = "usb")
         }
         if (decodedRenderPosted.compareAndSet(false, true)) {
             dashboardRenderHandler.post(decodedRenderRunnable)
         }
+    }
+
+    private fun updateSensorPacketTimes(sourcePid: Int, timeMs: Long) {
+        val sensors = when (sourcePid) {
+            TransmitterConstants.UtcompPid.GENERAL_DATA2 -> arrayOf(
+                DashboardSensor.BOOST,
+                DashboardSensor.AFR,
+                DashboardSensor.OIL_PRESSURE,
+            )
+            TransmitterConstants.UtcompPid.GENERAL_DATA1 -> arrayOf(
+                DashboardSensor.BATTERY,
+            )
+            TransmitterConstants.UtcompPid.TEMPERATURES_DATA -> arrayOf(
+                DashboardSensor.OIL_TEMP,
+                DashboardSensor.OUTSIDE_TEMP,
+                DashboardSensor.INSIDE_TEMP,
+            )
+            else -> emptyArray()
+        }
+        sensors.forEach { sensor -> sensorUpdateTimeMs[sensor.ordinal] = timeMs }
     }
 
     override fun onActivityResult(
@@ -1821,23 +1894,51 @@ class MainActivity : Activity(), DashboardRenderHost {
         boxIndex: Int,
         rawValue: Float?,
     ): Float? {
-        val value = rawValue ?: return null
-        if (value.isNaN() || value.isInfinite()) return value
+        val raw = rawValue ?: return null
+        if (!raw.isFinite()) return raw
 
-        val alpha = box.smoothingAlpha.coerceIn(0.01f, 1.0f)
-        if (alpha >= 0.999f || simTestMode != SimTestMode.OFF) {
-            smoothedValuesByBox[smoothedValueKey(boxIndex, box)] = value
-            return value
+        val sampleTimeMs = sensorUpdateTimeMs[box.sensor.ordinal]
+            .takeIf { it > 0L }
+            ?: SystemClock.elapsedRealtime()
+        val conditioned = if (
+            box.periodicNoiseFilter == DashboardPeriodicNoiseFilter.CALIBRATED &&
+            simTestMode == SimTestMode.OFF &&
+            ::periodicNoiseCalibrationManager.isInitialized
+        ) {
+            val signalId = box.sensor.calibrationSignalId
+            val correction = signalId?.let {
+                periodicNoiseCalibrationManager.correction(it, sampleTimeMs)
+            }
+            if (correction?.active == true) raw - correction.component else raw
+        } else {
+            raw
         }
 
         val key = smoothedValueKey(boxIndex, box)
-        val previous = smoothedValuesByBox[key]
-        val smoothed = if (previous == null || previous.isNaN() || previous.isInfinite()) {
-            value
-        } else {
-            previous + (value - previous) * alpha
+        val mode = box.smoothingMode
+        val timeConstantSeconds = when (mode) {
+            DashboardSmoothingMode.OFF -> 0f
+            DashboardSmoothingMode.CUSTOM -> box.smoothingTimeSeconds.coerceIn(0.03f, 3.0f)
+            else -> mode.presetTimeSeconds
         }
-        smoothedValuesByBox[key] = smoothed
+        if (timeConstantSeconds <= 0f || simTestMode != SimTestMode.OFF) {
+            smoothedValuesByBox[key] = SmoothedValueState(conditioned, sampleTimeMs)
+            return conditioned
+        }
+
+        val previous = smoothedValuesByBox[key]
+        if (previous == null || !previous.value.isFinite()) {
+            smoothedValuesByBox[key] = SmoothedValueState(conditioned, sampleTimeMs)
+            return conditioned
+        }
+        if (sampleTimeMs <= previous.sampleTimeMs) return previous.value
+
+        val alpha = smoothingAlphaForInterval(
+            elapsedMs = sampleTimeMs - previous.sampleTimeMs,
+            timeConstantSeconds = timeConstantSeconds,
+        )
+        val smoothed = previous.value + (conditioned - previous.value) * alpha
+        smoothedValuesByBox[key] = SmoothedValueState(smoothed, sampleTimeMs)
         return smoothed
     }
 

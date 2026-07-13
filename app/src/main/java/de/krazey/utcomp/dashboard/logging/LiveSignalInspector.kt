@@ -160,7 +160,8 @@ enum class PeriodicNoiseFilterMode {
     AUTO,
     MANUAL,
     COUNTER_WAVE_AUTO,
-    COUNTER_WAVE_MANUAL;
+    COUNTER_WAVE_MANUAL,
+    CALIBRATED;
 
     val usesCounterWave: Boolean
         get() = this == COUNTER_WAVE_AUTO || this == COUNTER_WAVE_MANUAL
@@ -173,6 +174,9 @@ enum class PeriodicNoiseFilterMode {
 
     val usesManualFrequency: Boolean
         get() = this == MANUAL || this == COUNTER_WAVE_MANUAL
+
+    val usesCalibratedProfile: Boolean
+        get() = this == CALIBRATED
 }
 
 data class PeriodicNoiseEstimate(
@@ -300,6 +304,7 @@ class LiveSignalBuffer(
     private val elapsedMs = LongArray(capacity)
     private val rawValues = FloatArray(capacity)
     private val outputValues = FloatArray(capacity)
+    private val calibratedComponents = FloatArray(capacity) { Float.NaN }
     private var start = 0
     private var count = 0
 
@@ -375,7 +380,12 @@ class LiveSignalBuffer(
         recomputeOutput(forceEstimate = true)
     }
 
-    fun add(timeMs: Long, rawValue: Float, engineRpm: Int = lastEngineRpm) {
+    fun add(
+        timeMs: Long,
+        rawValue: Float,
+        engineRpm: Int = lastEngineRpm,
+        calibratedComponent: Float = Float.NaN,
+    ) {
         if (!rawValue.isFinite()) return
         if (phaseOriginMs == Long.MIN_VALUE) phaseOriginMs = timeMs
         lastEngineRpm = engineRpm.coerceAtLeast(0)
@@ -390,9 +400,11 @@ class LiveSignalBuffer(
 
         elapsedMs[insertIndex] = timeMs
         rawValues[insertIndex] = rawValue
+        calibratedComponents[insertIndex] = calibratedComponent
 
         val shouldEstimate =
             periodicMode != PeriodicNoiseFilterMode.OFF &&
+                periodicMode != PeriodicNoiseFilterMode.CALIBRATED &&
                 (lastEstimateAtMs == Long.MIN_VALUE ||
                     timeMs - lastEstimateAtMs >= PERIODIC_REESTIMATE_MS)
 
@@ -407,12 +419,20 @@ class LiveSignalBuffer(
         } else {
             outputValues[physicalIndex(count - 2)]
         }
-        outputValues[insertIndex] = processOutput(timeMs, rawValue, previous)
+        outputValues[insertIndex] = processOutput(
+            timeMs,
+            rawValue,
+            previous,
+            calibratedComponent,
+        )
     }
 
     fun timeAt(index: Int): Long = elapsedMs[physicalIndex(index)]
 
     fun rawAt(index: Int): Float = rawValues[physicalIndex(index)]
+
+    fun calibratedComponentAt(index: Int): Float =
+        calibratedComponents[physicalIndex(index)]
 
     /** Final output after optional periodic filtering and EMA smoothing. */
     fun smoothedAt(index: Int): Float = outputValues[physicalIndex(index)]
@@ -521,13 +541,25 @@ class LiveSignalBuffer(
         var previous = Float.NaN
         for (index in 0 until count) {
             val raw = rawAt(index)
-            previous = processOutput(timeAt(index), raw, previous)
+            previous = processOutput(
+                timeAt(index),
+                raw,
+                previous,
+                calibratedComponentAt(index),
+            )
             outputValues[physicalIndex(index)] = previous
         }
     }
 
-    private fun processOutput(timeMs: Long, raw: Float, previous: Float): Float {
+    private fun processOutput(
+        timeMs: Long,
+        raw: Float,
+        previous: Float,
+        calibratedComponent: Float,
+    ): Float {
         val periodicFiltered = when {
+            periodicMode.usesCalibratedProfile && calibratedComponent.isFinite() ->
+                raw - calibratedComponent
             notchActive -> processNotch(raw)
             periodicMode.usesCounterWave && periodicEstimate.active -> {
                 val component = periodicEstimate.componentAt(timeMs)
@@ -558,7 +590,10 @@ class LiveSignalBuffer(
     }
 
     private fun estimatePeriodicComponent(): PeriodicNoiseEstimate {
-        if (periodicMode == PeriodicNoiseFilterMode.OFF) {
+        if (
+            periodicMode == PeriodicNoiseFilterMode.OFF ||
+            periodicMode == PeriodicNoiseFilterMode.CALIBRATED
+        ) {
             lastCounterCandidate = null
             return inactiveEstimate(periodicMode)
         }
@@ -637,7 +672,8 @@ class LiveSignalBuffer(
                 candidate = candidate,
                 conservativeWhenRunning = true,
             )
-            PeriodicNoiseFilterMode.OFF -> false
+            PeriodicNoiseFilterMode.OFF,
+            PeriodicNoiseFilterMode.CALIBRATED -> false
         }
 
         val baseEstimate = candidate.toEstimate(

@@ -629,8 +629,10 @@ internal class SimpleDashboardRenderer(
         }
 
         val minMaxKey = binding.minMaxKey
-        val stats = if (minMaxKey != null && rawValue != null && rawValue.isFinite()) {
-            host.trackMinMax(minMaxKey, rawValue)
+        val stats = if (
+            minMaxKey != null && displayValue != null && displayValue.isFinite()
+        ) {
+            host.trackMinMax(minMaxKey, displayValue)
         } else {
             null
         }

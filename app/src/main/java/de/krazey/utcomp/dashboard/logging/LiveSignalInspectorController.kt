@@ -30,6 +30,8 @@ class LiveSignalInspectorController(
     private val activity: Activity,
     private val snapshotProvider: () -> UtcompDataSnapshot,
     private val appendLog: (String) -> Unit,
+    private val calibrationManager: PeriodicNoiseCalibrationManager,
+    private val ensureAutomaticPolling: () -> Unit,
 ) {
     private companion object {
         const val PREFS_NAME = "utcomp_live_signal"
@@ -63,6 +65,7 @@ class LiveSignalInspectorController(
     private var pendingRaw = Float.NaN
     private var pendingTimeMs = 0L
     private var pendingEngineRpm = 0
+    private var pendingCalibratedComponent = Float.NaN
     private var lastAcceptedAtMs = 0L
     private var lastModelLogAtMs = Long.MIN_VALUE
     private var lastLoggedModelActive = false
@@ -79,9 +82,22 @@ class LiveSignalInspectorController(
     private var signalButton: Button? = null
     private var windowButton: Button? = null
     private var filterButton: Button? = null
+    private var calibrationButton: Button? = null
     private var smoothingSeekBar: SeekBar? = null
 
+    private val calibrationListener: (PeriodicCalibrationStatus) -> Unit = {
+        mainHandler.post {
+            refreshLabels()
+            if (it is PeriodicCalibrationStatus.Ready &&
+                buffer.periodicMode == PeriodicNoiseFilterMode.CALIBRATED
+            ) {
+                resetCapture()
+            }
+        }
+    }
+
     init {
+        calibrationManager.addListener(calibrationListener)
         buffer.setSmoothingAlpha(prefs.getFloat(PREF_ALPHA, 0.35f))
         val savedMode = prefs.getString(PREF_FILTER_MODE, null)
             ?.let { name ->
@@ -121,6 +137,7 @@ class LiveSignalInspectorController(
             signalButton = null
             windowButton = null
             filterButton = null
+            calibrationButton = null
             smoothingSeekBar = null
             samplePosted.set(false)
             mainHandler.removeCallbacks(drainPendingSample)
@@ -146,25 +163,41 @@ class LiveSignalInspectorController(
         offerSnapshot(snapshotProvider())
     }
 
-    fun offerSnapshot(snapshot: UtcompDataSnapshot, sourcePid: Int? = null) {
+    fun offerSnapshot(
+        snapshot: UtcompDataSnapshot,
+        sourcePid: Int? = null,
+        sampleTimeMs: Long = SystemClock.elapsedRealtime(),
+    ) {
         if (!active) return
         val definition = selectedSignal
         if (sourcePid != null && sourcePid != definition.sourcePid) return
         val raw = definition.read(snapshot)
         if (!raw.isFinite()) return
 
-        val nowMs = SystemClock.elapsedRealtime()
+        val nowMs = sampleTimeMs
+        val calibratedComponent = if (
+            buffer.periodicMode == PeriodicNoiseFilterMode.CALIBRATED
+        ) {
+            calibrationManager.correction(definition.id, nowMs)
+                .takeIf { it.active }
+                ?.component
+                ?: Float.NaN
+        } else {
+            Float.NaN
+        }
         synchronized(sampleLock) {
             if (lastAcceptedAtMs > 0L && nowMs - lastAcceptedAtMs < MIN_SAMPLE_INTERVAL_MS) {
                 pendingRaw = raw
                 pendingTimeMs = nowMs
                 pendingEngineRpm = snapshot.rpm
+                pendingCalibratedComponent = calibratedComponent
                 return
             }
             lastAcceptedAtMs = nowMs
             pendingRaw = raw
             pendingTimeMs = nowMs
             pendingEngineRpm = snapshot.rpm
+            pendingCalibratedComponent = calibratedComponent
         }
         if (samplePosted.compareAndSet(false, true)) {
             mainHandler.post(drainPendingSample)
@@ -185,13 +218,15 @@ class LiveSignalInspectorController(
         val raw: Float
         val timeMs: Long
         val engineRpm: Int
+        val calibratedComponent: Float
         synchronized(sampleLock) {
             raw = pendingRaw
             timeMs = pendingTimeMs
             engineRpm = pendingEngineRpm
+            calibratedComponent = pendingCalibratedComponent
         }
         if (!raw.isFinite()) return@Runnable
-        buffer.add(timeMs, raw, engineRpm)
+        buffer.add(timeMs, raw, engineRpm, calibratedComponent)
         refreshValues()
         maybeLogPeriodicModel(timeMs, engineRpm)
     }
@@ -229,7 +264,10 @@ class LiveSignalInspectorController(
         val selectFilterButton = toolbarButton("FILTER OFF") { showPeriodicFilterMenu() }
         filterButton = selectFilterButton
         toolbar.addView(selectFilterButton, toolbarButtonParams(112f))
-        toolbar.addView(toolbarButton("RESET") { resetCapture() }, toolbarButtonParams(92f))
+        val calibrateButton = toolbarButton("CAL") { showCalibrationMenu() }
+        calibrationButton = calibrateButton
+        toolbar.addView(calibrateButton, toolbarButtonParams(82f))
+        toolbar.addView(toolbarButton("RESET") { resetCapture() }, toolbarButtonParams(88f))
         toolbar.addView(
             toolbarButton("✕ EXIT") { owner.dismiss() },
             toolbarButtonParams(104f, trailingMargin = 0f),
@@ -470,6 +508,7 @@ class LiveSignalInspectorController(
             pendingRaw = Float.NaN
             pendingTimeMs = 0L
             pendingEngineRpm = 0
+            pendingCalibratedComponent = Float.NaN
         }
         buffer.clear()
         resetModelLogging()
@@ -477,6 +516,192 @@ class LiveSignalInspectorController(
         AppDiagnostics.info("LIVE", "Live signal changed to ${definition.id}")
         appendLog("Live signal inspector: ${definition.label}")
         offerSnapshot(snapshotProvider())
+    }
+
+    private fun showCalibrationMenu() {
+        val status = calibrationManager.status()
+        val items = mutableListOf<DarkActionItem>()
+        when (status) {
+            PeriodicCalibrationStatus.Missing -> {
+                items += DarkActionItem(
+                    title = "Learn with engine off",
+                    description =
+                        "Ignition on, engine stopped. Capture all decoded signals for 35 seconds.",
+                    onClick = ::confirmStartCalibration,
+                )
+            }
+            is PeriodicCalibrationStatus.Failed -> {
+                items += DarkActionItem(
+                    title = "Learning failed",
+                    description = status.reason,
+                    accentColor = Color.rgb(255, 150, 120),
+                    onClick = ::confirmStartCalibration,
+                )
+                items += DarkActionItem(
+                    title = "Try again",
+                    description = "Start a new 35-second engine-off capture.",
+                    onClick = ::confirmStartCalibration,
+                )
+            }
+            is PeriodicCalibrationStatus.Learning -> {
+                items += DarkActionItem(
+                    title = "Learning ${String.format(Locale.US, "%.0f%%", status.progress * 100f)}",
+                    description =
+                        "${status.elapsedMs / 1_000}s / ${status.durationMs / 1_000}s · " +
+                            "ADC reference samples ${status.referenceSamples}",
+                    accentColor = SMOOTHED_COLOR,
+                    onClick = {},
+                )
+                if (status.canFinish) {
+                    items += DarkActionItem(
+                        title = "Finish and save now",
+                        description = "Analyze the captured engine-off data immediately.",
+                        onClick = { finishCalibration(force = true) },
+                    )
+                }
+                items += DarkActionItem(
+                    title = "Cancel learning",
+                    description = "Discard this capture and keep the previous profile.",
+                    onClick = {
+                        calibrationManager.cancelLearning()
+                        refreshLabels()
+                    },
+                )
+            }
+            is PeriodicCalibrationStatus.Ready -> {
+                val profile = status.profile
+                items += DarkActionItem(
+                    title = "Calibration ready",
+                    description =
+                        "${formatFrequency(profile.frequencyHz)} · " +
+                            "${profile.signals.size} signals · " +
+                            "reference confidence ${formatPercent(profile.referenceConfidence)}",
+                    accentColor = SMOOTHED_COLOR,
+                    onClick = ::showCalibrationDetails,
+                )
+                items += DarkActionItem(
+                    title = "Learn again",
+                    description = "Replace the saved profile with a new engine-off capture.",
+                    onClick = ::confirmStartCalibration,
+                )
+                items += DarkActionItem(
+                    title = "Clear calibration",
+                    description = "Disable calibrated correction until another profile is learned.",
+                    onClick = {
+                        calibrationManager.clear()
+                        if (buffer.periodicMode == PeriodicNoiseFilterMode.CALIBRATED) {
+                            setPeriodicFilter(PeriodicNoiseFilterMode.OFF)
+                        }
+                    },
+                )
+            }
+        }
+        DarkActionDialog.show(
+            activity = activity,
+            title = "Engine-off calibration",
+            subtitle =
+                "The common wave is learned only during this explicit capture. Running data " +
+                    "tracks phase but never changes saved signal coefficients.",
+            items = items,
+            closeLabel = "Back",
+        )
+    }
+
+    private fun confirmStartCalibration() {
+        DarkActionDialog.show(
+            activity = activity,
+            title = "Start engine-off learning?",
+            subtitle =
+                "Switch ignition on but keep the engine stopped. Keep electrical loads stable " +
+                    "for about 35 seconds.",
+            items = listOf(
+                DarkActionItem(
+                    title = "Start learning",
+                    description = "Collect all eligible UTCOMP channels now.",
+                    accentColor = SMOOTHED_COLOR,
+                    onClick = {
+                        ensureAutomaticPolling()
+                        calibrationManager.startLearning()
+                        refreshLabels()
+                        appendLog("Engine-off periodic-noise calibration started")
+                    },
+                ),
+            ),
+            closeLabel = "Cancel",
+        )
+    }
+
+    private fun finishCalibration(force: Boolean) {
+        val result = calibrationManager.finishLearning(force = force) ?: return
+        appendLog(
+            if (result.profile != null) {
+                "Periodic-noise calibration saved: ${result.acceptedSignals} signals at " +
+                    formatFrequency(result.profile.frequencyHz)
+            } else {
+                "Periodic-noise calibration failed: ${result.reason}"
+            },
+        )
+        refreshLabels()
+    }
+
+    private fun showCalibrationDetails() {
+        val profile = calibrationManager.profile() ?: return
+        val items = profile.signals.values
+            .sortedBy { LiveSignalCatalog.find(it.signalId).label }
+            .map { signal ->
+                val definition = LiveSignalCatalog.find(signal.signalId)
+                DarkActionItem(
+                    title = definition.label,
+                    description =
+                        "A=${formatModelValue(signal.amplitude)} ${definition.unit} · " +
+                            "phase ${formatPhase(signal.phaseOffsetDegrees)} · " +
+                            "confidence ${formatPercent(signal.confidence)} · " +
+                            "${formatRate(signal.sampleRateHz)}",
+                    onClick = {},
+                )
+            }
+        DarkActionDialog.show(
+            activity = activity,
+            title = "Saved calibration",
+            subtitle =
+                "Common frequency ${formatFrequency(profile.frequencyHz)}. Amplitude and " +
+                    "phase are stored separately for every accepted signal.",
+            items = items,
+            closeLabel = "Back",
+        )
+    }
+
+    private fun calibrationStatusDescription(): String = when (val status = calibrationManager.status()) {
+        PeriodicCalibrationStatus.Missing -> "No saved engine-off calibration."
+        is PeriodicCalibrationStatus.Failed -> "Last attempt failed: ${status.reason}"
+        is PeriodicCalibrationStatus.Learning ->
+            "Learning ${String.format(Locale.US, "%.0f%%", status.progress * 100f)} · " +
+                "${status.referenceSamples} reference samples"
+        is PeriodicCalibrationStatus.Ready ->
+            "Ready at ${formatFrequency(status.profile.frequencyHz)} for " +
+                "${status.profile.signals.size} signals."
+    }
+
+    private fun calibratedFilterDescription(): String {
+        val profile = calibrationManager.profile()
+        val signal = profile?.calibrationFor(selectedSignal.id)
+        return when {
+            profile == null -> "No engine-off profile is saved. Open calibration first."
+            signal == null ->
+                "The saved profile has no reliable model for ${selectedSignal.label}."
+            else ->
+                "Use the frozen ${formatFrequency(profile.frequencyHz)} model: " +
+                    "A=${formatModelValue(signal.amplitude)}, phase " +
+                    "${formatPhase(signal.phaseOffsetDegrees)}."
+        }
+    }
+
+    private fun calibrationButtonText(): String = when (val status = calibrationManager.status()) {
+        PeriodicCalibrationStatus.Missing -> "CAL"
+        is PeriodicCalibrationStatus.Failed -> "CAL !"
+        is PeriodicCalibrationStatus.Learning ->
+            String.format(Locale.US, "CAL %.0f%%", status.progress * 100f)
+        is PeriodicCalibrationStatus.Ready -> "CAL ✓"
     }
 
     private fun showPeriodicFilterMenu() {
@@ -493,7 +718,8 @@ class LiveSignalInspectorController(
             activity = activity,
             title = "Periodic noise filter",
             subtitle =
-                "Periodic filtering runs before EMA smoothing and remains inspector-only.",
+                "Saved correction is learned only during an explicit engine-off capture. " +
+                    "Live-fit filters remain available only as diagnostics.",
             items = listOf(
                 DarkActionItem(
                     title = "Off",
@@ -501,6 +727,42 @@ class LiveSignalInspectorController(
                     accentColor = modeAccent(PeriodicNoiseFilterMode.OFF),
                     onClick = { setPeriodicFilter(PeriodicNoiseFilterMode.OFF) },
                 ),
+                DarkActionItem(
+                    title = "Calibrated engine-off correction",
+                    description = calibratedFilterDescription(),
+                    accentColor = modeAccent(PeriodicNoiseFilterMode.CALIBRATED),
+                    onClick = {
+                        if (calibrationManager.hasCalibration(selectedSignal.id)) {
+                            setPeriodicFilter(PeriodicNoiseFilterMode.CALIBRATED)
+                        } else {
+                            showCalibrationMenu()
+                        }
+                    },
+                ),
+                DarkActionItem(
+                    title = "Engine-off calibration",
+                    description = calibrationStatusDescription(),
+                    onClick = ::showCalibrationMenu,
+                ),
+                DarkActionItem(
+                    title = "Experimental live-fit filters",
+                    description =
+                        "Notch and counter-wave tools for one-off diagnosis. They are " +
+                            "never saved as the vehicle calibration.$learnedModel",
+                    onClick = { showExperimentalPeriodicFilterMenu(learnedModel) },
+                ),
+            ),
+        )
+    }
+
+    private fun showExperimentalPeriodicFilterMenu(learnedModel: String) {
+        DarkActionDialog.show(
+            activity = activity,
+            title = "Experimental live-fit filters",
+            subtitle =
+                "These modes estimate the currently selected signal while Live Data is " +
+                    "open. They cannot be enabled on dashboard boxes.",
+            items = listOf(
                 DarkActionItem(
                     title = "Automatic notch",
                     description =
@@ -519,12 +781,10 @@ class LiveSignalInspectorController(
                     },
                 ),
                 DarkActionItem(
-                    title = "Adaptive counter-wave",
+                    title = "Live adaptive counter-wave",
                     description =
-                        "Learn frequency, amplitude and phase, then subtract only the " +
-                            "periodic component. Baseline and slow drift are preserved. " +
-                            "Needs several stable windows; running-engine detection is " +
-                            "more conservative.$learnedModel",
+                        "Fit frequency, amplitude and phase from the selected live signal, " +
+                            "then subtract only that temporary model.$learnedModel",
                     accentColor = modeAccent(
                         PeriodicNoiseFilterMode.COUNTER_WAVE_AUTO,
                     ),
@@ -533,10 +793,10 @@ class LiveSignalInspectorController(
                     },
                 ),
                 DarkActionItem(
-                    title = "Fixed-frequency counter-wave",
+                    title = "Live fixed-frequency counter-wave",
                     description =
-                        "Fix the frequency while amplitude and phase continue to learn " +
-                            "from the recent signal.",
+                        "Fix the frequency while amplitude and phase are fitted only for " +
+                            "this Live Data session.",
                     accentColor = modeAccent(
                         PeriodicNoiseFilterMode.COUNTER_WAVE_MANUAL,
                     ),
@@ -550,11 +810,12 @@ class LiveSignalInspectorController(
                     title =
                         "Counter-wave strength ${formatPercent(buffer.counterWaveStrength)}",
                     description =
-                        "Scale the learned opposite wave. Start at 75%; 100% removes the " +
-                            "full fitted component.",
+                        "Scale the temporary opposite wave. This setting is not part of " +
+                            "the saved engine-off profile.",
                     onClick = ::showCounterWaveStrengthMenu,
                 ),
             ),
+            closeLabel = "Back",
         )
     }
 
@@ -658,6 +919,8 @@ class LiveSignalInspectorController(
                     "Live adaptive counter-wave enabled"
                 PeriodicNoiseFilterMode.COUNTER_WAVE_MANUAL ->
                     "Live counter-wave set to ${formatFrequency(buffer.manualFrequencyHz)}"
+                PeriodicNoiseFilterMode.CALIBRATED ->
+                    "Live engine-off calibrated correction enabled"
             },
         )
     }
@@ -684,7 +947,10 @@ class LiveSignalInspectorController(
 
     private fun maybeLogPeriodicModel(timeMs: Long, engineRpm: Int) {
         val mode = buffer.periodicMode
-        if (mode == PeriodicNoiseFilterMode.OFF) return
+        if (
+            mode == PeriodicNoiseFilterMode.OFF ||
+            mode == PeriodicNoiseFilterMode.CALIBRATED
+        ) return
         val estimate = buffer.periodicEstimate
         val stateChanged =
             mode != lastLoggedModelMode || estimate.active != lastLoggedModelActive
@@ -745,6 +1011,7 @@ class LiveSignalInspectorController(
             pendingRaw = Float.NaN
             pendingTimeMs = 0L
             pendingEngineRpm = 0
+            pendingCalibratedComponent = Float.NaN
         }
         refreshValues()
         AppDiagnostics.info("LIVE", "Live capture reset signal=${selectedSignal.id}")
@@ -754,11 +1021,17 @@ class LiveSignalInspectorController(
     private fun refreshLabels() {
         val definition = selectedSignal
         titleText?.text = "Live signal • ${definition.label}"
-        descriptionText?.text =
-            "${definition.description}  Raw and output traces share the same scale."
+        descriptionText?.text = buildString {
+            append(definition.description)
+            append("  Raw and output traces share the same scale.")
+            if (calibrationManager.isLearning()) {
+                append("  ENGINE-OFF CALIBRATION ACTIVE.")
+            }
+        }
         signalButton?.text = "SIGNAL"
         windowButton?.text = "${windowMs / 1_000} s"
         filterButton?.text = filterButtonText()
+        calibrationButton?.text = calibrationButtonText()
         graphView?.apply {
             unit = definition.unit
             decimals = definition.decimals
@@ -790,6 +1063,11 @@ class LiveSignalInspectorController(
                     append("\nCW  ${formatFrequency(estimate.frequencyHz)}")
                     append("  A=${formatModelValue(estimate.amplitude)}")
                     append("  φ=${formatPhase(estimate.phaseDegrees)}")
+                } else if (buffer.periodicMode == PeriodicNoiseFilterMode.CALIBRATED) {
+                    calibrationManager.profile()?.let { profile ->
+                        append("\nCAL ${formatFrequency(profile.frequencyHz)}")
+                        append("  ref=${formatPercent(calibrationManager.referenceFit()?.confidence ?: Float.NaN)}")
+                    }
                 }
             }
         }
@@ -850,6 +1128,7 @@ class LiveSignalInspectorController(
                     ?: buffer.manualFrequencyHz
                 String.format(Locale.US, "CW %.2f", frequency)
             }
+            PeriodicNoiseFilterMode.CALIBRATED -> "CALIBRATED"
         }
     }
 
@@ -885,6 +1164,15 @@ class LiveSignalInspectorController(
                 } else {
                     "adaptive counter-wave learning " +
                         "${estimate.stableWindows}/${estimate.requiredStableWindows}"
+                }
+            }
+            PeriodicNoiseFilterMode.CALIBRATED -> {
+                val fit = calibrationManager.referenceFit()
+                if (fit != null && fit.confidence.isFinite()) {
+                    "calibrated ${formatFrequency(fit.frequencyHz)} " +
+                        "(${formatPercent(fit.confidence)} reference confidence)"
+                } else {
+                    "calibrated profile waiting for reference phase"
                 }
             }
         }

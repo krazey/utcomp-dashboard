@@ -62,7 +62,9 @@ internal object DashboardConfigJson {
             putFloat(this, "minMaxScale", box.minMaxScale)
             putFloat(this, "scaleMin", box.scaleMin)
             putFloat(this, "scaleMax", box.scaleMax)
-            putFloat(this, "smoothingAlpha", box.smoothingAlpha)
+            put("smoothingMode", box.smoothingMode.name)
+            putFloat(this, "smoothingTimeSeconds", box.smoothingTimeSeconds)
+            put("periodicNoiseFilter", box.periodicNoiseFilter.name)
             putFloat(this, "warningLow", box.warningLow)
             putFloat(this, "criticalLow", box.criticalLow)
             putFloat(this, "warningHigh", box.warningHigh)
@@ -186,11 +188,9 @@ internal object DashboardConfigJson {
             ),
             scaleMin = optFloat(json, "scaleMin", fallback.scaleMin),
             scaleMax = optFloat(json, "scaleMax", fallback.scaleMax),
-            smoothingAlpha = optFloat(
-                json,
-                "smoothingAlpha",
-                fallback.smoothingAlpha,
-            ),
+            smoothingMode = smoothingModeFromJson(json, fallback),
+            smoothingTimeSeconds = smoothingTimeFromJson(json, fallback),
+            periodicNoiseFilter = periodicNoiseFilterFromJson(json, fallback),
             warningLow = optFloat(json, "warningLow", fallback.warningLow),
             criticalLow = optFloat(json, "criticalLow", fallback.criticalLow),
             warningHigh = optFloat(json, "warningHigh", fallback.warningHigh),
@@ -268,6 +268,44 @@ internal object DashboardConfigJson {
             showUnit = json.optBoolean("showUnit", fallback.showUnit),
             showMinMax = json.optBoolean("showMinMax", fallback.showMinMax),
         )
+    }
+
+    private fun smoothingModeFromJson(
+        json: JSONObject,
+        fallback: DashboardBoxConfig,
+    ): DashboardSmoothingMode {
+        val saved = json.optString("smoothingMode", "")
+        DashboardSmoothingMode.entries.firstOrNull { it.name == saved }?.let { return it }
+        if (json.has("smoothingAlpha")) {
+            return smoothingModeFromLegacyAlpha(
+                optFloat(json, "smoothingAlpha", 1f),
+            )
+        }
+        return fallback.smoothingMode
+    }
+
+    private fun smoothingTimeFromJson(
+        json: JSONObject,
+        fallback: DashboardBoxConfig,
+    ): Float {
+        val mode = smoothingModeFromJson(json, fallback)
+        val saved = optFloat(json, "smoothingTimeSeconds", Float.NaN)
+        return when {
+            mode == DashboardSmoothingMode.OFF -> 0f
+            mode == DashboardSmoothingMode.CUSTOM && saved.isFinite() ->
+                saved.coerceIn(0.03f, 3.0f)
+            mode.presetTimeSeconds.isFinite() -> mode.presetTimeSeconds
+            else -> fallback.smoothingTimeSeconds
+        }
+    }
+
+    private fun periodicNoiseFilterFromJson(
+        json: JSONObject,
+        fallback: DashboardBoxConfig,
+    ): DashboardPeriodicNoiseFilter {
+        val saved = json.optString("periodicNoiseFilter", "")
+        return DashboardPeriodicNoiseFilter.entries.firstOrNull { it.name == saved }
+            ?: fallback.periodicNoiseFilter
     }
 
     private fun sensorFromName(

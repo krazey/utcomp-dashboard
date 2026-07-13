@@ -176,5 +176,15 @@ fun main() {
     check(runningCounterWave.periodicEstimate.requiredStableWindows == 5)
     check(runningCounterWave.periodicEstimate.active)
 
+
+    val calibrated = LiveSignalBuffer(capacity = 10)
+    calibrated.setSmoothingAlpha(1f)
+    calibrated.setPeriodicFilter(PeriodicNoiseFilterMode.CALIBRATED)
+    calibrated.add(0L, 14.9f, calibratedComponent = 0.2f)
+    calibrated.add(100L, 14.5f, calibratedComponent = -0.2f)
+    assertNear(14.7f, calibrated.smoothedAt(0))
+    assertNear(14.7f, calibrated.smoothedAt(1))
+    check(!calibrated.periodicEstimate.active)
+
     println("LiveSignalInspectorTest: OK")
 }

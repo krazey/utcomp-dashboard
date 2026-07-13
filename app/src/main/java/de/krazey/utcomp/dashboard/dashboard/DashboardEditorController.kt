@@ -8,7 +8,6 @@ import android.widget.EditText
 import de.krazey.utcomp.dashboard.util.fixed
 import de.krazey.utcomp.dashboard.utcomp.pretty
 import java.util.Locale
-import kotlin.math.abs
 
 internal class DashboardEditorController(
     private val context: Context,
@@ -19,6 +18,8 @@ internal class DashboardEditorController(
         transform: (DashboardBoxConfig) -> DashboardBoxConfig,
     ) -> Unit,
     private val onSmoothingChanged: (boxIndex: Int, box: DashboardBoxConfig) -> Unit,
+    private val isPeriodicNoiseCalibrationAvailable: (DashboardSensor) -> Boolean,
+    private val showPeriodicNoiseCalibration: () -> Unit,
     private val isLayoutEditable: () -> Boolean,
     private val onEditPageGrid: () -> Unit,
     private val onStartMerge: (boxIndex: Int) -> Unit,
@@ -85,8 +86,11 @@ internal class DashboardEditorController(
                                 it.copy(splitValueDigits = !it.splitValueDigits)
                             }
                         },
-                        EditorMenuRow("Smoothing", smoothingText(box.smoothingAlpha)) {
+                        EditorMenuRow("Smoothing", smoothingText(box)) {
                             showSmoothingPicker(boxIndex, box)
+                        },
+                        EditorMenuRow("Periodic noise", periodicNoiseText(box)) {
+                            showPeriodicNoisePicker(boxIndex, box)
                         },
                     ),
                 ),
@@ -351,23 +355,109 @@ internal class DashboardEditorController(
     }
 
     private fun showSmoothingPicker(boxIndex: Int, box: DashboardBoxConfig) {
-        val labels = Array(SMOOTHING_VALUES.size) { index ->
-            val marker = if (abs(SMOOTHING_VALUES[index] - box.smoothingAlpha) < 0.01f) {
-                " ✓"
-            } else {
-                ""
+        val modes = listOf(
+            DashboardSmoothingMode.OFF,
+            DashboardSmoothingMode.LIGHT,
+            DashboardSmoothingMode.MEDIUM,
+            DashboardSmoothingMode.STRONG,
+            DashboardSmoothingMode.CUSTOM,
+        )
+        val labels = modes.map { mode ->
+            val selected = box.smoothingMode == mode
+            val detail = when (mode) {
+                DashboardSmoothingMode.OFF -> "no smoothing"
+                DashboardSmoothingMode.CUSTOM ->
+                    String.format(Locale.US, "%.2f s", box.smoothingTimeSeconds)
+                else -> String.format(Locale.US, "%.2f s", mode.presetTimeSeconds)
             }
-            "${SMOOTHING_NAMES[index]}$marker"
-        }
+            "${mode.label} · $detail${if (selected) " ✓" else ""}"
+        }.toTypedArray()
 
         AlertDialog.Builder(context)
             .setTitle("Smoothing")
+            .setMessage(
+                "Time-based smoothing behaves consistently across fast pressure/AFR " +
+                    "signals and slower temperature packets.",
+            )
             .setItems(labels) { _, which ->
-                onSmoothingChanged(boxIndex, box)
-                updateBoxConfig(boxIndex) {
-                    it.copy(smoothingAlpha = SMOOTHING_VALUES[which])
+                val mode = modes[which]
+                if (mode == DashboardSmoothingMode.CUSTOM) {
+                    showCustomSmoothingEditor(boxIndex, box)
+                } else {
+                    onSmoothingChanged(boxIndex, box)
+                    updateBoxConfig(boxIndex) {
+                        it.copy(
+                            smoothingMode = mode,
+                            smoothingTimeSeconds = mode.presetTimeSeconds,
+                        )
+                    }
                 }
             }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showCustomSmoothingEditor(boxIndex: Int, box: DashboardBoxConfig) {
+        val input = EditText(context).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            setSingleLine(true)
+            hint = "0.20"
+            setText(String.format(Locale.US, "%.2f", box.smoothingTimeSeconds.coerceAtLeast(0.03f)))
+            selectAll()
+        }
+        AlertDialog.Builder(context)
+            .setTitle("Custom smoothing")
+            .setMessage("Enter the smoothing time constant in seconds (0.03–3.00).")
+            .setView(input)
+            .setPositiveButton("Apply") { _, _ ->
+                val seconds = input.text.toString().replace(',', '.').toFloatOrNull()
+                    ?.coerceIn(0.03f, 3.0f)
+                    ?: return@setPositiveButton
+                onSmoothingChanged(boxIndex, box)
+                updateBoxConfig(boxIndex) {
+                    it.copy(
+                        smoothingMode = DashboardSmoothingMode.CUSTOM,
+                        smoothingTimeSeconds = seconds,
+                    )
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showPeriodicNoisePicker(boxIndex: Int, box: DashboardBoxConfig) {
+        val signalId = box.sensor.calibrationSignalId
+        val available = signalId != null && isPeriodicNoiseCalibrationAvailable(box.sensor)
+        val labels = arrayOf(
+            "Off${if (box.periodicNoiseFilter == DashboardPeriodicNoiseFilter.OFF) " ✓" else ""}",
+            "Calibrated${if (box.periodicNoiseFilter == DashboardPeriodicNoiseFilter.CALIBRATED) " ✓" else ""}",
+        )
+        AlertDialog.Builder(context)
+            .setTitle("Periodic noise filter")
+            .setMessage(
+                if (available) {
+                    "Use the saved engine-off calibration for this box before ordinary smoothing."
+                } else {
+                    "No usable engine-off calibration exists for ${box.sensor.label}. " +
+                        "Create one from Live Data first."
+                },
+            )
+            .setItems(labels) { _, which ->
+                if (which == 1 && !available) {
+                    showPeriodicNoiseCalibration()
+                    return@setItems
+                }
+                updateBoxConfig(boxIndex) {
+                    it.copy(
+                        periodicNoiseFilter = if (which == 0) {
+                            DashboardPeriodicNoiseFilter.OFF
+                        } else {
+                            DashboardPeriodicNoiseFilter.CALIBRATED
+                        },
+                    )
+                }
+            }
+            .setNeutralButton("Open Live Data") { _, _ -> showPeriodicNoiseCalibration() }
             .setNegativeButton("Cancel", null)
             .show()
     }
@@ -557,6 +647,9 @@ internal class DashboardEditorController(
                             sensor = selected,
                             scaleMin = selected.defaultMin,
                             scaleMax = selected.defaultMax,
+                            smoothingMode = defaultSmoothingMode(selected),
+                            smoothingTimeSeconds = defaultSmoothingTimeSeconds(selected),
+                            periodicNoiseFilter = DashboardPeriodicNoiseFilter.OFF,
                         ),
                         selected,
                     )
@@ -575,7 +668,9 @@ internal class DashboardEditorController(
                 minMaxScale = 1.0f,
                 decimalPlaces = defaultDisplayDecimals(box.sensor),
                 splitValueDigits = true,
-                smoothingAlpha = defaultDisplaySmoothing(box.sensor),
+                smoothingMode = defaultSmoothingMode(box.sensor),
+                smoothingTimeSeconds = defaultSmoothingTimeSeconds(box.sensor),
+                periodicNoiseFilter = DashboardPeriodicNoiseFilter.OFF,
                 backgroundColor = Color.rgb(11, 14, 20),
                 foregroundColor = Color.WHITE,
                 valueColor = Color.WHITE,
@@ -660,14 +755,6 @@ internal class DashboardEditorController(
             DashboardSensor.TIME -> 0
         }
 
-    private fun defaultDisplaySmoothing(sensor: DashboardSensor): Float =
-        when (sensor) {
-            DashboardSensor.AFR,
-            DashboardSensor.BOOST,
-            DashboardSensor.OIL_PRESSURE -> 0.35f
-            else -> 1.0f
-        }
-
 
     private fun spanSummary(rows: Int, columns: Int): String =
         "$rows ${if (rows == 1) "row" else "rows"} × " +
@@ -680,12 +767,25 @@ internal class DashboardEditorController(
             else -> "2 decimals"
         }
 
-    private fun smoothingText(alpha: Float): String =
+    private fun smoothingText(box: DashboardBoxConfig): String =
+        when (box.smoothingMode) {
+            DashboardSmoothingMode.OFF -> "off"
+            DashboardSmoothingMode.CUSTOM ->
+                String.format(Locale.US, "custom · %.2f s", box.smoothingTimeSeconds)
+            else -> String.format(
+                Locale.US,
+                "%s · %.2f s",
+                box.smoothingMode.label.lowercase(Locale.US),
+                box.smoothingMode.presetTimeSeconds,
+            )
+        }
+
+    private fun periodicNoiseText(box: DashboardBoxConfig): String =
         when {
-            alpha >= 0.999f -> "off"
-            alpha >= 0.45f -> "light"
-            alpha >= 0.20f -> "medium"
-            else -> "heavy"
+            box.sensor.calibrationSignalId == null -> "not applicable"
+            box.periodicNoiseFilter == DashboardPeriodicNoiseFilter.OFF -> "off"
+            isPeriodicNoiseCalibrationAvailable(box.sensor) -> "calibrated"
+            else -> "calibration missing"
         }
 
     private fun enabledText(enabled: Boolean): String =
@@ -717,9 +817,6 @@ internal class DashboardEditorController(
         const val DEFAULT_OIL_PRESSURE_BOOST_ARM_BAR = 0.30f
         const val DEFAULT_OIL_PRESSURE_WARNING_BAR = 4.50f
         const val DEFAULT_OIL_PRESSURE_CRITICAL_BAR = 4.00f
-
-        val SMOOTHING_VALUES = floatArrayOf(1.0f, 0.5f, 0.25f, 0.10f)
-        val SMOOTHING_NAMES = arrayOf("Off", "Light", "Medium", "Heavy")
 
         val VALUE_COLORS = listOf(
             NamedColor("White", Color.WHITE),

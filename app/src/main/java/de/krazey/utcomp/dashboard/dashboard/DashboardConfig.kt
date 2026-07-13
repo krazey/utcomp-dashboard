@@ -21,6 +21,7 @@ enum class DashboardSensor(
     val defaultMin: Float,
     val defaultMax: Float,
     val iconResourceName: String,
+    val calibrationSignalId: String?,
 ) {
     BOOST(
         label = "Boost",
@@ -28,6 +29,7 @@ enum class DashboardSensor(
         defaultMin = -1.0f,
         defaultMax = 2.0f,
         iconResourceName = "ic_rcomp_boost_48dp",
+        calibrationSignalId = "boost",
     ),
     AFR(
         label = "AFR",
@@ -35,6 +37,7 @@ enum class DashboardSensor(
         defaultMin = 10.0f,
         defaultMax = 22.0f,
         iconResourceName = "ic_rcomp_afr_48dp",
+        calibrationSignalId = "afr1",
     ),
     OIL_TEMP(
         label = "Oil temp",
@@ -42,6 +45,7 @@ enum class DashboardSensor(
         defaultMin = 0.0f,
         defaultMax = 140.0f,
         iconResourceName = "ic_rcomp_oiltemp_48dp",
+        calibrationSignalId = "temperature_ntc1",
     ),
     OIL_PRESSURE(
         label = "Oil pressure",
@@ -49,6 +53,7 @@ enum class DashboardSensor(
         defaultMin = 0.0f,
         defaultMax = 8.0f,
         iconResourceName = "ic_rcomp_oilpres_48dp",
+        calibrationSignalId = "oil_pressure",
     ),
     BATTERY(
         label = "Battery",
@@ -56,6 +61,7 @@ enum class DashboardSensor(
         defaultMin = 8.0f,
         defaultMax = 16.0f,
         iconResourceName = "ic_rcomp_accu_48dp",
+        calibrationSignalId = "adc0",
     ),
     OUTSIDE_TEMP(
         label = "Outside",
@@ -63,6 +69,7 @@ enum class DashboardSensor(
         defaultMin = -30.0f,
         defaultMax = 80.0f,
         iconResourceName = "ic_rcomp_outside_temp_48dp",
+        calibrationSignalId = "temperature_ds_a",
     ),
     INSIDE_TEMP(
         label = "Inside",
@@ -70,6 +77,7 @@ enum class DashboardSensor(
         defaultMin = -10.0f,
         defaultMax = 60.0f,
         iconResourceName = "ic_rcomp_inside_temp_48dp",
+        calibrationSignalId = "temperature_ds_b",
     ),
     TIME(
         label = "Time",
@@ -77,6 +85,7 @@ enum class DashboardSensor(
         defaultMin = 0.0f,
         defaultMax = 0.0f,
         iconResourceName = "",
+        calibrationSignalId = null,
     );
 
     fun readValue(snapshot: UtcompDataSnapshot): Float? =
@@ -90,6 +99,22 @@ enum class DashboardSensor(
             INSIDE_TEMP -> snapshot.temperatureDsB
             TIME -> null
         }
+}
+
+enum class DashboardSmoothingMode(
+    val label: String,
+    val presetTimeSeconds: Float,
+) {
+    OFF("Off", 0f),
+    LIGHT("Light", 0.06f),
+    MEDIUM("Medium", 0.12f),
+    STRONG("Strong", 0.35f),
+    CUSTOM("Custom", Float.NaN),
+}
+
+enum class DashboardPeriodicNoiseFilter {
+    OFF,
+    CALIBRATED,
 }
 
 data class DashboardBoxConfig(
@@ -122,13 +147,18 @@ data class DashboardBoxConfig(
      * splitValueDigits makes the main digits larger and the decimal part smaller,
      * similar to the OEM UTCOMP simple dashboard.
      *
-     * smoothingAlpha:
-     * - 1.00 = off
-     * - lower values = more smoothing
+     * Smoothing is time based so a 20 Hz pressure signal and a 1 Hz
+     * temperature signal react consistently. Presets select a time constant;
+     * CUSTOM uses smoothingTimeSeconds directly.
      */
     val decimalPlaces: Int = defaultDecimalPlaces(sensor),
     val splitValueDigits: Boolean = true,
-    val smoothingAlpha: Float = defaultSmoothingAlpha(sensor),
+    val smoothingMode: DashboardSmoothingMode = defaultSmoothingMode(sensor),
+    val smoothingTimeSeconds: Float = defaultSmoothingTimeSeconds(sensor),
+
+    /** Engine-off calibrated periodic-noise cancellation for this box only. */
+    val periodicNoiseFilter: DashboardPeriodicNoiseFilter =
+        DashboardPeriodicNoiseFilter.OFF,
 
     /**
      * Stored as ARGB Ints. Use 0xAARRGGBB.
@@ -213,7 +243,9 @@ data class DashboardPageConfig(
                     scaleMax = sourceBox.scaleMax,
                     decimalPlaces = sourceBox.decimalPlaces,
                     splitValueDigits = sourceBox.splitValueDigits,
-                    smoothingAlpha = sourceBox.smoothingAlpha,
+                    smoothingMode = sourceBox.smoothingMode,
+                    smoothingTimeSeconds = sourceBox.smoothingTimeSeconds,
+                    periodicNoiseFilter = sourceBox.periodicNoiseFilter,
                     backgroundColor = sourceBox.backgroundColor,
                     foregroundColor = sourceBox.foregroundColor,
                     valueColor = sourceBox.valueColor,
@@ -686,12 +718,23 @@ private fun defaultOilPressureCriticalBar(sensor: DashboardSensor): Float =
         else -> Float.NaN
     }
 
-private fun defaultSmoothingAlpha(sensor: DashboardSensor): Float =
+fun defaultSmoothingMode(sensor: DashboardSensor): DashboardSmoothingMode =
     when (sensor) {
         DashboardSensor.AFR,
         DashboardSensor.BOOST,
-        DashboardSensor.OIL_PRESSURE -> 0.35f
-        else -> 1.0f
+        DashboardSensor.OIL_PRESSURE -> DashboardSmoothingMode.MEDIUM
+        else -> DashboardSmoothingMode.OFF
+    }
+
+fun defaultSmoothingTimeSeconds(sensor: DashboardSensor): Float =
+    defaultSmoothingMode(sensor).presetTimeSeconds
+
+fun smoothingModeFromLegacyAlpha(alpha: Float): DashboardSmoothingMode =
+    when {
+        alpha >= 0.999f -> DashboardSmoothingMode.OFF
+        alpha >= 0.45f -> DashboardSmoothingMode.LIGHT
+        alpha >= 0.20f -> DashboardSmoothingMode.MEDIUM
+        else -> DashboardSmoothingMode.STRONG
     }
 
 private fun defaultDecimalPlaces(sensor: DashboardSensor): Int =
