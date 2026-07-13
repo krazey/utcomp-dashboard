@@ -25,6 +25,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
 import android.view.Gravity
@@ -40,6 +41,7 @@ import android.widget.Toast
 import de.krazey.utcomp.dashboard.protocol.TransmitterConstants
 import de.krazey.utcomp.dashboard.protocol.TransmitterPacket
 import de.krazey.utcomp.dashboard.simulation.SimulationEngine
+import de.krazey.utcomp.dashboard.transport.UsbRecoveryPolicy
 import de.krazey.utcomp.dashboard.transport.UtcompUsbTransport
 import de.krazey.utcomp.dashboard.utcomp.UtcompDataSnapshot
 import de.krazey.utcomp.dashboard.utcomp.UtcompDecoder
@@ -70,7 +72,6 @@ class MainActivity : Activity(), DashboardRenderHost {
     private companion object {
         private const val USB_FAST_POLL_MS = 50L
         private const val USB_SLOW_POLL_MS = 1000L
-        private const val USB_RECONNECT_MS = 2500L
         private const val DASHBOARD_RENDER_MS = 125L
         private const val DASHBOARD_TOUCH_RENDER_GRACE_MS = 220L
         private const val DASHBOARD_TOUCH_DEFER_RETRY_MS = 80L
@@ -117,10 +118,12 @@ class MainActivity : Activity(), DashboardRenderHost {
     private var cachedClockMinute = Long.MIN_VALUE
     private var cachedClockText = ""
     private val handler = Handler(Looper.getMainLooper())
+    @Volatile
     private var dataMode = DataMode.USB
     private var simTestMode = SimTestMode.OFF
     private val simTickerHandler = Handler(Looper.getMainLooper())
-    private val autoUsbHandler = Handler(Looper.getMainLooper())
+    private val usbPollThread = HandlerThread("utcomp-usb-poll").apply { start() }
+    private val autoUsbHandler = Handler(usbPollThread.looper)
     private val dashboardRenderHandler = Handler(Looper.getMainLooper())
     private val decodedRenderPosted = AtomicBoolean(false)
     private val decodedRenderRunnable = Runnable {
@@ -147,13 +150,17 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     private val autoUsbRunnable = object : Runnable {
         override fun run() {
-            if (dataMode != DataMode.USB) {
-                return
-            }
+            if (dataMode != DataMode.USB || !autoRefresh) return
 
             if (!connected) {
                 runCatching { usb.requestPermissionAndConnect(logDiscovery = false) }
-                autoUsbHandler.postDelayed(this, USB_RECONNECT_MS)
+                    .onFailure { appendLog("USB reconnect attempt failed: ${it.message}") }
+                if (dataMode == DataMode.USB && autoRefresh && !connected) {
+                    autoUsbHandler.postDelayed(
+                        this,
+                        UsbRecoveryPolicy.NORMAL_RECONNECT_DELAY_MS,
+                    )
+                }
                 return
             }
 
@@ -165,12 +172,13 @@ class MainActivity : Activity(), DashboardRenderHost {
                     lastSlowUsbRequestMs = nowMs
                     requestSlowLiveData()
                 }
-            }
+            }.onFailure { appendLog("USB polling failed: ${it.message}") }
 
-            autoUsbHandler.postDelayed(this, USB_FAST_POLL_MS)
+            if (dataMode == DataMode.USB && autoRefresh) {
+                autoUsbHandler.postDelayed(this, USB_FAST_POLL_MS)
+            }
         }
     }
-
 
     private val simTickerRunnable = object : Runnable {
         override fun run() {
@@ -187,7 +195,10 @@ class MainActivity : Activity(), DashboardRenderHost {
     private var uiMode = UiMode.FANCY
     private var lastRenderedUiMode: UiMode? = null
     private var currentPageIndex = 0
+    @Volatile
     private var connected = false
+
+    @Volatile
     private var autoRefresh = false
     private var simTick = 0L
     private var controlsVisible = false
@@ -229,14 +240,7 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
     }
 
-    private val pollRunnable = object : Runnable {
-        override fun run() {
-            if (dataMode == DataMode.USB && autoRefresh) {
-                requestLiveData(logEach = false)
-                handler.postDelayed(this, 750)
-            }
-        }
-    }
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -346,11 +350,12 @@ class MainActivity : Activity(), DashboardRenderHost {
         decodedRenderPosted.set(false)
         dashboardRenderPending = false
         saveDashboardPrefs()
-        stopUsbAutoConnect()
         autoRefresh = false
+        stopUsbAutoConnect()
         handler.removeCallbacksAndMessages(null)
         usb.unregister()
         usb.close()
+        usbPollThread.quitSafely()
         if (::csvLogger.isInitialized) csvLogger.close()
         stopSimTicker()
         super.onDestroy()
@@ -787,11 +792,11 @@ class MainActivity : Activity(), DashboardRenderHost {
         selectMergeCell(targetCell / page.columns, targetCell % page.columns)
     }
 
-    private fun startUsbAutoConnect() {
+    private fun startUsbAutoConnect(initialDelayMs: Long = 350L) {
         if (dataMode != DataMode.USB) return
         autoRefresh = true
         autoUsbHandler.removeCallbacks(autoUsbRunnable)
-        autoUsbHandler.postDelayed(autoUsbRunnable, 350L)
+        autoUsbHandler.postDelayed(autoUsbRunnable, initialDelayMs)
     }
 
     private fun stopUsbAutoConnect() {
@@ -1129,8 +1134,11 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
         autoRefresh = !autoRefresh
         appendLog("Auto refresh ${if (autoRefresh) "enabled" else "disabled"}")
-        handler.removeCallbacks(pollRunnable)
-        if (autoRefresh) handler.post(pollRunnable)
+        if (autoRefresh) {
+            startUsbAutoConnect(initialDelayMs = 0L)
+        } else {
+            stopUsbAutoConnect()
+        }
         renderDashboard()
     }
 
@@ -1179,10 +1187,21 @@ class MainActivity : Activity(), DashboardRenderHost {
 
 
     private fun onUsbConnectionChanged(isConnected: Boolean) {
-        runOnUiThread {
-            if (connected == isConnected) return@runOnUiThread
-            connected = isConnected
-            renderDashboardNow()
+        val changed = connected != isConnected
+        connected = isConnected
+
+        autoUsbHandler.removeCallbacks(autoUsbRunnable)
+        if (dataMode == DataMode.USB && autoRefresh) {
+            val delayMs = if (isConnected) {
+                0L
+            } else {
+                UsbRecoveryPolicy.FAST_RECONNECT_DELAY_MS
+            }
+            autoUsbHandler.postDelayed(autoUsbRunnable, delayMs)
+        }
+
+        if (changed) {
+            runOnUiThread { renderDashboardNow() }
         }
     }
 

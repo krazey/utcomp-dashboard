@@ -13,6 +13,9 @@
 - Parse only displayed CSV columns when building graph previews.
 - Move dashboard configuration JSON serialization into a focused codec.
 - Remove the redundant min/max null check reported by the Kotlin compiler.
+- Move live USB polling off the Android main looper.
+- Retry transient polling-request write failures before reopening USB.
+- Add fast first reconnects and structured USB close diagnostics.
 
 ## 1.0.0
 

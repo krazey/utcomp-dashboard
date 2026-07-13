@@ -11,6 +11,7 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
+import android.os.SystemClock
 import de.krazey.utcomp.dashboard.protocol.TransmitterPacket
 import de.krazey.utcomp.dashboard.protocol.TransmitterPacketParser
 import de.krazey.utcomp.dashboard.protocol.UsbPacket
@@ -19,6 +20,7 @@ import de.krazey.utcomp.dashboard.utcomp.UtcompDecoder
 import de.krazey.utcomp.dashboard.util.hex
 import java.io.Closeable
 import java.util.Arrays
+import java.util.Locale
 import java.util.concurrent.LinkedBlockingQueue
 import kotlin.concurrent.thread
 
@@ -53,6 +55,11 @@ class UtcompUsbTransport(
     private var connection: UsbDeviceConnection? = null
     private var readThread: Thread? = null
     private var writeThread: Thread? = null
+    @Volatile
+    private var connectedAtMs = 0L
+
+    @Volatile
+    private var lastRxAtMs = 0L
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
@@ -76,7 +83,7 @@ class UtcompUsbTransport(
 
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     logLine("USB detached")
-                    close()
+                    closeWithReason("device detached")
                 }
             }
         }
@@ -158,7 +165,7 @@ class UtcompUsbTransport(
             return
         }
 
-        closeLocked(notify = true)
+        closeLocked(notify = true, reason = "replaced by new connection")
 
         try {
             logLine("Opening USB device: ${describeDevice(dev)}")
@@ -189,6 +196,8 @@ class UtcompUsbTransport(
             connection = conn
             txQueue.clear()
             running = true
+            connectedAtMs = SystemClock.elapsedRealtime()
+            lastRxAtMs = 0L
             val activeSession = ++sessionId
             logLine("USB connected")
             onConnectionChanged(true)
@@ -196,7 +205,7 @@ class UtcompUsbTransport(
             startWriteLoop(conn, writeEp, activeSession)
         } catch (t: Throwable) {
             logLine("USB connect failed: ${t.stackTraceToString()}")
-            closeLocked(notify = true)
+            closeLocked(notify = true, reason = "connect failure")
         }
     }
 
@@ -256,6 +265,7 @@ class UtcompUsbTransport(
         readThread = thread(name = "utcomp-usb-read", isDaemon = true) {
             val buffer = ByteArray(UsbPacket.REPORT_SIZE)
             val transferLength = ep.maxPacketSize.coerceIn(1, UsbPacket.REPORT_SIZE)
+            var stopReason = "read loop stopped unexpectedly"
 
             while (isSessionActive(activeSession)) {
                 try {
@@ -267,6 +277,7 @@ class UtcompUsbTransport(
                     )
                     if (read <= 0) continue
 
+                    lastRxAtMs = SystemClock.elapsedRealtime()
                     if (read < buffer.size) {
                         Arrays.fill(buffer, read, buffer.size, 0.toByte())
                     }
@@ -287,12 +298,15 @@ class UtcompUsbTransport(
                     }
                 } catch (t: Throwable) {
                     if (isSessionActive(activeSession)) {
+                        stopReason = "read exception ${t.javaClass.simpleName}"
                         logLine("USB read failed: ${t.stackTraceToString()}")
                     }
                     break
                 }
             }
-            if (isSessionActive(activeSession)) closeSession(activeSession)
+            if (isSessionActive(activeSession)) {
+                closeSession(activeSession, stopReason)
+            }
             verboseLog { "USB read loop stopped" }
         }
     }
@@ -308,47 +322,130 @@ class UtcompUsbTransport(
                     val packet = txQueue.take()
                     if (!isSessionActive(activeSession)) break
 
-                    val bytes = packet.toReport()
-                    val written = conn.bulkTransfer(
-                        ep,
-                        bytes,
-                        bytes.size,
-                        USB_TRANSFER_TIMEOUT_MS,
+                    val failureReason = writePacketWithRetry(
+                        conn = conn,
+                        ep = ep,
+                        packet = packet,
+                        activeSession = activeSession,
                     )
-                    verboseLog { "USB write[$written]: ${bytes.hex(64)}" }
-                    if (written < 0) {
-                        closeSession(activeSession)
+                    if (failureReason != null) {
+                        if (isSessionActive(activeSession)) {
+                            closeSession(activeSession, failureReason)
+                        }
                         break
                     }
                 } catch (_: InterruptedException) {
-                    break
-                } catch (t: Throwable) {
-                    if (isSessionActive(activeSession)) {
-                        logLine("USB write failed: ${t.stackTraceToString()}")
-                    }
+                    Thread.currentThread().interrupt()
                     break
                 }
             }
-            if (isSessionActive(activeSession)) closeSession(activeSession)
             verboseLog { "USB write loop stopped" }
         }
+    }
+
+    @Throws(InterruptedException::class)
+    private fun writePacketWithRetry(
+        conn: UsbDeviceConnection,
+        ep: UsbEndpoint,
+        packet: UsbPacket,
+        activeSession: Long,
+    ): String? {
+        val bytes = packet.toReport()
+        val attempts = UsbRecoveryPolicy.writeAttempts(packet.cmd)
+        var lastResult: Int? = null
+        var lastError: Throwable? = null
+
+        for (attempt in 1..attempts) {
+            if (!isSessionActive(activeSession)) return "session stopped"
+
+            try {
+                val written = conn.bulkTransfer(
+                    ep,
+                    bytes,
+                    bytes.size,
+                    USB_TRANSFER_TIMEOUT_MS,
+                )
+                verboseLog { "USB write[$written]: ${bytes.hex(64)}" }
+                if (written >= 0) {
+                    if (attempt > 1) {
+                        logLine(
+                            "USB write recovered after ${attempt - 1} retry(s): " +
+                                writeContext(packet),
+                        )
+                    }
+                    return null
+                }
+                lastResult = written
+                lastError = null
+            } catch (e: Exception) {
+                lastResult = null
+                lastError = e
+            }
+
+            if (attempt < attempts) {
+                logLine(
+                    "USB write retry $attempt/${attempts - 1}: " +
+                        failureContext(packet, lastResult, lastError),
+                )
+                Thread.sleep(UsbRecoveryPolicy.writeRetryDelayMs(attempt))
+            }
+        }
+
+        return "write retries exhausted: ${failureContext(packet, lastResult, lastError)}"
+    }
+
+    private fun failureContext(
+        packet: UsbPacket,
+        result: Int?,
+        error: Throwable?,
+    ): String {
+        val outcome = if (error != null) {
+            "error=${error.javaClass.simpleName}:${error.message ?: "no message"}"
+        } else {
+            "result=$result"
+        }
+        return "$outcome ${writeContext(packet)}"
+    }
+
+    private fun writeContext(packet: UsbPacket): String {
+        val nowMs = SystemClock.elapsedRealtime()
+        val connectedForMs = (nowMs - connectedAtMs).coerceAtLeast(0L)
+        val lastRxAgo = if (lastRxAtMs > 0L) {
+            "${(nowMs - lastRxAtMs).coerceAtLeast(0L)}ms"
+        } else {
+            "none"
+        }
+        return String.format(
+            Locale.US,
+            "cmd=0x%02X pid=0x%04X connectedFor=%dms lastRxAgo=%s queue=%d",
+            packet.cmd,
+            packet.pid,
+            connectedForMs,
+            lastRxAgo,
+            txQueue.size,
+        )
     }
 
     private fun isSessionActive(activeSession: Long): Boolean =
         running && sessionId == activeSession
 
     @Synchronized
-    private fun closeSession(activeSession: Long) {
+    private fun closeSession(activeSession: Long, reason: String) {
         if (sessionId != activeSession) return
-        closeLocked(notify = true)
+        closeLocked(notify = true, reason = reason)
     }
 
     @Synchronized
     override fun close() {
-        closeLocked(notify = true)
+        closeLocked(notify = true, reason = "closed by app")
     }
 
-    private fun closeLocked(notify: Boolean) {
+    @Synchronized
+    private fun closeWithReason(reason: String) {
+        closeLocked(notify = true, reason = reason)
+    }
+
+    private fun closeLocked(notify: Boolean, reason: String) {
         val hadConnection = connection != null || running
         running = false
         sessionId++
@@ -367,7 +464,19 @@ class UtcompUsbTransport(
         writeEndpoint = null
 
         if (hadConnection) {
-            logLine("USB closed")
+            val nowMs = SystemClock.elapsedRealtime()
+            val connectedForMs = (nowMs - connectedAtMs).coerceAtLeast(0L)
+            val lastRxAgo = if (lastRxAtMs > 0L) {
+                "${(nowMs - lastRxAtMs).coerceAtLeast(0L)}ms"
+            } else {
+                "none"
+            }
+            logLine(
+                "USB closed: reason=$reason connectedFor=${connectedForMs}ms " +
+                    "lastRxAgo=$lastRxAgo",
+            )
+            connectedAtMs = 0L
+            lastRxAtMs = 0L
             if (notify) onConnectionChanged(false)
         }
     }

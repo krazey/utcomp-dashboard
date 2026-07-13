@@ -21,8 +21,11 @@ Build the debug APK with:
 ## 1.0 architecture notes
 
 The live USB path avoids packet-list boxing and unnecessary debug formatting.
-USB connection state and decoded snapshots are delivered through callbacks
-instead of being inferred from log text. Both dashboard modes retain their view
+USB polling runs on a dedicated looper instead of the UI thread. Transient
+failures while writing idempotent data requests are retried before the session
+is reopened, and recovery logs include the failed PID and last receive age. USB
+connection state and decoded snapshots are delivered through callbacks instead
+of being inferred from log text. Both dashboard modes retain their view
 hierarchies and update only live values, colors, min/max labels, and overlays.
 The CSV writer streams rows through a reusable builder path instead of creating
 large temporary field lists. CSV preview loading runs outside the activity and
