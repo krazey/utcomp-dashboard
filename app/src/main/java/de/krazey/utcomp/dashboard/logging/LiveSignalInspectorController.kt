@@ -37,8 +37,10 @@ class LiveSignalInspectorController(
         const val PREF_ALPHA = "smoothingAlpha"
         const val PREF_FILTER_MODE = "periodicFilterMode"
         const val PREF_FILTER_FREQUENCY = "periodicFilterFrequency"
+        const val PREF_COUNTER_WAVE_STRENGTH = "counterWaveStrength"
         const val PREF_WINDOW_MS = "windowMs"
         const val MIN_SAMPLE_INTERVAL_MS = 45L
+        const val MODEL_LOG_INTERVAL_MS = 10_000L
         val WINDOW_OPTIONS_MS = longArrayOf(10_000L, 30_000L, 60_000L, 120_000L)
         val BORDER_COLOR: Int = Color.rgb(38, 78, 104)
         val PANEL_COLOR: Int = Color.rgb(15, 18, 24)
@@ -60,7 +62,11 @@ class LiveSignalInspectorController(
 
     private var pendingRaw = Float.NaN
     private var pendingTimeMs = 0L
+    private var pendingEngineRpm = 0
     private var lastAcceptedAtMs = 0L
+    private var lastModelLogAtMs = Long.MIN_VALUE
+    private var lastLoggedModelActive = false
+    private var lastLoggedModelMode = PeriodicNoiseFilterMode.OFF
     private var windowMs = normalizeWindow(prefs.getLong(PREF_WINDOW_MS, 30_000L))
     private var dialog: Dialog? = null
     private var graphView: LiveSignalGraphView? = null
@@ -82,6 +88,9 @@ class LiveSignalInspectorController(
                 PeriodicNoiseFilterMode.entries.firstOrNull { it.name == name }
             }
             ?: PeriodicNoiseFilterMode.OFF
+        buffer.setCounterWaveStrength(
+            prefs.getFloat(PREF_COUNTER_WAVE_STRENGTH, 0.75f),
+        )
         buffer.setPeriodicFilter(
             mode = savedMode,
             manualFrequencyHz = prefs.getFloat(PREF_FILTER_FREQUENCY, 0.38f),
@@ -149,11 +158,13 @@ class LiveSignalInspectorController(
             if (lastAcceptedAtMs > 0L && nowMs - lastAcceptedAtMs < MIN_SAMPLE_INTERVAL_MS) {
                 pendingRaw = raw
                 pendingTimeMs = nowMs
+                pendingEngineRpm = snapshot.rpm
                 return
             }
             lastAcceptedAtMs = nowMs
             pendingRaw = raw
             pendingTimeMs = nowMs
+            pendingEngineRpm = snapshot.rpm
         }
         if (samplePosted.compareAndSet(false, true)) {
             mainHandler.post(drainPendingSample)
@@ -173,13 +184,16 @@ class LiveSignalInspectorController(
         if (!active) return@Runnable
         val raw: Float
         val timeMs: Long
+        val engineRpm: Int
         synchronized(sampleLock) {
             raw = pendingRaw
             timeMs = pendingTimeMs
+            engineRpm = pendingEngineRpm
         }
         if (!raw.isFinite()) return@Runnable
-        buffer.add(timeMs, raw)
+        buffer.add(timeMs, raw, engineRpm)
         refreshValues()
+        maybeLogPeriodicModel(timeMs, engineRpm)
     }
 
     private fun buildContent(owner: Dialog): View {
@@ -431,7 +445,7 @@ class LiveSignalInspectorController(
             activity = activity,
             title = group.label,
             subtitle =
-                "Blue is raw. Orange is periodic-filter output followed by the selected alpha.",
+                "Blue is raw. Orange is periodic/notch or counter-wave output followed by EMA.",
             items = LiveSignalCatalog.byGroup(group).map { definition ->
                 DarkActionItem(
                     title = definition.label,
@@ -455,8 +469,10 @@ class LiveSignalInspectorController(
             lastAcceptedAtMs = 0L
             pendingRaw = Float.NaN
             pendingTimeMs = 0L
+            pendingEngineRpm = 0
         }
         buffer.clear()
+        resetModelLogging()
         refreshLabels()
         AppDiagnostics.info("LIVE", "Live signal changed to ${definition.id}")
         appendLog("Live signal inspector: ${definition.label}")
@@ -465,78 +481,108 @@ class LiveSignalInspectorController(
 
     private fun showPeriodicFilterMenu() {
         val estimate = buffer.periodicEstimate
-        val autoDescription = buildString {
-            append("Detect and reject a stable 0.25-0.55 Hz component. ")
-            append("Useful for the measured common analog wave, but it may also reduce ")
-            append("a genuine closed-loop AFR oscillation. Inspector only.")
-            if (estimate.mode == PeriodicNoiseFilterMode.AUTO &&
-                estimate.frequencyHz.isFinite()
-            ) {
-                append(" Current estimate ")
-                append(formatFrequency(estimate.frequencyHz))
-                append(" at ")
-                append(formatPercent(estimate.confidence))
-                append(" confidence.")
-            }
+        val learnedModel = if (estimate.frequencyHz.isFinite()) {
+            " Current model ${formatFrequency(estimate.frequencyHz)}, " +
+                "A=${formatModelValue(estimate.amplitude)}, " +
+                "phase=${formatPhase(estimate.phaseDegrees)}, " +
+                "${formatPercent(estimate.confidence)} confidence."
+        } else {
+            ""
         }
         DarkActionDialog.show(
             activity = activity,
             title = "Periodic noise filter",
             subtitle =
-                "The filter runs before exponential smoothing and never changes dashboard cards.",
+                "Periodic filtering runs before EMA smoothing and remains inspector-only.",
             items = listOf(
                 DarkActionItem(
                     title = "Off",
                     description = "Show only ordinary exponential smoothing.",
-                    accentColor = if (buffer.periodicMode == PeriodicNoiseFilterMode.OFF) {
-                        SMOOTHED_COLOR
-                    } else {
-                        Color.WHITE
-                    },
-                    onClick = {
-                        setPeriodicFilter(PeriodicNoiseFilterMode.OFF)
-                    },
+                    accentColor = modeAccent(PeriodicNoiseFilterMode.OFF),
+                    onClick = { setPeriodicFilter(PeriodicNoiseFilterMode.OFF) },
                 ),
                 DarkActionItem(
-                    title = "Automatic periodic rejection",
-                    description = autoDescription,
-                    accentColor = if (buffer.periodicMode == PeriodicNoiseFilterMode.AUTO) {
-                        SMOOTHED_COLOR
-                    } else {
-                        Color.WHITE
-                    },
-                    onClick = {
-                        setPeriodicFilter(PeriodicNoiseFilterMode.AUTO)
-                    },
-                ),
-                DarkActionItem(
-                    title = "Manual frequency",
+                    title = "Automatic notch",
                     description =
-                        "Apply a fixed notch. Use 0.38 Hz for the supplied AFR/battery captures.",
-                    accentColor = if (buffer.periodicMode == PeriodicNoiseFilterMode.MANUAL) {
-                        SMOOTHED_COLOR
-                    } else {
-                        Color.WHITE
+                        "Detect and reject a stable 0.25-0.55 Hz band. Robust, but it " +
+                            "can also reduce genuine engine oscillation.$learnedModel",
+                    accentColor = modeAccent(PeriodicNoiseFilterMode.AUTO),
+                    onClick = { setPeriodicFilter(PeriodicNoiseFilterMode.AUTO) },
+                ),
+                DarkActionItem(
+                    title = "Manual notch frequency",
+                    description =
+                        "Apply a fixed narrow notch. Use 0.38 Hz for the supplied captures.",
+                    accentColor = modeAccent(PeriodicNoiseFilterMode.MANUAL),
+                    onClick = {
+                        showManualFrequencyMenu(PeriodicNoiseFilterMode.MANUAL)
                     },
-                    onClick = ::showManualFrequencyMenu,
+                ),
+                DarkActionItem(
+                    title = "Adaptive counter-wave",
+                    description =
+                        "Learn frequency, amplitude and phase, then subtract only the " +
+                            "periodic component. Baseline and slow drift are preserved. " +
+                            "Needs several stable windows; running-engine detection is " +
+                            "more conservative.$learnedModel",
+                    accentColor = modeAccent(
+                        PeriodicNoiseFilterMode.COUNTER_WAVE_AUTO,
+                    ),
+                    onClick = {
+                        setPeriodicFilter(PeriodicNoiseFilterMode.COUNTER_WAVE_AUTO)
+                    },
+                ),
+                DarkActionItem(
+                    title = "Fixed-frequency counter-wave",
+                    description =
+                        "Fix the frequency while amplitude and phase continue to learn " +
+                            "from the recent signal.",
+                    accentColor = modeAccent(
+                        PeriodicNoiseFilterMode.COUNTER_WAVE_MANUAL,
+                    ),
+                    onClick = {
+                        showManualFrequencyMenu(
+                            PeriodicNoiseFilterMode.COUNTER_WAVE_MANUAL,
+                        )
+                    },
+                ),
+                DarkActionItem(
+                    title =
+                        "Counter-wave strength ${formatPercent(buffer.counterWaveStrength)}",
+                    description =
+                        "Scale the learned opposite wave. Start at 75%; 100% removes the " +
+                            "full fitted component.",
+                    onClick = ::showCounterWaveStrengthMenu,
                 ),
             ),
         )
     }
 
-    private fun showManualFrequencyMenu() {
+    private fun showManualFrequencyMenu(mode: PeriodicNoiseFilterMode) {
         val options = floatArrayOf(0.30f, 0.35f, 0.38f, 0.40f, 0.45f, 0.50f)
+        val counterWave = mode == PeriodicNoiseFilterMode.COUNTER_WAVE_MANUAL
         DarkActionDialog.show(
             activity = activity,
-            title = "Manual periodic frequency",
-            subtitle =
-                "The observed common AFR/battery wave is approximately 0.36-0.40 Hz.",
+            title = if (counterWave) {
+                "Counter-wave frequency"
+            } else {
+                "Manual notch frequency"
+            },
+            subtitle = if (counterWave) {
+                "Frequency is fixed; amplitude, phase, baseline and drift are fitted live."
+            } else {
+                "The observed common AFR/battery wave is approximately 0.36-0.40 Hz."
+            },
             items = options.map { frequency ->
                 DarkActionItem(
                     title = formatFrequency(frequency),
-                    description = "Reject a narrow band around ${formatFrequency(frequency)}.",
+                    description = if (counterWave) {
+                        "Learn and subtract the ${formatFrequency(frequency)} counter-wave."
+                    } else {
+                        "Reject a narrow band around ${formatFrequency(frequency)}."
+                    },
                     accentColor = if (
-                        buffer.periodicMode == PeriodicNoiseFilterMode.MANUAL &&
+                        buffer.periodicMode == mode &&
                         kotlin.math.abs(buffer.manualFrequencyHz - frequency) < 0.005f
                     ) {
                         SMOOTHED_COLOR
@@ -545,10 +591,41 @@ class LiveSignalInspectorController(
                     },
                     onClick = {
                         setPeriodicFilter(
-                            mode = PeriodicNoiseFilterMode.MANUAL,
+                            mode = mode,
                             manualFrequencyHz = frequency,
                         )
                     },
+                )
+            },
+            closeLabel = "Back",
+        )
+    }
+
+    private fun showCounterWaveStrengthMenu() {
+        val options = floatArrayOf(0.25f, 0.50f, 0.75f, 1.00f)
+        DarkActionDialog.show(
+            activity = activity,
+            title = "Counter-wave strength",
+            subtitle =
+                "This is the gain of the learned opposite wave. It does not change the " +
+                    "signal baseline or EMA alpha.",
+            items = options.map { strength ->
+                DarkActionItem(
+                    title = formatPercent(strength),
+                    description = when (strength) {
+                        0.25f -> "Very conservative subtraction for first comparisons."
+                        0.50f -> "Remove half of the fitted periodic component."
+                        0.75f -> "Recommended starting point for the supplied AFR wave."
+                        else -> "Remove the complete fitted periodic component."
+                    },
+                    accentColor = if (
+                        kotlin.math.abs(buffer.counterWaveStrength - strength) < 0.01f
+                    ) {
+                        SMOOTHED_COLOR
+                    } else {
+                        Color.WHITE
+                    },
+                    onClick = { setCounterWaveStrength(strength) },
                 )
             },
             closeLabel = "Back",
@@ -560,6 +637,7 @@ class LiveSignalInspectorController(
         manualFrequencyHz: Float = buffer.manualFrequencyHz,
     ) {
         buffer.setPeriodicFilter(mode, manualFrequencyHz)
+        resetModelLogging()
         prefs.edit()
             .putString(PREF_FILTER_MODE, mode.name)
             .putFloat(PREF_FILTER_FREQUENCY, buffer.manualFrequencyHz)
@@ -568,16 +646,72 @@ class LiveSignalInspectorController(
         AppDiagnostics.info(
             "LIVE",
             "Periodic filter mode=$mode frequency=${buffer.manualFrequencyHz} " +
-                "signal=${selectedSignal.id}",
+                "strength=${buffer.counterWaveStrength} signal=${selectedSignal.id}",
         )
         appendLog(
             when (mode) {
                 PeriodicNoiseFilterMode.OFF -> "Live periodic filter disabled"
-                PeriodicNoiseFilterMode.AUTO -> "Live periodic filter set to automatic"
+                PeriodicNoiseFilterMode.AUTO -> "Live automatic notch enabled"
                 PeriodicNoiseFilterMode.MANUAL ->
-                    "Live periodic filter set to ${formatFrequency(buffer.manualFrequencyHz)}"
+                    "Live notch set to ${formatFrequency(buffer.manualFrequencyHz)}"
+                PeriodicNoiseFilterMode.COUNTER_WAVE_AUTO ->
+                    "Live adaptive counter-wave enabled"
+                PeriodicNoiseFilterMode.COUNTER_WAVE_MANUAL ->
+                    "Live counter-wave set to ${formatFrequency(buffer.manualFrequencyHz)}"
             },
         )
+    }
+
+    private fun setCounterWaveStrength(strength: Float) {
+        buffer.setCounterWaveStrength(strength)
+        resetModelLogging()
+        prefs.edit()
+            .putFloat(PREF_COUNTER_WAVE_STRENGTH, buffer.counterWaveStrength)
+            .apply()
+        refreshValues()
+        AppDiagnostics.info(
+            "LIVE",
+            "Counter-wave strength=${buffer.counterWaveStrength} " +
+                "signal=${selectedSignal.id}",
+        )
+        appendLog(
+            "Live counter-wave strength ${formatPercent(buffer.counterWaveStrength)}",
+        )
+    }
+
+    private fun modeAccent(mode: PeriodicNoiseFilterMode): Int =
+        if (buffer.periodicMode == mode) SMOOTHED_COLOR else Color.WHITE
+
+    private fun maybeLogPeriodicModel(timeMs: Long, engineRpm: Int) {
+        val mode = buffer.periodicMode
+        if (mode == PeriodicNoiseFilterMode.OFF) return
+        val estimate = buffer.periodicEstimate
+        val stateChanged =
+            mode != lastLoggedModelMode || estimate.active != lastLoggedModelActive
+        val intervalElapsed =
+            lastModelLogAtMs == Long.MIN_VALUE ||
+                timeMs - lastModelLogAtMs >= MODEL_LOG_INTERVAL_MS
+        if (!stateChanged && !intervalElapsed) return
+
+        lastModelLogAtMs = timeMs
+        lastLoggedModelMode = mode
+        lastLoggedModelActive = estimate.active
+        AppDiagnostics.info(
+            "LIVE_MODEL",
+            "signal=${selectedSignal.id} mode=$mode active=${estimate.active} " +
+                "frequencyHz=${estimate.frequencyHz} amplitude=${estimate.amplitude} " +
+                "phaseDeg=${estimate.phaseDegrees} baseline=${estimate.offset} " +
+                "driftPerSecond=${estimate.driftPerSecond} " +
+                "confidence=${estimate.confidence} " +
+                "stable=${estimate.stableWindows}/${estimate.requiredStableWindows} " +
+                "gain=${estimate.subtractionGain} rpm=$engineRpm",
+        )
+    }
+
+    private fun resetModelLogging() {
+        lastModelLogAtMs = Long.MIN_VALUE
+        lastLoggedModelActive = false
+        lastLoggedModelMode = PeriodicNoiseFilterMode.OFF
     }
 
     private fun setSmoothingAlpha(alpha: Float, persist: Boolean) {
@@ -605,10 +739,12 @@ class LiveSignalInspectorController(
 
     private fun resetCapture() {
         buffer.clear()
+        resetModelLogging()
         synchronized(sampleLock) {
             lastAcceptedAtMs = 0L
             pendingRaw = Float.NaN
             pendingTimeMs = 0L
+            pendingEngineRpm = 0
         }
         refreshValues()
         AppDiagnostics.info("LIVE", "Live capture reset signal=${selectedSignal.id}")
@@ -635,6 +771,7 @@ class LiveSignalInspectorController(
     private fun refreshValues() {
         val definition = selectedSignal
         val stats = buffer.stats(windowMs)
+        val estimate = buffer.periodicEstimate
         rawValueText?.text = format(stats.rawCurrent, definition)
         smoothedValueText?.text = format(stats.smoothedCurrent, definition)
         statsText?.text = if (stats.count == 0) {
@@ -649,6 +786,11 @@ class LiveSignalInspectorController(
                 append("   σ  ${formatCompact(stats.outputStdDev, definition)}\n")
                 append("${formatRate(stats.sampleRateHz)}")
                 append("   N=${stats.count}")
+                if (buffer.periodicMode.usesCounterWave && estimate.frequencyHz.isFinite()) {
+                    append("\nCW  ${formatFrequency(estimate.frequencyHz)}")
+                    append("  A=${formatModelValue(estimate.amplitude)}")
+                    append("  φ=${formatPhase(estimate.phaseDegrees)}")
+                }
             }
         }
         filterButton?.text = filterButtonText()
@@ -664,10 +806,20 @@ class LiveSignalInspectorController(
             alpha >= 0.25f -> "medium"
             else -> "strong"
         }
-        val periodic = periodicStatusText()
-        smoothingText?.text =
-            "Output: $periodic → EMA α=${formatAlpha(alpha)} ($label)  •  " +
-                "inspector only"
+        val estimate = buffer.periodicEstimate
+        smoothingText?.text = buildString {
+            append("Output: ${periodicStatusText()} → EMA α=${formatAlpha(alpha)} ($label)")
+            append("  •  inspector only")
+            if (buffer.periodicMode.usesCounterWave && estimate.frequencyHz.isFinite()) {
+                append("\nModel baseline=${formatModelValue(estimate.offset)}")
+                append(" drift=${formatSigned(estimate.driftPerSecond)}/s")
+                append(" confidence=${formatPercent(estimate.confidence)}")
+                append(" gain=${formatPercent(estimate.subtractionGain)}")
+                if (buffer.periodicMode == PeriodicNoiseFilterMode.COUNTER_WAVE_AUTO) {
+                    append(" stable=${estimate.stableWindows}/${estimate.requiredStableWindows}")
+                }
+            }
+        }
     }
 
     private fun filterButtonText(): String {
@@ -676,15 +828,27 @@ class LiveSignalInspectorController(
             PeriodicNoiseFilterMode.OFF -> "FILTER OFF"
             PeriodicNoiseFilterMode.AUTO -> {
                 if (estimate.active && estimate.frequencyHz.isFinite()) {
-                    "AUTO ${String.format(Locale.US, "%.2f", estimate.frequencyHz)}"
+                    "N-AUTO ${String.format(Locale.US, "%.2f", estimate.frequencyHz)}"
                 } else {
-                    "AUTO WAIT"
+                    "N-AUTO WAIT"
                 }
             }
             PeriodicNoiseFilterMode.MANUAL -> {
                 val frequency = estimate.frequencyHz.takeIf { it.isFinite() }
                     ?: buffer.manualFrequencyHz
-                String.format(Locale.US, "%.2f Hz", frequency)
+                String.format(Locale.US, "N %.2f", frequency)
+            }
+            PeriodicNoiseFilterMode.COUNTER_WAVE_AUTO -> {
+                if (estimate.active && estimate.frequencyHz.isFinite()) {
+                    "CW ${String.format(Locale.US, "%.2f", estimate.frequencyHz)}"
+                } else {
+                    "CW LEARN"
+                }
+            }
+            PeriodicNoiseFilterMode.COUNTER_WAVE_MANUAL -> {
+                val frequency = estimate.frequencyHz.takeIf { it.isFinite() }
+                    ?: buffer.manualFrequencyHz
+                String.format(Locale.US, "CW %.2f", frequency)
             }
         }
     }
@@ -706,6 +870,23 @@ class LiveSignalInspectorController(
                     "auto notch learning/bypassed"
                 }
             }
+            PeriodicNoiseFilterMode.COUNTER_WAVE_MANUAL -> {
+                if (estimate.active && estimate.frequencyHz.isFinite()) {
+                    "counter-wave ${formatFrequency(estimate.frequencyHz)} at " +
+                        formatPercent(estimate.subtractionGain)
+                } else {
+                    "counter-wave fitting ${formatFrequency(buffer.manualFrequencyHz)}"
+                }
+            }
+            PeriodicNoiseFilterMode.COUNTER_WAVE_AUTO -> {
+                if (estimate.active && estimate.frequencyHz.isFinite()) {
+                    "adaptive counter-wave ${formatFrequency(estimate.frequencyHz)} at " +
+                        formatPercent(estimate.subtractionGain)
+                } else {
+                    "adaptive counter-wave learning " +
+                        "${estimate.stableWindows}/${estimate.requiredStableWindows}"
+                }
+            }
         }
     }
 
@@ -718,6 +899,15 @@ class LiveSignalInspectorController(
         } else {
             "—"
         }
+
+    private fun formatPhase(value: Float): String =
+        if (value.isFinite()) String.format(Locale.US, "%.0f°", value) else "—°"
+
+    private fun formatModelValue(value: Float): String =
+        if (value.isFinite()) String.format(Locale.US, "%.3f", value) else "—"
+
+    private fun formatSigned(value: Float): String =
+        if (value.isFinite()) String.format(Locale.US, "%+.4f", value) else "—"
 
     private fun format(value: Float, definition: LiveSignalDefinition): String {
         if (!value.isFinite()) return "—"

@@ -40,6 +40,8 @@
 - Sample each inspected value only when its actual UTCOMP source packet updates.
 - Make full protocol tracing opt-in and show only the latest protocol event by default.
 - Add automatic and manual periodic-noise rejection to the live signal inspector.
+- Add adaptive counter-wave subtraction with learned frequency, amplitude, phase, baseline, drift, and configurable gain.
+- Log periodic-model snapshots for engine-off/on diagnostics without enabling raw protocol tracing.
 
 ## 1.0.0
 

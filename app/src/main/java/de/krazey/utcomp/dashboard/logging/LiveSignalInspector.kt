@@ -4,6 +4,7 @@ import de.krazey.utcomp.dashboard.protocol.TransmitterConstants
 import de.krazey.utcomp.dashboard.utcomp.UtcompDataSnapshot
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
@@ -158,6 +159,20 @@ enum class PeriodicNoiseFilterMode {
     OFF,
     AUTO,
     MANUAL,
+    COUNTER_WAVE_AUTO,
+    COUNTER_WAVE_MANUAL;
+
+    val usesCounterWave: Boolean
+        get() = this == COUNTER_WAVE_AUTO || this == COUNTER_WAVE_MANUAL
+
+    val usesNotch: Boolean
+        get() = this == AUTO || this == MANUAL
+
+    val usesAutomaticFrequency: Boolean
+        get() = this == AUTO || this == COUNTER_WAVE_AUTO
+
+    val usesManualFrequency: Boolean
+        get() = this == MANUAL || this == COUNTER_WAVE_MANUAL
 }
 
 data class PeriodicNoiseEstimate(
@@ -165,9 +180,42 @@ data class PeriodicNoiseEstimate(
     val active: Boolean,
     val frequencyHz: Float,
     val amplitude: Float,
+    val phaseDegrees: Float,
+    val offset: Float,
+    val driftPerSecond: Float,
     val confidence: Float,
     val sampleRateHz: Float,
-)
+    val stableWindows: Int,
+    val requiredStableWindows: Int,
+    val subtractionGain: Float,
+    val referenceTimeMs: Long,
+    val sineCoefficient: Float,
+    val cosineCoefficient: Float,
+) {
+    fun componentAt(timeMs: Long): Float {
+        if (!frequencyHz.isFinite() || !sineCoefficient.isFinite() ||
+            !cosineCoefficient.isFinite() || referenceTimeMs == Long.MIN_VALUE
+        ) {
+            return Float.NaN
+        }
+        val timeSeconds = (timeMs - referenceTimeMs) / 1_000.0
+        val angle = 2.0 * PI * frequencyHz * timeSeconds
+        return (
+            sineCoefficient * sin(angle) +
+                cosineCoefficient * cos(angle)
+            ).toFloat()
+    }
+
+    fun phaseRadiansAt(timeMs: Long): Double {
+        if (!frequencyHz.isFinite() || !phaseDegrees.isFinite() ||
+            referenceTimeMs == Long.MIN_VALUE
+        ) {
+            return Double.NaN
+        }
+        return Math.toRadians(phaseDegrees.toDouble()) +
+            2.0 * PI * frequencyHz * (timeMs - referenceTimeMs) / 1_000.0
+    }
+}
 
 data class LiveSignalStats(
     val count: Int,
@@ -195,12 +243,13 @@ data class LiveSignalStats(
 }
 
 /**
- * Bounded live-signal history with optional periodic-noise rejection followed
- * by the same exponential smoothing used by dashboard cards.
+ * Bounded live-signal history with periodic-noise analysis followed by the
+ * same exponential smoothing used by dashboard cards.
  *
- * AUTO searches only the 0.25-0.55 Hz band observed in the supplied captures.
- * It remains disabled until a stable sinusoidal component explains enough of
- * the recent variance. MANUAL always applies the selected notch frequency.
+ * AUTO and MANUAL retain the original narrow notch. COUNTER_WAVE_AUTO and
+ * COUNTER_WAVE_MANUAL fit a sinusoid after removing the baseline and linear
+ * drift, then subtract only the learned periodic component. The baseline and
+ * slow signal movement are never removed.
  */
 class LiveSignalBuffer(
     private val capacity: Int = 2_500,
@@ -218,13 +267,33 @@ class LiveSignalBuffer(
         const val PERIODIC_MAX_HZ = 0.55f
         const val PERIODIC_STEP_HZ = 0.005f
         const val PERIODIC_MIN_CONFIDENCE = 0.18f
+        const val PERIODIC_RUNNING_MIN_CONFIDENCE = 0.32f
         const val PERIODIC_MIN_AMPLITUDE_FRACTION = 0.25f
+        const val COUNTER_WAVE_MANUAL_MIN_CONFIDENCE = 0.08f
+        const val COUNTER_WAVE_MANUAL_MIN_AMPLITUDE_FRACTION = 0.12f
+        const val COUNTER_WAVE_STABLE_WINDOWS = 3
+        const val COUNTER_WAVE_RUNNING_STABLE_WINDOWS = 5
+        const val COUNTER_WAVE_MAX_FREQUENCY_DELTA_HZ = 0.025f
+        const val COUNTER_WAVE_MAX_PHASE_DELTA_DEGREES = 70f
+        const val COUNTER_WAVE_FADE_MS = 2_000L
         const val NOTCH_Q = 3.0
 
         fun smooth(previous: Float, raw: Float, alpha: Float): Float {
             if (!previous.isFinite()) return raw
             val safeAlpha = alpha.coerceIn(0.01f, 1f)
             return previous + (raw - previous) * safeAlpha
+        }
+
+        fun normalizeDegrees(value: Double): Float {
+            var degrees = value % 360.0
+            if (degrees > 180.0) degrees -= 360.0
+            if (degrees <= -180.0) degrees += 360.0
+            return degrees.toFloat()
+        }
+
+        fun angleDistanceDegrees(first: Double, second: Double): Float {
+            if (!first.isFinite() || !second.isFinite()) return Float.POSITIVE_INFINITY
+            return abs(normalizeDegrees(Math.toDegrees(first - second).toDouble()))
         }
     }
 
@@ -235,6 +304,9 @@ class LiveSignalBuffer(
     private var count = 0
 
     private var lastEstimateAtMs = Long.MIN_VALUE
+    private var phaseOriginMs = Long.MIN_VALUE
+    private var lastEngineRpm = 0
+    private var lastCounterCandidate: PeriodicNoiseEstimate? = null
 
     private var b0 = 1.0
     private var b1 = 0.0
@@ -247,6 +319,9 @@ class LiveSignalBuffer(
     private var y2 = 0.0
     private var notchActive = false
 
+    private var counterWaveBlend = 0f
+    private var lastFilterTimeMs = Long.MIN_VALUE
+
     var smoothingAlpha: Float = 1f
         private set
 
@@ -254,6 +329,9 @@ class LiveSignalBuffer(
         private set
 
     var manualFrequencyHz: Float = 0.38f
+        private set
+
+    var counterWaveStrength: Float = 0.75f
         private set
 
     var periodicEstimate: PeriodicNoiseEstimate = inactiveEstimate(PeriodicNoiseFilterMode.OFF)
@@ -266,7 +344,10 @@ class LiveSignalBuffer(
         start = 0
         count = 0
         lastEstimateAtMs = Long.MIN_VALUE
+        phaseOriginMs = Long.MIN_VALUE
+        lastCounterCandidate = null
         resetNotchState()
+        resetCounterWaveState()
         periodicEstimate = inactiveEstimate(periodicMode)
     }
 
@@ -275,18 +356,29 @@ class LiveSignalBuffer(
         recomputeOutput(forceEstimate = false)
     }
 
+    fun setCounterWaveStrength(strength: Float) {
+        counterWaveStrength = strength.coerceIn(0f, 1f)
+        recomputeOutput(forceEstimate = false)
+    }
+
     fun setPeriodicFilter(
         mode: PeriodicNoiseFilterMode,
         manualFrequencyHz: Float = this.manualFrequencyHz,
     ) {
+        val safeFrequency = manualFrequencyHz.coerceIn(0.20f, 0.55f)
+        if (periodicMode != mode || abs(this.manualFrequencyHz - safeFrequency) > 0.0001f) {
+            lastCounterCandidate = null
+        }
         periodicMode = mode
-        this.manualFrequencyHz = manualFrequencyHz.coerceIn(0.20f, 0.55f)
+        this.manualFrequencyHz = safeFrequency
         lastEstimateAtMs = Long.MIN_VALUE
         recomputeOutput(forceEstimate = true)
     }
 
-    fun add(timeMs: Long, rawValue: Float) {
+    fun add(timeMs: Long, rawValue: Float, engineRpm: Int = lastEngineRpm) {
         if (!rawValue.isFinite()) return
+        if (phaseOriginMs == Long.MIN_VALUE) phaseOriginMs = timeMs
+        lastEngineRpm = engineRpm.coerceAtLeast(0)
 
         val insertIndex = if (count < capacity) {
             physicalIndex(count).also { count++ }
@@ -315,18 +407,18 @@ class LiveSignalBuffer(
         } else {
             outputValues[physicalIndex(count - 2)]
         }
-        outputValues[insertIndex] = processOutput(rawValue, previous)
+        outputValues[insertIndex] = processOutput(timeMs, rawValue, previous)
     }
 
     fun timeAt(index: Int): Long = elapsedMs[physicalIndex(index)]
 
     fun rawAt(index: Int): Float = rawValues[physicalIndex(index)]
 
-    /**
-     * Kept as smoothedAt() for the existing graph API. The value is the final
-     * output after optional periodic filtering and exponential smoothing.
-     */
+    /** Final output after optional periodic filtering and EMA smoothing. */
     fun smoothedAt(index: Int): Float = outputValues[physicalIndex(index)]
+
+    /** Learned periodic component before subtraction strength is applied. */
+    fun periodicComponentAt(index: Int): Float = periodicEstimate.componentAt(timeAt(index))
 
     fun firstVisibleIndex(windowMs: Long): Int {
         if (count == 0) return 0
@@ -407,31 +499,67 @@ class LiveSignalBuffer(
         if (count == 0) {
             periodicEstimate = inactiveEstimate(periodicMode)
             resetNotchState()
+            resetCounterWaveState()
             return
         }
 
         if (forceEstimate || periodicMode == PeriodicNoiseFilterMode.OFF) {
             periodicEstimate = estimatePeriodicComponent()
         }
+        periodicEstimate = periodicEstimate.copy(
+            subtractionGain = if (periodicMode.usesCounterWave && periodicEstimate.active) {
+                counterWaveStrength
+            } else {
+                0f
+            },
+        )
         configureNotch(periodicEstimate)
         resetNotchState(keepCoefficients = true)
+        resetCounterWaveState()
         if (notchActive) primeNotch(rawAt(0))
 
         var previous = Float.NaN
         for (index in 0 until count) {
             val raw = rawAt(index)
-            previous = processOutput(raw, previous)
+            previous = processOutput(timeAt(index), raw, previous)
             outputValues[physicalIndex(index)] = previous
         }
     }
 
-    private fun processOutput(raw: Float, previous: Float): Float {
-        val periodicFiltered = if (notchActive) processNotch(raw) else raw
+    private fun processOutput(timeMs: Long, raw: Float, previous: Float): Float {
+        val periodicFiltered = when {
+            notchActive -> processNotch(raw)
+            periodicMode.usesCounterWave && periodicEstimate.active -> {
+                val component = periodicEstimate.componentAt(timeMs)
+                if (component.isFinite()) {
+                    raw - component * updateCounterWaveBlend(timeMs)
+                } else {
+                    raw
+                }
+            }
+            else -> raw
+        }
         return smooth(previous, periodicFiltered, smoothingAlpha)
+    }
+
+    private fun updateCounterWaveBlend(timeMs: Long): Float {
+        val target = periodicEstimate.subtractionGain.coerceIn(0f, 1f)
+        if (lastFilterTimeMs == Long.MIN_VALUE) {
+            lastFilterTimeMs = timeMs
+            counterWaveBlend = 0f
+            return counterWaveBlend
+        }
+        val elapsed = (timeMs - lastFilterTimeMs).coerceAtLeast(0L)
+        lastFilterTimeMs = timeMs
+        val maxStep = elapsed.toFloat() / COUNTER_WAVE_FADE_MS
+        val delta = target - counterWaveBlend
+        counterWaveBlend += delta.coerceIn(-maxStep, maxStep)
+        return counterWaveBlend.coerceIn(0f, 1f)
     }
 
     private fun estimatePeriodicComponent(): PeriodicNoiseEstimate {
         if (periodicMode == PeriodicNoiseFilterMode.OFF) {
+            lastCounterCandidate = null
             return inactiveEstimate(periodicMode)
         }
 
@@ -453,20 +581,29 @@ class LiveSignalBuffer(
                 mode = periodicMode,
                 active = periodicMode == PeriodicNoiseFilterMode.MANUAL &&
                     manualFrequency > 0f,
-                frequencyHz = if (periodicMode == PeriodicNoiseFilterMode.MANUAL) {
+                frequencyHz = if (periodicMode.usesManualFrequency) {
                     manualFrequency
                 } else {
                     Float.NaN
                 },
                 amplitude = Float.NaN,
+                phaseDegrees = Float.NaN,
+                offset = Float.NaN,
+                driftPerSecond = Float.NaN,
                 confidence = Float.NaN,
                 sampleRateHz = sampleRate,
+                stableWindows = 0,
+                requiredStableWindows = requiredStableWindows(),
+                subtractionGain = 0f,
+                referenceTimeMs = Long.MIN_VALUE,
+                sineCoefficient = Float.NaN,
+                cosineCoefficient = Float.NaN,
             )
         }
 
         val lowerFrequency = min(PERIODIC_MIN_HZ, maxUsableFrequency)
         val manualFrequency = manualFrequencyHz.coerceIn(0.20f, maxUsableFrequency)
-        val candidate = if (periodicMode == PeriodicNoiseFilterMode.MANUAL) {
+        val candidate = if (periodicMode.usesManualFrequency) {
             fitFrequency(first, manualFrequency)
         } else {
             var best: FrequencyFit? = null
@@ -482,33 +619,145 @@ class LiveSignalBuffer(
         }
 
         if (candidate == null) {
+            lastCounterCandidate = null
             return inactiveEstimate(periodicMode).copy(sampleRateHz = sampleRate)
         }
 
-        val active = if (periodicMode == PeriodicNoiseFilterMode.MANUAL) {
-            true
-        } else {
-            candidate.confidence >= PERIODIC_MIN_CONFIDENCE &&
-                candidate.amplitude >= candidate.standardDeviation *
-                    PERIODIC_MIN_AMPLITUDE_FRACTION
+        val basicActive = when (periodicMode) {
+            PeriodicNoiseFilterMode.MANUAL -> true
+            PeriodicNoiseFilterMode.AUTO -> meetsAutomaticThreshold(
+                candidate = candidate,
+                conservativeWhenRunning = false,
+            )
+            PeriodicNoiseFilterMode.COUNTER_WAVE_MANUAL ->
+                candidate.confidence >= COUNTER_WAVE_MANUAL_MIN_CONFIDENCE &&
+                    candidate.amplitude >= candidate.standardDeviation *
+                    COUNTER_WAVE_MANUAL_MIN_AMPLITUDE_FRACTION
+            PeriodicNoiseFilterMode.COUNTER_WAVE_AUTO -> meetsAutomaticThreshold(
+                candidate = candidate,
+                conservativeWhenRunning = true,
+            )
+            PeriodicNoiseFilterMode.OFF -> false
         }
 
-        return PeriodicNoiseEstimate(
+        val baseEstimate = candidate.toEstimate(
             mode = periodicMode,
-            active = active,
-            frequencyHz = candidate.frequencyHz,
-            amplitude = candidate.amplitude,
-            confidence = candidate.confidence,
-            sampleRateHz = sampleRate,
+            active = basicActive,
+            sampleRate = sampleRate,
+            stableWindows = if (basicActive) 1 else 0,
+            requiredStableWindows = requiredStableWindows(),
         )
+
+        if (!periodicMode.usesCounterWave) {
+            lastCounterCandidate = null
+            return baseEstimate
+        }
+
+        if (!basicActive) {
+            lastCounterCandidate = null
+            return baseEstimate.copy(active = false, stableWindows = 0)
+        }
+
+        if (periodicMode == PeriodicNoiseFilterMode.COUNTER_WAVE_MANUAL) {
+            lastCounterCandidate = baseEstimate
+            return baseEstimate
+        }
+
+        val previous = lastCounterCandidate
+        val stableWindows = if (previous != null && counterModelsAreStable(previous, baseEstimate)) {
+            previous.stableWindows + 1
+        } else {
+            1
+        }
+        val updated = baseEstimate.copy(
+            active = stableWindows >= baseEstimate.requiredStableWindows,
+            stableWindows = stableWindows,
+        )
+        lastCounterCandidate = updated
+        return updated
+    }
+
+    private fun meetsAutomaticThreshold(
+        candidate: FrequencyFit,
+        conservativeWhenRunning: Boolean,
+    ): Boolean {
+        val minimumConfidence = if (conservativeWhenRunning && lastEngineRpm > 0) {
+            PERIODIC_RUNNING_MIN_CONFIDENCE
+        } else {
+            PERIODIC_MIN_CONFIDENCE
+        }
+        return candidate.confidence >= minimumConfidence &&
+            candidate.amplitude >= candidate.standardDeviation *
+            PERIODIC_MIN_AMPLITUDE_FRACTION
+    }
+
+    private fun requiredStableWindows(): Int = if (lastEngineRpm > 0) {
+        COUNTER_WAVE_RUNNING_STABLE_WINDOWS
+    } else {
+        COUNTER_WAVE_STABLE_WINDOWS
+    }
+
+    private fun counterModelsAreStable(
+        previous: PeriodicNoiseEstimate,
+        current: PeriodicNoiseEstimate,
+    ): Boolean {
+        if (!previous.frequencyHz.isFinite() || !current.frequencyHz.isFinite()) return false
+        if (abs(previous.frequencyHz - current.frequencyHz) >
+            COUNTER_WAVE_MAX_FREQUENCY_DELTA_HZ
+        ) {
+            return false
+        }
+
+        val smallerAmplitude = min(previous.amplitude, current.amplitude)
+        val largerAmplitude = max(previous.amplitude, current.amplitude)
+        if (!smallerAmplitude.isFinite() || smallerAmplitude <= 0f ||
+            largerAmplitude / smallerAmplitude > 2.0f
+        ) {
+            return false
+        }
+
+        val previousPhase = previous.phaseRadiansAt(current.referenceTimeMs)
+        val currentPhase = current.phaseRadiansAt(current.referenceTimeMs)
+        return angleDistanceDegrees(previousPhase, currentPhase) <=
+            COUNTER_WAVE_MAX_PHASE_DELTA_DEGREES
     }
 
     private data class FrequencyFit(
         val frequencyHz: Float,
         val amplitude: Float,
+        val phaseDegrees: Float,
+        val offset: Float,
+        val driftPerSecond: Float,
         val confidence: Float,
         val standardDeviation: Float,
-    )
+        val referenceTimeMs: Long,
+        val sineCoefficient: Float,
+        val cosineCoefficient: Float,
+    ) {
+        fun toEstimate(
+            mode: PeriodicNoiseFilterMode,
+            active: Boolean,
+            sampleRate: Float,
+            stableWindows: Int,
+            requiredStableWindows: Int,
+        ) = PeriodicNoiseEstimate(
+            mode = mode,
+            active = active,
+            frequencyHz = frequencyHz,
+            amplitude = amplitude,
+            phaseDegrees = phaseDegrees,
+            offset = offset,
+            driftPerSecond = driftPerSecond,
+            confidence = confidence,
+            sampleRateHz = sampleRate,
+            stableWindows = stableWindows,
+            requiredStableWindows = requiredStableWindows,
+            subtractionGain = 0f,
+            referenceTimeMs = referenceTimeMs,
+            sineCoefficient = sineCoefficient,
+            cosineCoefficient = cosineCoefficient,
+        )
+    }
 
     private fun fitFrequency(first: Int, frequencyHz: Float): FrequencyFit? {
         val samples = count - first
@@ -537,6 +786,7 @@ class LiveSignalBuffer(
         } else {
             0.0
         }
+        val offsetAtReference = meanValue - slope * meanTime
 
         var ss = 0.0
         var cc = 0.0
@@ -573,14 +823,26 @@ class LiveSignalBuffer(
             fittedPower += fitted * fitted
         }
 
+        val amplitude = sqrt(
+            sineCoefficient * sineCoefficient + cosineCoefficient * cosineCoefficient,
+        )
+        val phaseAtLast = atan2(cosineCoefficient, sineCoefficient)
+        val modelOrigin = phaseOriginMs.takeIf { it != Long.MIN_VALUE } ?: lastTime
+        val phaseAtOrigin = phaseAtLast +
+            angularFrequency * (modelOrigin - lastTime) / 1_000.0
+        val originSineCoefficient = amplitude * cos(phaseAtOrigin)
+        val originCosineCoefficient = amplitude * sin(phaseAtOrigin)
         return FrequencyFit(
             frequencyHz = frequencyHz,
-            amplitude = sqrt(
-                sineCoefficient * sineCoefficient +
-                    cosineCoefficient * cosineCoefficient,
-            ).toFloat(),
+            amplitude = amplitude.toFloat(),
+            phaseDegrees = normalizeDegrees(Math.toDegrees(phaseAtOrigin)),
+            offset = offsetAtReference.toFloat(),
+            driftPerSecond = slope.toFloat(),
             confidence = (fittedPower / residualPower).coerceIn(0.0, 1.0).toFloat(),
             standardDeviation = sqrt(residualPower / samples).toFloat(),
+            referenceTimeMs = modelOrigin,
+            sineCoefficient = originSineCoefficient.toFloat(),
+            cosineCoefficient = originCosineCoefficient.toFloat(),
         )
     }
 
@@ -603,8 +865,8 @@ class LiveSignalBuffer(
         a1 = 0.0
         a2 = 0.0
 
-        if (!estimate.active || !estimate.frequencyHz.isFinite() ||
-            !estimate.sampleRateHz.isFinite()
+        if (!periodicMode.usesNotch || !estimate.active ||
+            !estimate.frequencyHz.isFinite() || !estimate.sampleRateHz.isFinite()
         ) {
             return
         }
@@ -658,6 +920,11 @@ class LiveSignalBuffer(
         }
     }
 
+    private fun resetCounterWaveState() {
+        counterWaveBlend = 0f
+        lastFilterTimeMs = Long.MIN_VALUE
+    }
+
     private fun physicalIndex(logicalIndex: Int): Int = (start + logicalIndex) % capacity
 
     private fun emptyStats() = LiveSignalStats(
@@ -680,8 +947,16 @@ class LiveSignalBuffer(
         active = false,
         frequencyHz = Float.NaN,
         amplitude = Float.NaN,
+        phaseDegrees = Float.NaN,
+        offset = Float.NaN,
+        driftPerSecond = Float.NaN,
         confidence = Float.NaN,
         sampleRateHz = Float.NaN,
+        stableWindows = 0,
+        requiredStableWindows = requiredStableWindows(),
+        subtractionGain = 0f,
+        referenceTimeMs = Long.MIN_VALUE,
+        sineCoefficient = Float.NaN,
+        cosineCoefficient = Float.NaN,
     )
-
 }

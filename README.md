@@ -72,11 +72,18 @@ peak-to-peak noise, standard deviation, average, and sample rate. The smoothing
 slider uses the same alpha formula as dashboard cards, making it possible to
 choose a useful UI smoothing value before changing a page configuration. An
 optional periodic filter can either learn a stable 0.25-0.55 Hz component or use
-a manually selected notch frequency before the EMA stage. It is intentionally an
-inspector-only diagnostic because genuine closed-loop AFR movement can occupy a
-similar frequency range. Signal, filter, alpha, and time-window choices are
-persisted, while sample collection runs only while the full-screen inspector is
-open.
+a manually selected frequency before the EMA stage. The original automatic and
+manual notch modes remain available. Adaptive counter-wave modes additionally
+fit the signal baseline and linear drift, learn the periodic amplitude and
+phase, and subtract only the modeled wave at a configurable gain. Automatic
+counter-wave activation requires several stable analysis windows and becomes
+more conservative while RPM is above zero. The learned frequency, amplitude,
+phase, baseline, drift, confidence, stability count, and applied gain are shown
+in Live Data and periodically recorded in app diagnostics for engine-off/on
+comparisons. Filtering is intentionally inspector-only because genuine
+closed-loop AFR movement can occupy a similar frequency range. Signal, filter,
+alpha, counter-wave gain, and time-window choices are persisted, while sample
+collection runs only while the full-screen inspector is open.
 
 The Kotlin namespace is `de.krazey.utcomp.dashboard`. The Android
 `applicationId` intentionally remains `de.krazey.utcomp.probe` so existing

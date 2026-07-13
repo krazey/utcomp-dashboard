@@ -3,7 +3,9 @@ package de.krazey.utcomp.dashboard.logging
 import de.krazey.utcomp.dashboard.utcomp.UtcompDataSnapshot
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 private fun assertNear(expected: Float, actual: Float, tolerance: Float = 0.0001f) {
     check(abs(expected - actual) <= tolerance) {
@@ -87,6 +89,92 @@ fun main() {
     }
     check(manual.periodicEstimate.active)
     assertNear(0.38f, manual.periodicEstimate.frequencyHz, tolerance = 0.001f)
+
+
+    val counterWave = LiveSignalBuffer(capacity = 600)
+    counterWave.setSmoothingAlpha(1f)
+    counterWave.setCounterWaveStrength(1f)
+    counterWave.setPeriodicFilter(PeriodicNoiseFilterMode.COUNTER_WAVE_AUTO)
+    val counterPhase = 0.72
+    repeat(500) { index ->
+        val timeMs = index * 100L
+        val seconds = timeMs / 1_000.0
+        val baseline = 14.2 + 0.003 * seconds
+        val raw = baseline + 0.28 * sin(2.0 * PI * 0.38 * seconds + counterPhase)
+        counterWave.add(timeMs, raw.toFloat(), engineRpm = 0)
+    }
+    val counterEstimate = counterWave.periodicEstimate
+    check(counterEstimate.active) {
+        "adaptive counter-wave did not activate: $counterEstimate"
+    }
+    check(counterEstimate.stableWindows >= counterEstimate.requiredStableWindows)
+    assertNear(0.38f, counterEstimate.frequencyHz, tolerance = 0.02f)
+    assertNear(0.28f, counterEstimate.amplitude, tolerance = 0.04f)
+    assertNear(1f, counterEstimate.subtractionGain, tolerance = 0.001f)
+    check(counterEstimate.offset.isFinite())
+    check(counterEstimate.driftPerSecond.isFinite())
+    check(counterEstimate.phaseDegrees.isFinite())
+    assertNear(
+        Math.toDegrees(counterPhase).toFloat(),
+        counterEstimate.phaseDegrees,
+        tolerance = 15f,
+    )
+
+    var rawErrorSquared = 0.0
+    var outputErrorSquared = 0.0
+    var errorSamples = 0
+    for (index in 350 until counterWave.size) {
+        val seconds = counterWave.timeAt(index) / 1_000.0
+        val baseline = 14.2 + 0.003 * seconds
+        val rawError = counterWave.rawAt(index) - baseline
+        val outputError = counterWave.smoothedAt(index) - baseline
+        rawErrorSquared += rawError * rawError
+        outputErrorSquared += outputError * outputError
+        errorSamples++
+    }
+    val rawRmse = sqrt(rawErrorSquared / errorSamples)
+    val outputRmse = sqrt(outputErrorSquared / errorSamples)
+    check(outputRmse < rawRmse * 0.30) {
+        "counter-wave did not cancel the learned sine: raw=$rawRmse output=$outputRmse " +
+            "estimate=$counterEstimate"
+    }
+
+    counterWave.setCounterWaveStrength(0.5f)
+    val halfStrengthStats = counterWave.stats(windowMs = 15_000L)
+    check(halfStrengthStats.outputStdDev < halfStrengthStats.rawStdDev)
+    check(halfStrengthStats.outputStdDev > outputRmse.toFloat())
+    assertNear(0.5f, counterWave.periodicEstimate.subtractionGain, tolerance = 0.001f)
+
+    val fixedCounterWave = LiveSignalBuffer(capacity = 300)
+    fixedCounterWave.setSmoothingAlpha(1f)
+    fixedCounterWave.setCounterWaveStrength(1f)
+    fixedCounterWave.setPeriodicFilter(
+        PeriodicNoiseFilterMode.COUNTER_WAVE_MANUAL,
+        0.38f,
+    )
+    repeat(300) { index ->
+        val seconds = index / 10.0
+        val raw = 12.5 + 0.20 * cos(2.0 * PI * 0.38 * seconds)
+        fixedCounterWave.add(index * 100L, raw.toFloat(), engineRpm = 900)
+    }
+    check(fixedCounterWave.periodicEstimate.active)
+    assertNear(0.38f, fixedCounterWave.periodicEstimate.frequencyHz, tolerance = 0.001f)
+    check(fixedCounterWave.periodicEstimate.amplitude > 0.17f)
+
+    val runningCounterWave = LiveSignalBuffer(capacity = 600)
+    runningCounterWave.setSmoothingAlpha(1f)
+    runningCounterWave.setCounterWaveStrength(1f)
+    runningCounterWave.setPeriodicFilter(PeriodicNoiseFilterMode.COUNTER_WAVE_AUTO)
+    repeat(500) { index ->
+        val seconds = index / 10.0
+        runningCounterWave.add(
+            index * 100L,
+            (14.7 + 0.30 * sin(2.0 * PI * 0.38 * seconds)).toFloat(),
+            engineRpm = 850,
+        )
+    }
+    check(runningCounterWave.periodicEstimate.requiredStableWindows == 5)
+    check(runningCounterWave.periodicEstimate.active)
 
     println("LiveSignalInspectorTest: OK")
 }
