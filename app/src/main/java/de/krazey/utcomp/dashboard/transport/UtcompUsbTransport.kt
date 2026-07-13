@@ -28,7 +28,7 @@ class UtcompUsbTransport(
     private val context: Context,
     private val log: (String) -> Unit,
     private val onConnectionChanged: (Boolean) -> Unit = {},
-    private val onDecodedSnapshot: (UtcompDataSnapshot) -> Unit = {},
+    private val onDecodedSnapshot: (UtcompDataSnapshot, Int) -> Unit = { _, _ -> },
 ) : Closeable {
     companion object {
         const val TAG = "UTCOMPDashboard"
@@ -294,7 +294,7 @@ class UtcompUsbTransport(
                         null
                     }
                     if (UtcompDecoder.apply(txp, debugLog)) {
-                        onDecodedSnapshot(UtcompDecoder.snapshot)
+                        onDecodedSnapshot(UtcompDecoder.snapshot, txp.pid)
                     }
                 } catch (t: Throwable) {
                     if (isSessionActive(activeSession)) {

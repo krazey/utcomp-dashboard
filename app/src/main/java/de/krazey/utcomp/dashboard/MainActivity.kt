@@ -21,6 +21,7 @@ import de.krazey.utcomp.dashboard.dashboard.DashboardBoxConfig
 import de.krazey.utcomp.dashboard.logging.AppDiagnostics
 import de.krazey.utcomp.dashboard.logging.AppDiagnosticsController
 import de.krazey.utcomp.dashboard.logging.CsvLogController
+import de.krazey.utcomp.dashboard.logging.LiveSignalInspectorController
 import de.krazey.utcomp.dashboard.logging.UtcompCsvLogger
 import android.app.Activity
 import android.content.Intent
@@ -120,6 +121,7 @@ class MainActivity : Activity(), DashboardRenderHost {
     private lateinit var csvLogger: UtcompCsvLogger
     private lateinit var csvLogController: CsvLogController
     private lateinit var appDiagnosticsController: AppDiagnosticsController
+    private lateinit var liveSignalInspectorController: LiveSignalInspectorController
     private lateinit var dashboardEditorController: DashboardEditorController
     private lateinit var dashboardPageEditorController: DashboardPageEditorController
     private lateinit var ralliartHeaderEditorController: RalliartHeaderEditorController
@@ -324,6 +326,11 @@ class MainActivity : Activity(), DashboardRenderHost {
         dataMode = DataMode.USB
         simTestMode = SimTestMode.OFF
         appDiagnosticsController = AppDiagnosticsController(this)
+        liveSignalInspectorController = LiveSignalInspectorController(
+            activity = this,
+            snapshotProvider = { UtcompDecoder.snapshot },
+            appendLog = ::appendLog,
+        )
         csvLogger = UtcompCsvLogger(
             context = this,
             uiLog = ::appendLog,
@@ -364,6 +371,7 @@ class MainActivity : Activity(), DashboardRenderHost {
             toggleAutomaticPolling = ::toggleAutoRefresh,
             requestLiveSnapshot = { requestLiveData(logEach = true) },
             refreshDeviceInformation = { requestDeviceInformation(logEach = true) },
+            showLiveSignalInspector = { liveSignalInspectorController.show() },
             showAppDiagnostics = { appDiagnosticsController.showMenu() },
             clearProtocolLog = { logText.text = "" },
         )
@@ -477,6 +485,7 @@ class MainActivity : Activity(), DashboardRenderHost {
         usb.close()
         usbPollThread.quitSafely()
         if (::csvLogger.isInitialized) csvLogger.close()
+        if (::liveSignalInspectorController.isInitialized) liveSignalInspectorController.close()
         stopSimTicker()
         super.onDestroy()
     }
@@ -1404,7 +1413,10 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
     }
 
-    private fun onDecodedSnapshot(snapshot: UtcompDataSnapshot) {
+    private fun onDecodedSnapshot(snapshot: UtcompDataSnapshot, sourcePid: Int) {
+        if (::liveSignalInspectorController.isInitialized) {
+            liveSignalInspectorController.offerSnapshot(snapshot, sourcePid)
+        }
         if (::csvLogger.isInitialized) {
             csvLogger.offer(snapshot, source = "usb")
         }
@@ -1703,6 +1715,9 @@ class MainActivity : Activity(), DashboardRenderHost {
             null
         }
         val renderSnapshot = simRenderSnapshot ?: s
+        if (simRenderSnapshot != null && ::liveSignalInspectorController.isInitialized) {
+            liveSignalInspectorController.offerSnapshot(renderSnapshot)
+        }
 
         statusText.text = buildString {
             if (uiMode == UiMode.DEBUG) {

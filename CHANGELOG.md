@@ -35,6 +35,9 @@
 - Make large CSV graphs vertically and horizontally scrollable without compressing extra rows.
 - Thin graph strokes on high-density displays and remove redundant cursor header text.
 - Remove deprecated direct status/navigation bar color assignments from the CSV viewer.
+- Add a full-screen single-value live signal inspector with raw and smoothed traces.
+- Report rolling noise statistics and use the dashboard smoothing algorithm interactively.
+- Sample each inspected value only when its actual UTCOMP source packet updates.
 
 ## 1.0.0
 

@@ -3,7 +3,7 @@
 UTCOMP Dashboard is an Android 13+ dashboard and data logger for the UTCOMP
 USB device. It provides configurable simple and Ralliart-style pages, alarm
 thresholds, simulation, min/max tracking, high-resolution CSV logging, and an
-interactive CSV graph viewer.
+interactive CSV graph viewer, and a full-screen live signal inspector.
 
 ## Requirements
 
@@ -63,6 +63,14 @@ recorded to a bounded private log with one rotated history file. The Diagnostics
 menu can view, export, or clear lifecycle, USB recovery, CSV, UI-stall,
 slow-render, memory-pressure, and uncaught-exception events without requiring an
 app-focused logcat capture.
+
+The Live Data action graphs one decoded value at its real packet update cadence.
+Raw and exponentially smoothed traces are shown together with rolling min/max,
+peak-to-peak noise, standard deviation, average, and sample rate. The smoothing
+slider uses the same alpha formula as dashboard cards, making it possible to
+choose a useful UI smoothing value before changing a page configuration. Signal,
+alpha, and time-window choices are persisted, while sample collection runs only
+while the full-screen inspector is open.
 
 The Kotlin namespace is `de.krazey.utcomp.dashboard`. The Android
 `applicationId` intentionally remains `de.krazey.utcomp.probe` so existing

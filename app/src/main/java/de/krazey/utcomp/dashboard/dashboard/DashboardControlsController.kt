@@ -31,6 +31,7 @@ internal class DashboardControlsController(
     private val toggleAutomaticPolling: () -> Unit,
     private val requestLiveSnapshot: () -> Unit,
     private val refreshDeviceInformation: () -> Unit,
+    private val showLiveSignalInspector: () -> Unit,
     private val showAppDiagnostics: () -> Unit,
     private val clearProtocolLog: () -> Unit,
 ) {
@@ -56,6 +57,7 @@ internal class DashboardControlsController(
         ))
         controls.addView(row(
             actionButton("Data log", showDataLog),
+            actionButton("Live data", showLiveSignalInspector),
             actionButton("Diagnostics", ::showDiagnosticsMenu),
         ))
 
