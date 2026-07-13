@@ -1,5 +1,7 @@
 package de.krazey.utcomp.dashboard.dashboard
 
+import de.krazey.utcomp.dashboard.dashboard.render.fitDesignCanvas
+
 private fun box(
     sensor: DashboardSensor,
     row: Int,
@@ -15,6 +17,21 @@ private fun box(
 )
 
 fun main() {
+    val nativeCanvas = fitDesignCanvas(1024, 600, 1024, 600)
+    check(nativeCanvas.scale == 1f)
+    check(nativeCanvas.offsetX == 0f)
+    check(nativeCanvas.offsetY == 0f)
+
+    val phoneLandscapeCanvas = fitDesignCanvas(2220, 1080, 1024, 600)
+    check(kotlin.math.abs(phoneLandscapeCanvas.scale - 1.8f) < 0.0001f)
+    check(kotlin.math.abs(phoneLandscapeCanvas.offsetX - 188.4f) < 0.1f)
+    check(phoneLandscapeCanvas.offsetY == 0f)
+
+    val narrowCanvas = fitDesignCanvas(800, 600, 1024, 600)
+    check(kotlin.math.abs(narrowCanvas.scale - 0.78125f) < 0.0001f)
+    check(narrowCanvas.offsetX == 0f)
+    check(kotlin.math.abs(narrowCanvas.offsetY - 65.625f) < 0.1f)
+
     val overlapping = DashboardPageConfig(
         id = "overlap",
         title = "Overlap",

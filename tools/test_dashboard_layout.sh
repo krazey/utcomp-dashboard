@@ -8,6 +8,7 @@ trap 'rm -rf "$build_dir"' EXIT
 kotlinc \
   "$repo_root/app/src/main/java/de/krazey/utcomp/dashboard/utcomp/UtcompDataSnapshot.kt" \
   "$repo_root/app/src/main/java/de/krazey/utcomp/dashboard/dashboard/DashboardConfig.kt" \
+  "$repo_root/app/src/main/java/de/krazey/utcomp/dashboard/dashboard/render/DesignCanvasFit.kt" \
   "$repo_root/tools/tests/DashboardLayoutTest.kt" \
   -include-runtime \
   -d "$build_dir/dashboard-layout-tests.jar"

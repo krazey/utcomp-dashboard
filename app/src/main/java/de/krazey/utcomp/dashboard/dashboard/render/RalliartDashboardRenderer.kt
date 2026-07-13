@@ -4,6 +4,7 @@ import android.app.Activity
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -29,6 +30,56 @@ internal class RalliartDashboardRenderer(
             super.performClick()
             return true
         }
+    }
+
+    private class DesignCanvasHost(
+        activity: Activity,
+        private val designWidth: Int,
+        private val designHeight: Int,
+    ) : FrameLayout(activity) {
+        init {
+            setBackgroundColor(Color.BLACK)
+            clipToPadding = false
+            clipChildren = false
+        }
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val width = measuredSize(widthMeasureSpec, designWidth)
+            val height = measuredSize(heightMeasureSpec, designHeight)
+            setMeasuredDimension(width, height)
+
+            val childWidth = MeasureSpec.makeMeasureSpec(designWidth, MeasureSpec.EXACTLY)
+            val childHeight = MeasureSpec.makeMeasureSpec(designHeight, MeasureSpec.EXACTLY)
+            for (index in 0 until childCount) {
+                getChildAt(index).measure(childWidth, childHeight)
+            }
+        }
+
+        override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+            val fit = fitDesignCanvas(
+                containerWidth = right - left,
+                containerHeight = bottom - top,
+                designWidth = designWidth,
+                designHeight = designHeight,
+            )
+            for (index in 0 until childCount) {
+                getChildAt(index).apply {
+                    layout(0, 0, designWidth, designHeight)
+                    pivotX = 0f
+                    pivotY = 0f
+                    scaleX = fit.scale
+                    scaleY = fit.scale
+                    translationX = fit.offsetX
+                    translationY = fit.offsetY
+                }
+            }
+        }
+
+        private fun measuredSize(measureSpec: Int, fallback: Int): Int =
+            when (MeasureSpec.getMode(measureSpec)) {
+                MeasureSpec.UNSPECIFIED -> fallback
+                else -> MeasureSpec.getSize(measureSpec)
+            }
     }
 
     private data class SensorSlot(
@@ -288,7 +339,10 @@ internal class RalliartDashboardRenderer(
         dashboardRoot.removeAllViews()
         dashboardRoot.addView(
             binding.root,
-            LinearLayout.LayoutParams(CANVAS_WIDTH, CANVAS_HEIGHT),
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT,
+            ),
         )
     }
 
@@ -299,50 +353,56 @@ internal class RalliartDashboardRenderer(
         oilPressureSlot: SensorSlot,
         oilTempSlot: SensorSlot,
     ): Binding {
-        val root = FrameLayout(activity).apply {
+        val canvas = FrameLayout(activity).apply {
             setBackgroundResource(R.drawable.ralliart_dashboard_static)
             clipToPadding = false
             clipChildren = false
         }
+        val root = DesignCanvasHost(activity, CANVAS_WIDTH, CANVAS_HEIGHT).apply {
+            addView(canvas, FrameLayout.LayoutParams(CANVAS_WIDTH, CANVAS_HEIGHT))
+        }
 
         val oilPressureAlarmFill = createAlarmFill().also {
-            root.addView(it, layoutParams(OIL_PRESSURE_HIT_BOX))
+            canvas.addView(it, layoutParams(OIL_PRESSURE_HIT_BOX))
         }
         val oilTempAlarmFill = createAlarmFill().also {
-            root.addView(it, layoutParams(OIL_TEMP_HIT_BOX))
+            canvas.addView(it, layoutParams(OIL_TEMP_HIT_BOX))
         }
         val headerText = TextView(activity).apply {
-            textSize = 16f * key.config.ralliartHeaderTextScale.coerceIn(0.5f, 2.0f)
+            setTextSize(
+                TypedValue.COMPLEX_UNIT_PX,
+                16f * key.config.ralliartHeaderTextScale.coerceIn(0.5f, 2.0f),
+            )
             includeFontPadding = false
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.END or Gravity.CENTER_VERTICAL
             isSingleLine = true
             setTextColor(Color.rgb(236, 238, 244))
-        }.also { root.addView(it, layoutParams(HEADER_STATUS_BOX)) }
+        }.also { canvas.addView(it, layoutParams(HEADER_STATUS_BOX)) }
 
 
         val boostValueText = createValueText(70f).also {
-            root.addView(it, layoutParams(BOOST_VALUE_BOX))
+            canvas.addView(it, layoutParams(BOOST_VALUE_BOX))
         }
         val boostNeedle = RalliartBoostNeedleView(activity).apply {
             minValue = -1.0f
             maxValue = 2.0f
             warningValue = 2.0f
             showDebugGuides = false
-        }.also { root.addView(it, layoutParams(BOOST_NEEDLE_BOX)) }
+        }.also { canvas.addView(it, layoutParams(BOOST_NEEDLE_BOX)) }
         // BOOST min/max is part of the fixed Ralliart gauge. Keep it
         // available even when an older simple-page config stored showMinMax=false.
         val boostMinMax = createStackedMinMax(
-            root,
+            canvas,
             boostSlot,
             BOOST_MIN_MAX_BOX,
             enabled = true,
         )
 
         val afrValueText = createValueText(66f).also {
-            root.addView(it, layoutParams(AFR_VALUE_BOX))
+            canvas.addView(it, layoutParams(AFR_VALUE_BOX))
         }
-        root.addView(
+        canvas.addView(
             RalliartAfrDebugBarView(activity).apply {
                 minValue = 10.0f
                 maxValue = 20.0f
@@ -372,22 +432,22 @@ internal class RalliartDashboardRenderer(
             afrMarker,
             FrameLayout.LayoutParams(8, FrameLayout.LayoutParams.MATCH_PARENT),
         )
-        root.addView(afrOverlay, layoutParams(AFR_LIVE_BAR_BOX))
+        canvas.addView(afrOverlay, layoutParams(AFR_LIVE_BAR_BOX))
 
         val oilPressureValueText = createValueText(58f).also {
-            root.addView(it, layoutParams(OIL_PRESSURE_VALUE_BOX))
+            canvas.addView(it, layoutParams(OIL_PRESSURE_VALUE_BOX))
         }
         val oilPressureMinMax = createSplitMinMax(
-            root,
+            canvas,
             oilPressureSlot,
             OIL_PRESSURE_MIN_BOX,
             OIL_PRESSURE_MAX_BOX,
         )
         val oilTempValueText = createValueText(58f).also {
-            root.addView(it, layoutParams(OIL_TEMP_VALUE_BOX))
+            canvas.addView(it, layoutParams(OIL_TEMP_VALUE_BOX))
         }
         val oilTempMinMax = createSplitMinMax(
-            root,
+            canvas,
             oilTempSlot,
             OIL_TEMP_MIN_BOX,
             OIL_TEMP_MAX_BOX,
@@ -397,16 +457,16 @@ internal class RalliartDashboardRenderer(
         // consume touch dispatch even when they are not clickable, which made the
         // boost min/max tap target unreliable after the renderer extraction.
         addHitZone(
-            root,
+            canvas,
             BOOST_HIT_BOX,
             boostSlot,
             "Ralliart • Boost",
             minMaxKey = boostSlot.sensor.name,
         )
-        addHitZone(root, AFR_HIT_BOX, afrSlot, "Ralliart • AFR")
-        addHitZone(root, OIL_PRESSURE_HIT_BOX, oilPressureSlot, "Ralliart • Oil pressure")
-        addHitZone(root, OIL_TEMP_HIT_BOX, oilTempSlot, "Ralliart • Oil temp")
-        addHeaderHitZone(root)
+        addHitZone(canvas, AFR_HIT_BOX, afrSlot, "Ralliart • AFR")
+        addHitZone(canvas, OIL_PRESSURE_HIT_BOX, oilPressureSlot, "Ralliart • Oil pressure")
+        addHitZone(canvas, OIL_TEMP_HIT_BOX, oilTempSlot, "Ralliart • Oil temp")
+        addHeaderHitZone(canvas)
 
         val created = Binding(
             key = key,
@@ -438,8 +498,8 @@ internal class RalliartDashboardRenderer(
             clipToPadding = false
             clipChildren = false
             gravity = Gravity.NO_GRAVITY
-            minimumWidth = CANVAS_WIDTH
-            minimumHeight = CANVAS_HEIGHT
+            minimumWidth = 0
+            minimumHeight = 0
         }
         var parentView: android.view.ViewParent? = dashboardRoot.parent
         repeat(6) {
@@ -477,7 +537,7 @@ internal class RalliartDashboardRenderer(
 
     private fun createValueText(size: Float): TextView =
         TextView(activity).apply {
-            textSize = size
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, size)
             includeFontPadding = false
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
@@ -553,7 +613,7 @@ internal class RalliartDashboardRenderer(
 
     private fun createMinMaxText(size: Float, color: Int): TextView =
         TextView(activity).apply {
-            textSize = size
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, size)
             setTextColor(color)
             gravity = Gravity.CENTER
             textAlignment = View.TEXT_ALIGNMENT_CENTER

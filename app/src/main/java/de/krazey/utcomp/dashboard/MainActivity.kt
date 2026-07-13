@@ -70,6 +70,24 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
     }
 
+    private class MaxHeightScrollView(context: Context) : ScrollView(context) {
+        var maxHeightFraction: Float = 1f
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val displayCap =
+                (resources.displayMetrics.heightPixels * maxHeightFraction.coerceIn(0.1f, 1f))
+                    .toInt()
+            val availableHeight = when (MeasureSpec.getMode(heightMeasureSpec)) {
+                MeasureSpec.UNSPECIFIED -> displayCap
+                else -> minOf(MeasureSpec.getSize(heightMeasureSpec), displayCap)
+            }
+            super.onMeasure(
+                widthMeasureSpec,
+                MeasureSpec.makeMeasureSpec(availableHeight, MeasureSpec.AT_MOST),
+            )
+        }
+    }
+
     private companion object {
         private const val USB_FAST_POLL_MS = 50L
         private const val USB_SLOW_POLL_MS = 1000L
@@ -102,7 +120,7 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     private lateinit var usb: UtcompUsbTransport
     private lateinit var statusText: TextView
-    private lateinit var controlsPanel: LinearLayout
+    private lateinit var controlsPanel: MaxHeightScrollView
     private lateinit var dashboardRoot: LinearLayout
     private lateinit var logTitleText: TextView
     private lateinit var logText: TextView
@@ -373,14 +391,14 @@ class MainActivity : Activity(), DashboardRenderHost {
     private fun buildUi() {
         val root = ClickableLinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(12, 12, 12, 12)
+            setPadding(dp(12f), dp(12f), dp(12f), dp(12f))
             setBackgroundColor(Color.rgb(10, 12, 16))
         }
 
         val topBar = ClickableLinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(2, 0, 2, 4)
+            setPadding(dp(2f), 0, dp(2f), dp(4f))
         }
 
         topBar.addView(TextView(this).apply {
@@ -391,7 +409,7 @@ class MainActivity : Activity(), DashboardRenderHost {
             setTextColor(Color.rgb(165, 174, 190))
             this@MainActivity.topBarHintText = this
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-            setMargins(0, 0, 8, 0)
+            setMargins(0, 0, dp(8f), 0)
         })
 
         topBar.addView(Button(this).apply {
@@ -399,11 +417,15 @@ class MainActivity : Activity(), DashboardRenderHost {
             textSize = 12f
             isAllCaps = false
             setTextColor(Color.WHITE)
-            background = roundedBg(Color.rgb(16, 20, 30), 18f)
+            background = roundedBg(
+                Color.rgb(16, 20, 30),
+                dp(18f).toFloat(),
+                strokeWidth = dp(2f),
+            )
             setOnClickListener { cycleSimTestMode() }
             this@MainActivity.simModeButton = this
-        }, LinearLayout.LayoutParams(86, 48).apply {
-            setMargins(0, 0, 6, 0)
+        }, LinearLayout.LayoutParams(dp(86f), dp(48f)).apply {
+            setMargins(0, 0, dp(6f), 0)
         })
 
         topBar.addView(Button(this).apply {
@@ -411,11 +433,15 @@ class MainActivity : Activity(), DashboardRenderHost {
             textSize = 12f
             isAllCaps = false
             setTextColor(Color.WHITE)
-            background = roundedBg(Color.rgb(16, 20, 30), 18f)
+            background = roundedBg(
+                Color.rgb(16, 20, 30),
+                dp(18f).toFloat(),
+                strokeWidth = dp(2f),
+            )
             setOnClickListener { toggleEditMode() }
             this@MainActivity.editModeButton = this
-        }, LinearLayout.LayoutParams(86, 48).apply {
-            setMargins(0, 0, 6, 0)
+        }, LinearLayout.LayoutParams(dp(86f), dp(48f)).apply {
+            setMargins(0, 0, dp(6f), 0)
         })
 
         topBar.addView(Button(this).apply {
@@ -425,9 +451,13 @@ class MainActivity : Activity(), DashboardRenderHost {
             setOnClickListener { toggleControls() }
             this@MainActivity.gearButton = this
             setOnLongClickListener { toggleEditMode(); true }
-            background = roundedBg(Color.rgb(16, 20, 30), 18f)
+            background = roundedBg(
+                Color.rgb(16, 20, 30),
+                dp(18f).toFloat(),
+                strokeWidth = dp(2f),
+            )
             setTextColor(Color.WHITE)
-        }, LinearLayout.LayoutParams(86, 48))
+        }, LinearLayout.LayoutParams(dp(86f), dp(48f)))
 
         root.addView(topBar, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
@@ -440,7 +470,7 @@ class MainActivity : Activity(), DashboardRenderHost {
             textSize = 12f
             setTextColor(Color.rgb(190, 198, 210))
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, 0, 0, 6)
+            setPadding(0, 0, 0, dp(6f))
             visibility = View.GONE
         }
         root.addView(statusText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -478,12 +508,32 @@ class MainActivity : Activity(), DashboardRenderHost {
         row5.addView(button("Data log") { csvLogController.showMenu() })
         controls.addView(row5)
 
-        controlsPanel = controls.apply {
+        controlsPanel = MaxHeightScrollView(this).apply {
             visibility = View.GONE
-            background = roundedBg(MENU_PANEL_COLOR, 18f, MENU_BORDER_COLOR, 2)
-            setPadding(8, 8, 8, 8)
+            isFillViewport = true
+            maxHeightFraction = 0.68f
+            background = roundedBg(
+                MENU_PANEL_COLOR,
+                dp(18f).toFloat(),
+                MENU_BORDER_COLOR,
+                dp(2f),
+            )
+            setPadding(dp(8f), dp(8f), dp(8f), dp(8f))
+            addView(
+                controls,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
         }
-        root.addView(controlsPanel, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        root.addView(
+            controlsPanel,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ),
+        )
 
         val dashScroll = DashboardSwipeScrollView(this).apply {
             isFillViewport = true
@@ -502,7 +552,7 @@ class MainActivity : Activity(), DashboardRenderHost {
             }
             dashboardRoot = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(0, 10, 0, 10)
+                setPadding(0, dp(10f), 0, dp(10f))
             }
             addView(dashboardRoot, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
@@ -549,34 +599,31 @@ class MainActivity : Activity(), DashboardRenderHost {
     }
 
     private fun button(label: String, onClick: () -> Unit): Button = Button(this).apply {
-        val density = resources.displayMetrics.density
         text = label
         textSize = 16f
         isAllCaps = false
-        minimumHeight = (64f * density).toInt()
+        minimumHeight = dp(64f)
         setTextColor(Color.WHITE)
         background = roundedBg(
             color = Color.BLACK,
-            radius = 14f,
+            radius = dp(14f).toFloat(),
             strokeColor = MENU_BORDER_COLOR,
-            strokeWidth = (2f * density).toInt().coerceAtLeast(2),
+            strokeWidth = dp(2f),
         )
-        setPadding(
-            (10f * density).toInt(),
-            (8f * density).toInt(),
-            (10f * density).toInt(),
-            (8f * density).toInt(),
-        )
+        setPadding(dp(10f), dp(8f), dp(10f), dp(8f))
         setOnClickListener { onClick() }
         layoutParams = LinearLayout.LayoutParams(
             0,
             LinearLayout.LayoutParams.WRAP_CONTENT,
             1f,
         ).apply {
-            val margin = (3f * density).toInt()
+            val margin = dp(3f)
             setMargins(margin, margin, margin, margin)
         }
     }
+
+    private fun dp(value: Float): Int =
+        (value * resources.displayMetrics.density + 0.5f).toInt()
 
     private val dashboardPrefs: SharedPreferences
         get() = getSharedPreferences("utcomp_dashboard", MODE_PRIVATE)
@@ -883,7 +930,8 @@ class MainActivity : Activity(), DashboardRenderHost {
                     SimTestMode.WARNING -> Color.rgb(255, 170, 48)
                     SimTestMode.CRITICAL -> Color.rgb(255, 72, 72)
                 },
-                18f,
+                dp(18f).toFloat(),
+                strokeWidth = dp(2f),
             )
         }
     }

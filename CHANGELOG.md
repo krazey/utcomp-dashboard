@@ -20,6 +20,8 @@
 - Increase the main controls-menu button size and touch targets.
 - Restyle controls-menu actions as larger black buttons with blue borders.
 - Add editable Ralliart top-bar text sizing and field visibility.
+- Scale the top chrome and Ralliart canvas consistently across display densities.
+- Keep the controls panel usable on short high-density landscape displays.
 
 ## 1.0.0
 

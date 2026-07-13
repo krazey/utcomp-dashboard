@@ -40,7 +40,11 @@ merge/split, editable border colors, and independent min/max sizing. Ralliart
 rendering keeps its fixed instrument layout but uses the same per-sensor style
 configuration, including split lower-corner oil min/max values. Its top status
 bar has independent text scaling and visibility controls for outside/inside
-temperature, battery voltage, and time.
+temperature, battery voltage, and time. The fixed 1024×600 Ralliart design is
+rendered in a density-independent design space and then uniformly fitted to the
+available dashboard viewport, while the Android chrome continues to use dp/sp.
+This keeps the radio layout unchanged and scales correctly on higher-resolution
+phone displays.
 
 The Kotlin namespace is `de.krazey.utcomp.dashboard`. The Android
 `applicationId` intentionally remains `de.krazey.utcomp.probe` so existing
