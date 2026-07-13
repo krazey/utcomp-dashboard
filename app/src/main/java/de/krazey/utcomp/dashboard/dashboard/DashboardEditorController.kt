@@ -1,16 +1,18 @@
 package de.krazey.utcomp.dashboard.dashboard
 
+import android.app.Activity
 import android.app.AlertDialog
-import android.content.Context
 import android.graphics.Color
 import android.text.InputType
 import android.widget.EditText
 import de.krazey.utcomp.dashboard.util.fixed
+import de.krazey.utcomp.dashboard.view.DarkActionDialog
+import de.krazey.utcomp.dashboard.view.DarkActionItem
 import de.krazey.utcomp.dashboard.utcomp.pretty
 import java.util.Locale
 
 internal class DashboardEditorController(
-    private val context: Context,
+    private val context: Activity,
     private val currentPageConfig: () -> DashboardPageConfig,
     private val updateCurrentPage: ((DashboardPageConfig) -> DashboardPageConfig) -> Unit,
     private val updateBoxConfig: (
@@ -362,39 +364,43 @@ internal class DashboardEditorController(
             DashboardSmoothingMode.STRONG,
             DashboardSmoothingMode.CUSTOM,
         )
-        val labels = modes.map { mode ->
-            val selected = box.smoothingMode == mode
-            val detail = when (mode) {
-                DashboardSmoothingMode.OFF -> "no smoothing"
-                DashboardSmoothingMode.CUSTOM ->
-                    String.format(Locale.US, "%.2f s", box.smoothingTimeSeconds)
-                else -> String.format(Locale.US, "%.2f s", mode.presetTimeSeconds)
-            }
-            "${mode.label} · $detail${if (selected) " ✓" else ""}"
-        }.toTypedArray()
-
-        AlertDialog.Builder(context)
-            .setTitle("Smoothing")
-            .setMessage(
-                "Time-based smoothing behaves consistently across fast pressure/AFR " +
-                    "signals and slower temperature packets.",
-            )
-            .setItems(labels) { _, which ->
-                val mode = modes[which]
-                if (mode == DashboardSmoothingMode.CUSTOM) {
-                    showCustomSmoothingEditor(boxIndex, box)
-                } else {
-                    onSmoothingChanged(boxIndex, box)
-                    updateBoxConfig(boxIndex) {
-                        it.copy(
-                            smoothingMode = mode,
-                            smoothingTimeSeconds = mode.presetTimeSeconds,
-                        )
+        DarkActionDialog.show(
+            activity = context,
+            title = "Smoothing",
+            subtitle =
+                "Time-based smoothing is applied after periodic-noise correction. " +
+                    "The setting belongs only to this dashboard box.",
+            items = modes.map { mode ->
+                val selected = box.smoothingMode == mode
+                val detail = when (mode) {
+                    DashboardSmoothingMode.OFF -> "No smoothing"
+                    DashboardSmoothingMode.CUSTOM ->
+                        String.format(Locale.US, "%.2f-second time constant", box.smoothingTimeSeconds)
+                    else -> String.format(
+                        Locale.US,
+                        "%.2f-second time constant",
+                        mode.presetTimeSeconds,
+                    )
+                }
+                DarkActionItem(
+                    title = "${mode.label}${if (selected) "  ✓" else ""}",
+                    description = detail,
+                    accentColor = if (selected) Color.rgb(123, 204, 255) else Color.WHITE,
+                ) {
+                    if (mode == DashboardSmoothingMode.CUSTOM) {
+                        showCustomSmoothingEditor(boxIndex, box)
+                    } else {
+                        onSmoothingChanged(boxIndex, box)
+                        updateBoxConfig(boxIndex) {
+                            it.copy(
+                                smoothingMode = mode,
+                                smoothingTimeSeconds = mode.presetTimeSeconds,
+                            )
+                        }
                     }
                 }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
+            },
+        )
     }
 
     private fun showCustomSmoothingEditor(boxIndex: Int, box: DashboardBoxConfig) {
@@ -428,38 +434,64 @@ internal class DashboardEditorController(
     private fun showPeriodicNoisePicker(boxIndex: Int, box: DashboardBoxConfig) {
         val signalId = box.sensor.calibrationSignalId
         val available = signalId != null && isPeriodicNoiseCalibrationAvailable(box.sensor)
-        val labels = arrayOf(
-            "Off${if (box.periodicNoiseFilter == DashboardPeriodicNoiseFilter.OFF) " ✓" else ""}",
-            "Calibrated${if (box.periodicNoiseFilter == DashboardPeriodicNoiseFilter.CALIBRATED) " ✓" else ""}",
-        )
-        AlertDialog.Builder(context)
-            .setTitle("Periodic noise filter")
-            .setMessage(
-                if (available) {
-                    "Use the saved engine-off calibration for this box before ordinary smoothing."
-                } else {
-                    "No usable engine-off calibration exists for ${box.sensor.label}. " +
-                        "Create one from Live Data first."
+        val selected = box.periodicNoiseFilter
+        DarkActionDialog.show(
+            activity = context,
+            title = "Periodic noise filter",
+            subtitle = if (available) {
+                "A saved engine-off calibration is available for ${box.sensor.label}. " +
+                    "Correction is applied before ordinary smoothing."
+            } else {
+                "The saved calibration does not contain a usable model for " +
+                    "${box.sensor.label}."
+            },
+            items = listOf(
+                DarkActionItem(
+                    title = "Off${if (selected == DashboardPeriodicNoiseFilter.OFF) "  ✓" else ""}",
+                    description = "Show the decoded raw value before ordinary smoothing.",
+                    accentColor = if (selected == DashboardPeriodicNoiseFilter.OFF) {
+                        Color.rgb(123, 204, 255)
+                    } else {
+                        Color.WHITE
+                    },
+                ) {
+                    updateBoxConfig(boxIndex) {
+                        it.copy(periodicNoiseFilter = DashboardPeriodicNoiseFilter.OFF)
+                    }
                 },
-            )
-            .setItems(labels) { _, which ->
-                if (which == 1 && !available) {
-                    showPeriodicNoiseCalibration()
-                    return@setItems
-                }
-                updateBoxConfig(boxIndex) {
-                    it.copy(
-                        periodicNoiseFilter = if (which == 0) {
-                            DashboardPeriodicNoiseFilter.OFF
-                        } else {
-                            DashboardPeriodicNoiseFilter.CALIBRATED
-                        },
-                    )
-                }
-            }
-            .setNeutralButton("Open Live Data") { _, _ -> showPeriodicNoiseCalibration() }
-            .setNegativeButton("Cancel", null)
-            .show()
+                DarkActionItem(
+                    title = "Calibrated${if (selected == DashboardPeriodicNoiseFilter.CALIBRATED) "  ✓" else ""}",
+                    description = if (available) {
+                        "Use this signal's saved engine-off amplitude and phase model."
+                    } else {
+                        "Unavailable for this signal; open Live Data to inspect or recalibrate."
+                    },
+                    accentColor = if (selected == DashboardPeriodicNoiseFilter.CALIBRATED) {
+                        Color.rgb(123, 204, 255)
+                    } else if (available) {
+                        Color.WHITE
+                    } else {
+                        Color.rgb(150, 158, 172)
+                    },
+                ) {
+                    if (available) {
+                        updateBoxConfig(boxIndex) {
+                            it.copy(
+                                periodicNoiseFilter = DashboardPeriodicNoiseFilter.CALIBRATED,
+                            )
+                        }
+                    } else {
+                        showPeriodicNoiseCalibration()
+                    }
+                },
+                DarkActionItem(
+                    title = "Open Live Data / calibration",
+                    description = "Inspect the learned profile, test correction, or learn again.",
+                    accentColor = Color.rgb(150, 210, 245),
+                    onClick = showPeriodicNoiseCalibration,
+                ),
+            ),
+        )
     }
 
     private fun showScalePicker(
