@@ -17,6 +17,8 @@ import de.krazey.utcomp.dashboard.dashboard.DashboardPageConfig
 import de.krazey.utcomp.dashboard.dashboard.DashboardSensor
 import de.krazey.utcomp.dashboard.util.fixed
 import de.krazey.utcomp.dashboard.view.CsvLogGraphMarker
+import de.krazey.utcomp.dashboard.view.DarkActionDialog
+import de.krazey.utcomp.dashboard.view.DarkActionItem
 import de.krazey.utcomp.dashboard.view.CsvLogGraphPoint
 import de.krazey.utcomp.dashboard.view.CsvLogGraphView
 import java.io.BufferedReader
@@ -40,53 +42,68 @@ internal class CsvLogController(
 
     fun showMenu() {
         val savedFolder = savedTreeUri()
-        val items = mutableListOf<String>()
-        val actions = mutableListOf<() -> Unit>()
+        val items = mutableListOf<DarkActionItem>()
 
-        items += logger.statusText()
-        actions += { appendLog(logger.statusText()) }
-
-        items += "View latest CSV: internal"
-        actions += {
-            viewLatestCsvLog("internal", File(activity.filesDir, "utcomp-logs"))
-        }
-
-        items += "View latest CSV: app external"
-        actions += {
-            val externalRoot = activity.getExternalFilesDir("utcomp-logs")
-                ?: activity.filesDir
-            viewLatestCsvLog("app external", File(externalRoot, "csv"))
-        }
-
-        items += "Pick CSV log to view"
-        actions += { pickCsvLogToView() }
+        items += DarkActionItem(
+            title = "View latest internal log",
+            description = "Open the newest CSV stored in the app's private storage.",
+            onClick = {
+                viewLatestCsvLog("internal", File(activity.filesDir, "utcomp-logs"))
+            },
+        )
+        items += DarkActionItem(
+            title = "View latest external log",
+            description = "Open the newest CSV stored in the app-specific external folder.",
+            onClick = {
+                val externalRoot = activity.getExternalFilesDir("utcomp-logs")
+                    ?: activity.filesDir
+                viewLatestCsvLog("app external", File(externalRoot, "csv"))
+            },
+        )
+        items += DarkActionItem(
+            title = "Choose CSV file",
+            description = "Open any compatible CSV log with the graph viewer.",
+            onClick = ::pickCsvLogToView,
+        )
 
         if (logger.isRunning) {
-            items += "Stop CSV logging"
-            actions += { logger.stop() }
+            items += DarkActionItem(
+                title = "Stop CSV logging",
+                description = "Finish and close the active high-resolution log.",
+                accentColor = Color.rgb(255, 150, 150),
+                onClick = logger::stop,
+            )
         } else {
-            items += "Start CSV logging: internal app storage"
-            actions += { startCsvLoggingInternal() }
-
-            items += "Start CSV logging: app external storage"
-            actions += { startCsvLoggingAppExternal() }
-
+            items += DarkActionItem(
+                title = "Start logging: internal storage",
+                description = "Write to protected app storage.",
+                onClick = ::startCsvLoggingInternal,
+            )
+            items += DarkActionItem(
+                title = "Start logging: app external storage",
+                description = "Write to the app-specific external storage folder.",
+                onClick = ::startCsvLoggingAppExternal,
+            )
             if (savedFolder != null) {
-                items += "Start CSV logging: saved SD/folder"
-                actions += { startCsvLoggingTree(savedFolder) }
+                items += DarkActionItem(
+                    title = "Start logging: saved folder",
+                    description = "Use the previously selected SD card or document folder.",
+                    onClick = { startCsvLoggingTree(savedFolder) },
+                )
             }
-
-            items += "Pick SD card/folder and start CSV logging"
-            actions += { pickCsvLoggingFolder() }
+            items += DarkActionItem(
+                title = "Choose folder and start logging",
+                description = "Select an SD card or document folder and remember it.",
+                onClick = ::pickCsvLoggingFolder,
+            )
         }
 
-        AlertDialog.Builder(activity)
-            .setTitle("High-resolution data logging")
-            .setItems(items.toTypedArray()) { _, which ->
-                actions.getOrNull(which)?.invoke()
-            }
-            .setNegativeButton("Close", null)
-            .show()
+        DarkActionDialog.show(
+            activity = activity,
+            title = "High-resolution data logging",
+            subtitle = logger.statusText(),
+            items = items,
+        )
     }
 
     fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {

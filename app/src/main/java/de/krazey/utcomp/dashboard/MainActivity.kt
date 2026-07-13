@@ -9,6 +9,8 @@ import android.text.style.RelativeSizeSpan
 import android.text.Spanned
 import android.text.SpannableString
 import de.krazey.utcomp.dashboard.dashboard.DashboardConfigJson
+import de.krazey.utcomp.dashboard.dashboard.DashboardControlsController
+import de.krazey.utcomp.dashboard.dashboard.DashboardDiagnosticsState
 import de.krazey.utcomp.dashboard.dashboard.DashboardEditorController
 import de.krazey.utcomp.dashboard.dashboard.DashboardPageEditorController
 import de.krazey.utcomp.dashboard.dashboard.RalliartHeaderEditorController
@@ -70,23 +72,6 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
     }
 
-    private class MaxHeightScrollView(context: Context) : ScrollView(context) {
-        var maxHeightFraction: Float = 1f
-
-        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            val displayCap =
-                (resources.displayMetrics.heightPixels * maxHeightFraction.coerceIn(0.1f, 1f))
-                    .toInt()
-            val availableHeight = when (MeasureSpec.getMode(heightMeasureSpec)) {
-                MeasureSpec.UNSPECIFIED -> displayCap
-                else -> minOf(MeasureSpec.getSize(heightMeasureSpec), displayCap)
-            }
-            super.onMeasure(
-                widthMeasureSpec,
-                MeasureSpec.makeMeasureSpec(availableHeight, MeasureSpec.AT_MOST),
-            )
-        }
-    }
 
     private companion object {
         private const val USB_FAST_POLL_MS = 50L
@@ -97,7 +82,6 @@ class MainActivity : Activity(), DashboardRenderHost {
         private const val DASHBOARD_DOUBLE_TAP_MS = 320L
         private const val DASHBOARD_SWIPE_CLICK_SUPPRESS_MS = 280L
         private val MENU_BORDER_COLOR = Color.rgb(38, 78, 104)
-        private val MENU_PANEL_COLOR = Color.rgb(15, 18, 24)
 
         const val TAG = "UTCOMPDashboard"
     }
@@ -120,7 +104,8 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     private lateinit var usb: UtcompUsbTransport
     private lateinit var statusText: TextView
-    private lateinit var controlsPanel: MaxHeightScrollView
+    private lateinit var controlsPanel: View
+    private lateinit var dashboardControlsController: DashboardControlsController
     private lateinit var dashboardRoot: LinearLayout
     private lateinit var logTitleText: TextView
     private lateinit var logText: TextView
@@ -282,6 +267,31 @@ class MainActivity : Activity(), DashboardRenderHost {
             },
             currentPageConfig = ::currentPageConfig,
             dashboardPages = { dashboardPages },
+        )
+        dashboardControlsController = DashboardControlsController(
+            activity = this,
+            connectUsb = {
+                setUsbDataMode()
+                usb.requestPermissionAndConnect()
+            },
+            cycleStyle = ::cycleUiMode,
+            managePages = ::showSimplePageManager,
+            resetMinMax = ::resetAllMinMax,
+            toggleMinMax = ::toggleMinMaxMode,
+            toggleSubtitles = ::toggleSourceSubtitles,
+            showDataLog = { csvLogController.showMenu() },
+            diagnosticsState = {
+                DashboardDiagnosticsState(
+                    usbConnected = connected,
+                    automaticPolling = autoRefresh,
+                    firmware = UtcompDecoder.snapshot.firmware,
+                    simulationMode = simModeDescription(),
+                )
+            },
+            toggleAutomaticPolling = ::toggleAutoRefresh,
+            requestLiveSnapshot = { requestLiveData(logEach = true) },
+            refreshDeviceInformation = { requestDeviceInformation(logEach = true) },
+            clearProtocolLog = { logText.text = "" },
         )
         dashboardEditorController = DashboardEditorController(
             context = this,
@@ -475,58 +485,7 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
         root.addView(statusText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
-        val controls = ClickableLinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-
-        val row1 = ClickableLinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row1.addView(button("USB connect") {
-            setUsbDataMode()
-            usb.requestPermissionAndConnect()
-        })
-        row1.addView(button(simModeButtonText()) { cycleSimTestMode() })
-        row1.addView(button("Auto") { toggleAutoRefresh() })
-        controls.addView(row1)
-
-        val row2 = ClickableLinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row2.addView(button("Style") { cycleUiMode() })
-        row2.addView(button("Pages / Grid") { showSimplePageManager() })
-        row2.addView(button("REQ live") { requestLiveData(logEach = true) })
-        controls.addView(row2)
-
-        val row3 = ClickableLinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row3.addView(button("REQ settings") { requestSettingsData() })
-        row3.addView(button("Firmware") { requestUsb(TransmitterConstants.UtcompPid.FIRMWARE, true) })
-        row3.addView(button("Clear log") { logText.text = "" })
-        controls.addView(row3)
-
-        val row4 = ClickableLinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row4.addView(button("Reset min/max") { resetAllMinMax() })
-        row4.addView(button("Min/max") { toggleMinMaxMode() })
-        row4.addView(button("Toggle subtitles") { toggleSourceSubtitles() })
-        controls.addView(row4)
-
-        val row5 = ClickableLinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row5.addView(button("Data log") { csvLogController.showMenu() })
-        controls.addView(row5)
-
-        controlsPanel = MaxHeightScrollView(this).apply {
-            visibility = View.GONE
-            isFillViewport = true
-            maxHeightFraction = 0.68f
-            background = roundedBg(
-                MENU_PANEL_COLOR,
-                dp(18f).toFloat(),
-                MENU_BORDER_COLOR,
-                dp(2f),
-            )
-            setPadding(dp(8f), dp(8f), dp(8f), dp(8f))
-            addView(
-                controls,
-                ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ),
-            )
-        }
+        controlsPanel = dashboardControlsController.createPanel()
         root.addView(
             controlsPanel,
             LinearLayout.LayoutParams(
@@ -598,29 +557,6 @@ class MainActivity : Activity(), DashboardRenderHost {
         window.decorView.post { enableImmersiveDriverMode() }
     }
 
-    private fun button(label: String, onClick: () -> Unit): Button = Button(this).apply {
-        text = label
-        textSize = 16f
-        isAllCaps = false
-        minimumHeight = dp(64f)
-        setTextColor(Color.WHITE)
-        background = roundedBg(
-            color = Color.BLACK,
-            radius = dp(14f).toFloat(),
-            strokeColor = MENU_BORDER_COLOR,
-            strokeWidth = dp(2f),
-        )
-        setPadding(dp(10f), dp(8f), dp(10f), dp(8f))
-        setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(
-            0,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            1f,
-        ).apply {
-            val margin = dp(3f)
-            setMargins(margin, margin, margin, margin)
-        }
-    }
 
     private fun dp(value: Float): Int =
         (value * resources.displayMetrics.density + 0.5f).toInt()
@@ -944,13 +880,6 @@ class MainActivity : Activity(), DashboardRenderHost {
             SimTestMode.CRITICAL -> "‼ CRIT"
         }
 
-    private fun simModeButtonText(): String =
-        when (simTestMode) {
-            SimTestMode.OFF -> "SIM"
-            SimTestMode.NORMAL -> "SIM"
-            SimTestMode.WARNING -> "WARN"
-            SimTestMode.CRITICAL -> "CRIT"
-        }
 
     private fun simModeDescription(): String =
         when (simTestMode) {
@@ -1317,6 +1246,10 @@ class MainActivity : Activity(), DashboardRenderHost {
             autoUsbHandler.postDelayed(autoUsbRunnable, delayMs)
         }
 
+        if (changed && isConnected && dataMode == DataMode.USB) {
+            autoUsbHandler.post { requestDeviceInformation(logEach = false) }
+        }
+
         if (changed) {
             runOnUiThread { renderDashboardNow() }
         }
@@ -1342,17 +1275,22 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
     }
 
-    private fun requestSettingsData() {
+    private fun requestSettingsData(logEach: Boolean) {
         listOf(
             TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
             TransmitterConstants.UtcompPid.GPIO_SETTINGS,
             TransmitterConstants.UtcompPid.ANALOG_OSC_SETTINGS1,
             TransmitterConstants.UtcompPid.ANALOG_OSC_SETTINGS2,
             TransmitterConstants.UtcompPid.GENERAL_SETTINGS1,
-        ).forEach { requestUsb(it, true) }
+        ).forEach { requestUsb(it, logEach) }
     }
 
-private fun requestUsb(pid: Int, logEach: Boolean) {
+    private fun requestDeviceInformation(logEach: Boolean) {
+        requestSettingsData(logEach)
+        requestUsb(TransmitterConstants.UtcompPid.FIRMWARE, logEach)
+    }
+
+    private fun requestUsb(pid: Int, logEach: Boolean) {
         if (dataMode != DataMode.USB) {
             appendLog("Ignoring USB request in SIM mode")
             return
@@ -1816,6 +1754,8 @@ private fun requestUsb(pid: Int, logEach: Boolean) {
             appendLine("rpm=${s.rpm} speed=${s.vssSpeed1s}")
             appendLine("fuelPb=${s.fuelLeftPb} fuelLpg=${s.fuelLeftLpg}")
             appendLine("tripDist=${s.tripDist} tripCost=${s.tripCost}")
+            appendLine()
+            appendLine("MENU → Diagnostics: polling and manual protocol requests")
         }
         if (textView.text.toString() != text) textView.text = text
     }

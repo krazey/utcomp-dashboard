@@ -44,7 +44,14 @@ temperature, battery voltage, and time. The fixed 1024×600 Ralliart design is
 rendered in a density-independent design space and then uniformly fitted to the
 available dashboard viewport, while the Android chrome continues to use dp/sp.
 This keeps the radio layout unchanged and scales correctly on higher-resolution
-phone displays.
+phone displays. Simple cards can display the physical UTCOMP input or channel
+name as a page-specific subtitle. Firmware and input mappings are refreshed
+automatically after USB connects.
+
+The normal controls panel contains only driver-facing dashboard actions. Manual
+protocol requests and the automatic polling switch are grouped in a descriptive
+Diagnostics menu, while simulation remains available from the top bar. CSV log
+actions use the same dark, large-touch-target menu design.
 
 The Kotlin namespace is `de.krazey.utcomp.dashboard`. The Android
 `applicationId` intentionally remains `de.krazey.utcomp.probe` so existing

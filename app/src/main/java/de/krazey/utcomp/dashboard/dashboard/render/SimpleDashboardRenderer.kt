@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.text.TextUtils
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
@@ -44,10 +45,12 @@ internal class SimpleDashboardRenderer(
         val background: GradientDrawable,
         val valueText: TextView,
         val unitText: TextView?,
+        val subtitleText: TextView,
         val maxText: TextView?,
         val minText: TextView?,
         val minMaxKey: String?,
         var renderedValue: String = "",
+        var renderedSubtitle: String = "",
         var renderedMax: String = "",
         var renderedMin: String = "",
     )
@@ -409,6 +412,25 @@ internal class SimpleDashboardRenderer(
                 1f,
             ),
         )
+        val subtitleTextView = TextView(activity).apply {
+            textSize = (9.5f * safeValueScale).coerceIn(7.5f, 18f)
+            setTextColor(box.unitColor)
+            gravity = Gravity.CENTER
+            textAlignment = View.TEXT_ALIGNMENT_CENTER
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
+            includeFontPadding = false
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            visibility = View.GONE
+            setPadding(8, 0, 8, 4)
+        }
+        card.addView(
+            subtitleTextView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ),
+        )
         host.attachBoxActions(
             view = card,
             boxIndex = boxIndex,
@@ -423,6 +445,7 @@ internal class SimpleDashboardRenderer(
             background = background,
             valueText = valueTextView,
             unitText = unitTextView,
+            subtitleText = subtitleTextView,
             maxText = maxStatView,
             minText = minStatView,
             minMaxKey = minMaxKey,
@@ -559,6 +582,13 @@ internal class SimpleDashboardRenderer(
             binding.renderedValue = formattedValue
         }
 
+        val subtitle = host.sourceSubtitleFor(sensor)
+        if (binding.renderedSubtitle != subtitle) {
+            binding.subtitleText.text = subtitle
+            binding.subtitleText.visibility = if (subtitle.isBlank()) View.GONE else View.VISIBLE
+            binding.renderedSubtitle = subtitle
+        }
+
         val alarmLevel = host.alarmLevelFor(box, rawValue, snapshot)
         val valueColor = host.boxValueColor(box, alarmLevel)
         binding.background.setColor(host.boxBackgroundColor(box, alarmLevel))
@@ -574,6 +604,9 @@ internal class SimpleDashboardRenderer(
             if (unitText.currentTextColor != effectiveUnitColor) {
                 unitText.setTextColor(effectiveUnitColor)
             }
+        }
+        if (binding.subtitleText.currentTextColor != box.unitColor) {
+            binding.subtitleText.setTextColor(box.unitColor)
         }
         val mergeState = host.mergeVisualStateForBox(binding.boxIndex)
         when (mergeState) {

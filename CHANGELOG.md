@@ -22,6 +22,10 @@
 - Add editable Ralliart top-bar text sizing and field visibility.
 - Scale the top chrome and Ralliart canvas consistently across display densities.
 - Keep the controls panel usable on short high-density landscape displays.
+- Restore dynamic source subtitles on simple dashboard cards.
+- Move protocol-only actions into a descriptive diagnostics menu.
+- Refresh firmware and input mappings automatically after USB connects.
+- Restyle the CSV logging menu with the dark dashboard action design.
 
 ## 1.0.0
 
