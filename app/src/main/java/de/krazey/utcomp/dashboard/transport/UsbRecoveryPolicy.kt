@@ -21,4 +21,7 @@ internal object UsbRecoveryPolicy {
 
     fun writeRetryDelayMs(failedAttempt: Int): Long =
         WRITE_RETRY_DELAY_MS * failedAttempt.coerceAtLeast(1)
+
+    fun isCompleteWrite(result: Int, expectedBytes: Int): Boolean =
+        result == expectedBytes
 }

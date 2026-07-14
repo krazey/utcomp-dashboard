@@ -366,7 +366,7 @@ class UtcompUsbTransport(
                     USB_TRANSFER_TIMEOUT_MS,
                 )
                 verboseLog { "USB write[$written]: ${bytes.hex(64)}" }
-                if (written >= 0) {
+                if (UsbRecoveryPolicy.isCompleteWrite(written, bytes.size)) {
                     if (attempt > 1) {
                         logLine(
                             "USB write recovered after ${attempt - 1} retry(s): " +

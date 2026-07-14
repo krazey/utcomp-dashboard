@@ -20,5 +20,10 @@ fun main() {
     check(UsbRecoveryPolicy.writeRetryDelayMs(2) == 40L)
     check(UsbRecoveryPolicy.writeRetryDelayMs(0) == 20L)
 
+    check(!UsbRecoveryPolicy.isCompleteWrite(-1, 64))
+    check(!UsbRecoveryPolicy.isCompleteWrite(0, 64))
+    check(!UsbRecoveryPolicy.isCompleteWrite(63, 64))
+    check(UsbRecoveryPolicy.isCompleteWrite(64, 64))
+
     println("USB recovery policy tests passed")
 }
