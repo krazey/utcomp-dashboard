@@ -49,6 +49,10 @@ internal class SimpleDashboardRenderer(
         val maxText: TextView?,
         val minText: TextView?,
         val minMaxKey: String?,
+        var renderedBackgroundColor: Int,
+        var renderedStrokeWidth: Int,
+        var renderedStrokeColor: Int,
+        var renderedAlphaBits: Int,
         var renderedValue: String = "",
         var renderedSubtitle: String = "",
         var renderedMax: String = "",
@@ -449,6 +453,10 @@ internal class SimpleDashboardRenderer(
             maxText = maxStatView,
             minText = minStatView,
             minMaxKey = minMaxKey,
+            renderedBackgroundColor = box.backgroundColor,
+            renderedStrokeWidth = 2,
+            renderedStrokeColor = box.borderColor,
+            renderedAlphaBits = 1f.toBits(),
         )
     }
 
@@ -591,7 +599,11 @@ internal class SimpleDashboardRenderer(
 
         val alarmLevel = host.alarmLevelFor(box, rawValue, snapshot)
         val valueColor = host.boxValueColor(box, alarmLevel)
-        binding.background.setColor(host.boxBackgroundColor(box, alarmLevel))
+        val backgroundColor = host.boxBackgroundColor(box, alarmLevel)
+        if (binding.renderedBackgroundColor != backgroundColor) {
+            binding.background.setColor(backgroundColor)
+            binding.renderedBackgroundColor = backgroundColor
+        }
         if (binding.valueText.currentTextColor != valueColor) {
             binding.valueText.setTextColor(valueColor)
         }
@@ -609,23 +621,40 @@ internal class SimpleDashboardRenderer(
             binding.subtitleText.setTextColor(box.unitColor)
         }
         val mergeState = host.mergeVisualStateForBox(binding.boxIndex)
+        var strokeWidth = 2
+        var strokeColor = box.borderColor
+        var cardAlpha = 1f
         when (mergeState) {
             DashboardMergeVisualState.SOURCE -> {
-                binding.background.setStroke(5, Color.rgb(92, 180, 255))
-                binding.card.alpha = 1f
+                strokeWidth = 5
+                strokeColor = Color.rgb(92, 180, 255)
+                cardAlpha = 1f
             }
             DashboardMergeVisualState.TARGET -> {
-                binding.background.setStroke(5, Color.rgb(78, 210, 118))
-                binding.card.alpha = 1f
+                strokeWidth = 5
+                strokeColor = Color.rgb(78, 210, 118)
+                cardAlpha = 1f
             }
             DashboardMergeVisualState.BLOCKED -> {
-                binding.background.setStroke(2, Color.rgb(55, 62, 76))
-                binding.card.alpha = 0.32f
+                strokeColor = Color.rgb(55, 62, 76)
+                cardAlpha = 0.32f
             }
             DashboardMergeVisualState.NONE -> {
-                binding.background.setStroke(2, box.borderColor)
-                binding.card.alpha = if (host.isEditMode()) 0.86f else 1.0f
+                cardAlpha = if (host.isEditMode()) 0.86f else 1f
             }
+        }
+        if (
+            binding.renderedStrokeWidth != strokeWidth ||
+            binding.renderedStrokeColor != strokeColor
+        ) {
+            binding.background.setStroke(strokeWidth, strokeColor)
+            binding.renderedStrokeWidth = strokeWidth
+            binding.renderedStrokeColor = strokeColor
+        }
+        val cardAlphaBits = cardAlpha.toBits()
+        if (binding.renderedAlphaBits != cardAlphaBits) {
+            binding.card.alpha = cardAlpha
+            binding.renderedAlphaBits = cardAlphaBits
         }
 
         val minMaxKey = binding.minMaxKey
