@@ -14,6 +14,8 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
 class UtcompCsvLogger(
@@ -111,18 +113,25 @@ class UtcompCsvLogger(
         val snapshot: UtcompDataSnapshot,
     )
 
-    private val queue = LinkedBlockingQueue<CsvSample>(QUEUE_CAPACITY)
+    private class CsvSession(
+        val writer: BufferedWriter,
+        val target: String,
+    ) {
+        val queue = LinkedBlockingQueue<CsvSample>(QUEUE_CAPACITY)
+        val accepting = AtomicBoolean(true)
+        val sequence = AtomicLong(0L)
+        val droppedRows = AtomicLong(0L)
+        val writtenRows = AtomicLong(0L)
+        lateinit var writerThread: Thread
+    }
 
-    @Volatile private var running = false
-    @Volatile private var droppedRows = 0L
-    @Volatile private var writtenRows = 0L
+    private val sessionLock = Any()
 
-    private var writerThread: Thread? = null
-    private var currentTarget: String = "off"
-    private var sequence = 0L
+    @Volatile
+    private var activeSession: CsvSession? = null
 
     val isRunning: Boolean
-        get() = running
+        get() = activeSession?.accepting?.get() == true
 
     fun startInternal() {
         val dir = File(context.filesDir, "utcomp-logs").apply { mkdirs() }
@@ -153,76 +162,96 @@ class UtcompCsvLogger(
     }
 
     private fun start(writer: BufferedWriter, target: String) {
-        stop()
-
-        queue.clear()
-        droppedRows = 0L
-        writtenRows = 0L
-        sequence = 0L
-        currentTarget = target
-        running = true
-        notifyStateChanged(true)
-
-        writerThread = thread(name = "utcomp-csv-logger", isDaemon = true) {
-            runWriter(writer, target)
+        val session = CsvSession(writer, target)
+        session.writerThread = thread(
+            start = false,
+            name = "utcomp-csv-logger",
+            isDaemon = true,
+        ) {
+            runWriter(session)
         }
 
+        val replacedSession = synchronized(sessionLock) {
+            val previous = activeSession
+            previous?.accepting?.set(false)
+            activeSession = session
+            session.writerThread.start()
+            notifyStateChanged(true)
+            previous
+        }
+
+        if (replacedSession != null) {
+            uiLog(
+                "CSV data logging replaced: " +
+                    "oldTarget=${replacedSession.target} newTarget=$target",
+            )
+        }
         uiLog("CSV data logging started: $target")
     }
 
     fun offer(snapshot: UtcompDataSnapshot, source: String = "usb") {
-        if (!running) return
+        synchronized(sessionLock) {
+            val session = activeSession ?: return
+            if (!session.accepting.get()) return
 
-        val sample = CsvSample(
-            seq = ++sequence,
-            wallTimeMs = System.currentTimeMillis(),
-            elapsedRealtimeMs = SystemClock.elapsedRealtime(),
-            elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos(),
-            source = source,
-            snapshot = snapshot.copy(),
-        )
+            val sample = CsvSample(
+                seq = session.sequence.incrementAndGet(),
+                wallTimeMs = System.currentTimeMillis(),
+                elapsedRealtimeMs = SystemClock.elapsedRealtime(),
+                elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos(),
+                source = source,
+                snapshot = snapshot.copy(),
+            )
 
-        if (!queue.offer(sample)) {
-            queue.poll()
-            droppedRows++
-            queue.offer(sample)
+            if (!session.queue.offer(sample)) {
+                session.queue.poll()
+                session.droppedRows.incrementAndGet()
+                session.queue.offer(sample)
+            }
         }
     }
 
-    fun statusText(): String =
-        if (running) {
-            "CSV logging ON: written=$writtenRows queued=${queue.size} dropped=$droppedRows target=$currentTarget"
+    fun statusText(): String {
+        val session = activeSession
+        return if (session?.accepting?.get() == true) {
+            "CSV logging ON: written=${session.writtenRows.get()} " +
+                "queued=${session.queue.size} dropped=${session.droppedRows.get()} " +
+                "target=${session.target}"
         } else {
             "CSV logging OFF"
         }
+    }
 
     fun stop() {
-        if (!running && writerThread == null) return
-
-        val stoppedTarget = currentTarget
-        running = false
-        writerThread?.join(1200)
-        writerThread = null
-
-        currentTarget = "off"
+        val session = synchronized(sessionLock) {
+            val current = activeSession ?: return
+            activeSession = null
+            current.accepting.set(false)
+            current
+        }
         notifyStateChanged(false)
-        uiLog("CSV data logging stopped: rows=$writtenRows dropped=$droppedRows target=$stoppedTarget")
+        session.writerThread.join(1200)
+        uiLog(
+            "CSV data logging stopped: written=${session.writtenRows.get()} " +
+                "queued=${session.queue.size} dropped=${session.droppedRows.get()} " +
+                "target=${session.target}",
+        )
     }
 
     override fun close() {
         stop()
     }
 
-    private fun runWriter(writer: BufferedWriter, target: String) {
+    private fun runWriter(session: CsvSession) {
         try {
-            writer.use { out ->
+            session.writer.use { out ->
                 val isoTimeFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US)
                 out.write(HEADER)
                 out.newLine()
 
                 var rowsSinceFlush = 0
-                while (running || queue.isNotEmpty()) {
-                    val sample = queue.poll(500, TimeUnit.MILLISECONDS) ?: continue
+                while (session.accepting.get() || session.queue.isNotEmpty()) {
+                    val sample = session.queue.poll(500, TimeUnit.MILLISECONDS) ?: continue
                     out.write(rowFor(
                         seq = sample.seq,
                         wallTimeMs = sample.wallTimeMs,
@@ -233,7 +262,7 @@ class UtcompCsvLogger(
                         isoTimeFormat = isoTimeFormat,
                     ))
                     out.newLine()
-                    writtenRows++
+                    session.writtenRows.incrementAndGet()
                     rowsSinceFlush++
 
                     if (rowsSinceFlush >= 64) {
@@ -244,11 +273,17 @@ class UtcompCsvLogger(
                 out.flush()
             }
         } catch (t: Throwable) {
-            uiLog("CSV logging failed for $target: ${t.message}")
+            uiLog("CSV logging failed for ${session.target}: ${t.message}")
         } finally {
-            val shouldNotify = running || currentTarget == target
-            running = false
-            if (currentTarget == target) currentTarget = "off"
+            val shouldNotify = synchronized(sessionLock) {
+                if (activeSession === session) {
+                    activeSession = null
+                    session.accepting.set(false)
+                    true
+                } else {
+                    false
+                }
+            }
             if (shouldNotify) notifyStateChanged(false)
         }
     }
@@ -380,6 +415,6 @@ class UtcompCsvLogger(
     }
 
     private fun makeFileName(): String =
-        "utcomp_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.csv"
+        "utcomp_${SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())}.csv"
 
 }
