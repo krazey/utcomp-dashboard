@@ -77,20 +77,23 @@ class PeriodicNoiseCalibrationManager(
 
     fun profile(): PeriodicNoiseCalibrationProfile? = profile
 
-    fun status(nowMs: Long = SystemClock.elapsedRealtime()): PeriodicCalibrationStatus {
-        val activeSession = session
-        if (activeSession != null) {
-            return PeriodicCalibrationStatus.Learning(
-                elapsedMs = activeSession.elapsedMs(nowMs),
-                durationMs = activeSession.durationMs,
-                canFinish = activeSession.canFinish(nowMs),
-                referenceSamples = activeSession.sampleCount("adc0"),
-            )
+    fun status(nowMs: Long = SystemClock.elapsedRealtime()): PeriodicCalibrationStatus =
+        synchronized(stateLock) {
+            val activeSession = session
+            if (activeSession != null) {
+                return@synchronized PeriodicCalibrationStatus.Learning(
+                    elapsedMs = activeSession.elapsedMs(nowMs),
+                    durationMs = activeSession.durationMs,
+                    canFinish = activeSession.canFinish(nowMs),
+                    referenceSamples = activeSession.sampleCount("adc0"),
+                )
+            }
+            lastFailure?.let {
+                return@synchronized PeriodicCalibrationStatus.Failed(it)
+            }
+            profile?.let(PeriodicCalibrationStatus::Ready)
+                ?: PeriodicCalibrationStatus.Missing
         }
-        lastFailure?.let { return PeriodicCalibrationStatus.Failed(it) }
-        return profile?.let(PeriodicCalibrationStatus::Ready)
-            ?: PeriodicCalibrationStatus.Missing
-    }
 
     fun isLearning(): Boolean = session != null
 
@@ -129,12 +132,15 @@ class PeriodicNoiseCalibrationManager(
         wallTimeMs: Long = System.currentTimeMillis(),
         force: Boolean = false,
     ): PeriodicCalibrationBuildResult? {
-        val activeSession = synchronized(stateLock) { session } ?: return null
-        if (!force && !activeSession.canFinish(nowElapsedMs)) return null
+        val activeSession = synchronized(stateLock) {
+            val active = session ?: return null
+            if (!force && !active.canFinish(nowElapsedMs)) return null
+            session = null
+            active
+        }
 
         val result = activeSession.build(wallTimeMs)
         synchronized(stateLock) {
-            session = null
             if (result.profile != null) {
                 profile = result.profile
                 lastFailure = null

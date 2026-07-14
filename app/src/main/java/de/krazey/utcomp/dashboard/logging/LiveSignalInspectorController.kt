@@ -185,7 +185,7 @@ class LiveSignalInspectorController(
         } else {
             Float.NaN
         }
-        synchronized(sampleLock) {
+        val shouldPost = synchronized(sampleLock) {
             if (lastAcceptedAtMs > 0L && nowMs - lastAcceptedAtMs < MIN_SAMPLE_INTERVAL_MS) {
                 pendingRaw = raw
                 pendingTimeMs = nowMs
@@ -198,8 +198,9 @@ class LiveSignalInspectorController(
             pendingTimeMs = nowMs
             pendingEngineRpm = snapshot.rpm
             pendingCalibratedComponent = calibratedComponent
+            samplePosted.compareAndSet(false, true)
         }
-        if (samplePosted.compareAndSet(false, true)) {
+        if (shouldPost) {
             mainHandler.post(drainPendingSample)
         }
     }
@@ -213,8 +214,10 @@ class LiveSignalInspectorController(
     }
 
     private val drainPendingSample = Runnable {
-        samplePosted.set(false)
-        if (!active) return@Runnable
+        if (!active) {
+            samplePosted.set(false)
+            return@Runnable
+        }
         val raw: Float
         val timeMs: Long
         val engineRpm: Int
@@ -224,6 +227,7 @@ class LiveSignalInspectorController(
             timeMs = pendingTimeMs
             engineRpm = pendingEngineRpm
             calibratedComponent = pendingCalibratedComponent
+            samplePosted.set(false)
         }
         if (!raw.isFinite()) return@Runnable
         buffer.add(timeMs, raw, engineRpm, calibratedComponent)
