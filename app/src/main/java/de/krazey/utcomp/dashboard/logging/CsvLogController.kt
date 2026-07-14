@@ -156,13 +156,8 @@ internal class CsvLogController(
             appendLog("CSV logging folder selection returned no URI")
             return true
         }
-        val flags = resultData.flags and (
-            Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
-
         runCatching {
-            activity.contentResolver.takePersistableUriPermission(uri, flags)
+            persistGrantedTreePermission(uri, resultData.flags)
         }.onFailure { error ->
             appendLog(
                 "Could not persist CSV logging folder permission: " +
@@ -174,6 +169,29 @@ internal class CsvLogController(
         setQuickTarget(QuickTarget.SAVED_FOLDER)
         appendLog("CSV quick-log destination set to saved folder: $uri")
         return true
+    }
+
+    private fun persistGrantedTreePermission(uri: Uri, resultFlags: Int) {
+        val readGranted = resultFlags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0
+        val writeGranted = resultFlags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION != 0
+        val resolver = activity.contentResolver
+
+        when {
+            readGranted && writeGranted -> resolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+            readGranted -> resolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+            writeGranted -> resolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+            else -> error("Folder picker granted no read or write permission")
+        }
     }
 
     private fun showQuickTargetMenu() {

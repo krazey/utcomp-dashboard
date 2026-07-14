@@ -10,7 +10,6 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
-import android.os.Build
 import android.os.SystemClock
 import de.krazey.utcomp.dashboard.protocol.TransmitterPacket
 import de.krazey.utcomp.dashboard.protocol.TransmitterPacketParser
@@ -66,12 +65,10 @@ class UtcompUsbTransport(
             when (intent.action) {
                 permissionAction -> {
                     val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                    val dev = if (Build.VERSION.SDK_INT >= 33) {
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                    }
+                    val dev = intent.getParcelableExtra(
+                        UsbManager.EXTRA_DEVICE,
+                        UsbDevice::class.java,
+                    )
                     logLine("USB permission result: granted=$granted device=${dev?.deviceName}")
                     if (granted && dev != null) connect(dev)
                 }
@@ -98,12 +95,7 @@ class UtcompUsbTransport(
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            context.registerReceiver(receiver, filter)
-        }
+        context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         registered = true
         logLine("USB receiver registered")
     }
