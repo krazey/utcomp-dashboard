@@ -44,12 +44,14 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import de.krazey.utcomp.dashboard.protocol.TransmitterConstants
 import de.krazey.utcomp.dashboard.protocol.TransmitterPacket
+import de.krazey.utcomp.dashboard.settings.ControllerCalibrationController
 import de.krazey.utcomp.dashboard.simulation.SimulationEngine
 import de.krazey.utcomp.dashboard.transport.UsbRecoveryPolicy
 import de.krazey.utcomp.dashboard.transport.UtcompUsbTransport
@@ -118,6 +120,9 @@ class MainActivity : Activity(), DashboardRenderHost {
     private lateinit var usb: UtcompUsbTransport
     private lateinit var statusText: TextView
     private lateinit var controlsPanel: View
+    private lateinit var dashboardScreenView: View
+    private lateinit var controllerCalibrationPageView: View
+    private lateinit var controllerCalibrationController: ControllerCalibrationController
     private lateinit var dashboardControlsController: DashboardControlsController
     private lateinit var dashboardRoot: LinearLayout
     private lateinit var logTitleText: TextView
@@ -205,7 +210,12 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     private val autoUsbRunnable = object : Runnable {
         override fun run() {
-            if (dataMode != DataMode.USB || !autoRefresh) return
+            if (
+                dataMode != DataMode.USB || !autoRefresh ||
+                controllerCalibrationPageVisible
+            ) {
+                return
+            }
 
             if (!connected) {
                 lastUsbPollRunAtMs = 0L
@@ -260,7 +270,10 @@ class MainActivity : Activity(), DashboardRenderHost {
                 }
             }.onFailure { appendLog("USB polling failed: ${it.message}") }
 
-            if (dataMode == DataMode.USB && autoRefresh) {
+            if (
+                dataMode == DataMode.USB && autoRefresh &&
+                !controllerCalibrationPageVisible
+            ) {
                 autoUsbHandler.postDelayed(this, USB_FAST_POLL_MS)
             }
         }
@@ -301,6 +314,9 @@ class MainActivity : Activity(), DashboardRenderHost {
     private var topBarActionButtons: List<Button> = emptyList()
     private var csvLogButton: Button? = null
     private var gearButton: Button? = null
+    private var calibrationButton: Button? = null
+    @Volatile
+    private var controllerCalibrationPageVisible = false
     private val topBarHideHandler = Handler(Looper.getMainLooper())
     private val topBarHideRunnable = Runnable {
         topBarButtonsVisible = false
@@ -453,7 +469,25 @@ class MainActivity : Activity(), DashboardRenderHost {
             context = this,
             log = ::appendLog,
             onConnectionChanged = ::onUsbConnectionChanged,
+            onPacketReceived = { packet ->
+                if (::controllerCalibrationController.isInitialized) {
+                    controllerCalibrationController.onPacketReceived(packet)
+                }
+            },
             onDecodedSnapshot = ::onDecodedSnapshot,
+        )
+        controllerCalibrationController = ControllerCalibrationController(
+            activity = this,
+            isUsbConnected = { connected },
+            ensureUsbConnection = {
+                setUsbDataMode()
+                stopUsbAutoConnect()
+                usb.requestPermissionAndConnect()
+            },
+            requestPacket = { pid -> requestUsb(pid, logEach = false) },
+            sendPacket = usb::write,
+            onPageVisibilityChanged = ::setControllerCalibrationPageVisible,
+            appendLog = ::appendLog,
         )
         buildUi()
         ralliartRenderer = RalliartDashboardRenderer(this, dashboardRoot, this)
@@ -478,6 +512,18 @@ class MainActivity : Activity(), DashboardRenderHost {
             appendLog("USB attach intent")
             usb.requestPermissionAndConnect()
         }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (
+            ::controllerCalibrationController.isInitialized &&
+            controllerCalibrationController.isVisible()
+        ) {
+            controllerCalibrationController.close()
+            return
+        }
+        super.onBackPressed()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -530,6 +576,9 @@ class MainActivity : Activity(), DashboardRenderHost {
         autoRefresh = false
         stopUsbAutoConnect()
         handler.removeCallbacksAndMessages(null)
+        if (::controllerCalibrationController.isInitialized) {
+            controllerCalibrationController.destroy()
+        }
         usb.unregister()
         usb.close()
         usbPollThread.quitSafely()
@@ -608,6 +657,22 @@ class MainActivity : Activity(), DashboardRenderHost {
             )
             setOnClickListener { csvLogController.toggleQuickLogging() }
             this@MainActivity.csvLogButton = this
+        }, LinearLayout.LayoutParams(dp(86f), dp(48f)).apply {
+            setMargins(0, 0, dp(6f), 0)
+        })
+
+        topBar.addView(Button(this).apply {
+            text = "⚙ CAL"
+            textSize = 12f
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            background = roundedBg(
+                Color.rgb(16, 20, 30),
+                dp(18f).toFloat(),
+                strokeWidth = dp(2f),
+            )
+            setOnClickListener { controllerCalibrationController.show() }
+            this@MainActivity.calibrationButton = this
         }, LinearLayout.LayoutParams(dp(86f), dp(48f)).apply {
             setMargins(0, 0, dp(6f), 0)
         })
@@ -730,7 +795,26 @@ class MainActivity : Activity(), DashboardRenderHost {
             ),
         )
 
-        setContentView(root)
+        val screenRoot = FrameLayout(this).apply {
+            setBackgroundColor(Color.rgb(10, 12, 16))
+        }
+        dashboardScreenView = root
+        screenRoot.addView(
+            root,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        controllerCalibrationPageView = controllerCalibrationController.createView()
+        screenRoot.addView(
+            controllerCalibrationPageView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        setContentView(screenRoot)
         window.decorView.post { enableImmersiveDriverMode() }
     }
 
@@ -990,7 +1074,7 @@ class MainActivity : Activity(), DashboardRenderHost {
     }
 
     private fun startUsbAutoConnect(initialDelayMs: Long = 350L) {
-        if (dataMode != DataMode.USB) return
+        if (dataMode != DataMode.USB || controllerCalibrationPageVisible) return
         autoRefresh = true
         autoUsbHandler.removeCallbacks(autoUsbRunnable)
         autoUsbHandler.postDelayed(autoUsbRunnable, initialDelayMs)
@@ -1118,7 +1202,13 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     private fun topBarChromeButtons(): List<Button> =
         topBarActionButtons.ifEmpty {
-            listOfNotNull(simModeButton, editModeButton, csvLogButton, gearButton)
+            listOfNotNull(
+                simModeButton,
+                editModeButton,
+                csvLogButton,
+                calibrationButton,
+                gearButton,
+            )
         }
 
     private fun topBarHintText(): String =
@@ -1170,6 +1260,10 @@ class MainActivity : Activity(), DashboardRenderHost {
             setTooltipCompat(contentDescription)
         }
         updateCsvLogButton()
+        calibrationButton?.apply {
+            contentDescription = "Open UTCOMP controller calibration"
+            setTooltipCompat(contentDescription)
+        }
         gearButton?.apply {
             contentDescription = "Open controls menu"
             setTooltipCompat(contentDescription)
@@ -1376,17 +1470,33 @@ class MainActivity : Activity(), DashboardRenderHost {
         renderDashboard()
     }
 
+    private fun setControllerCalibrationPageVisible(visible: Boolean) {
+        controllerCalibrationPageVisible = visible
+        if (::dashboardScreenView.isInitialized) {
+            dashboardScreenView.visibility = if (visible) View.GONE else View.VISIBLE
+        }
+        if (::controllerCalibrationPageView.isInitialized) {
+            controllerCalibrationPageView.visibility = if (visible) View.VISIBLE else View.GONE
+        }
+
+        if (visible) {
+            stopUsbAutoConnect()
+            topBarHideHandler.removeCallbacks(topBarHideRunnable)
+        } else if (dataMode == DataMode.USB && autoRefresh) {
+            startUsbAutoConnect(initialDelayMs = 0L)
+            renderDashboardNow()
+        }
+    }
+
 
     private fun setUsbDataMode() {
         dataMode = DataMode.USB
+        simTestMode = SimTestMode.OFF
         handler.removeCallbacks(simRunnable)
+        stopSimTicker()
+        updateSimModeButton()
         appendLog("USB DataMode.USB enabled")
-
-        if (dataMode == DataMode.USB) {
         startUsbAutoConnect()
-        } else {
-        stopUsbAutoConnect()
-        }
         saveDashboardPrefs()
         renderDashboard()
     }
@@ -1465,7 +1575,7 @@ class MainActivity : Activity(), DashboardRenderHost {
         connected = isConnected
 
         autoUsbHandler.removeCallbacks(autoUsbRunnable)
-        if (dataMode == DataMode.USB && autoRefresh) {
+        if (dataMode == DataMode.USB && autoRefresh && !controllerCalibrationPageVisible) {
             val delayMs = if (isConnected) {
                 0L
             } else {
@@ -1474,8 +1584,15 @@ class MainActivity : Activity(), DashboardRenderHost {
             autoUsbHandler.postDelayed(autoUsbRunnable, delayMs)
         }
 
-        if (changed && isConnected && dataMode == DataMode.USB) {
+        if (
+            changed && isConnected && dataMode == DataMode.USB &&
+            !controllerCalibrationPageVisible
+        ) {
             autoUsbHandler.post { requestDeviceInformation(logEach = false) }
+        }
+
+        if (::controllerCalibrationController.isInitialized) {
+            controllerCalibrationController.onConnectionChanged(isConnected)
         }
 
         if (changed) {

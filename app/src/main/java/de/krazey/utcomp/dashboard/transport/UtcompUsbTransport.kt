@@ -27,6 +27,7 @@ class UtcompUsbTransport(
     private val context: Context,
     private val log: (String) -> Unit,
     private val onConnectionChanged: (Boolean) -> Unit = {},
+    private val onPacketReceived: (TransmitterPacket) -> Unit = {},
     private val onDecodedSnapshot: (UtcompDataSnapshot, Int) -> Unit = { _, _ -> },
 ) : Closeable {
     companion object {
@@ -279,6 +280,16 @@ class UtcompUsbTransport(
                     verboseLog { usb.toString() }
                     val txp = TransmitterPacketParser.fromUsb(usb) ?: continue
                     verboseLog { txp.toString() }
+
+                    runCatching { onPacketReceived(txp) }
+                        .onFailure { error ->
+                            logLine(
+                                "Incoming packet callback failed for pid=0x%04X: %s".format(
+                                    txp.pid,
+                                    error.message ?: error.javaClass.simpleName,
+                                ),
+                            )
+                        }
 
                     val debugLog = if (verboseLogging) {
                         { line: String -> logLine("DECODE $line") }

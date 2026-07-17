@@ -54,6 +54,16 @@ phone displays. Simple cards can display the physical UTCOMP input or channel
 name as a page-specific subtitle. Firmware and input mappings are refreshed
 automatically after USB connects.
 
+The top-bar CAL action opens a dedicated UTCOMP PRO sensor-calibration page.
+It reads the current controller payloads before exposing AFR, boost, oil
+pressure, the active oil-temperature NTC profile, and ADC reference voltage.
+Physical ADC assignments are shown read-only. Edits are applied to copies of
+the exact 48-byte controller packets, preserving every unrelated byte. Live
+polling pauses during the page session; changed packets and the settings commit
+are each sent once without automatic write retries, then the changed bytes are
+read back and verified. The last verified write can be explicitly restored
+while the page remains open.
+
 The normal controls panel contains only driver-facing dashboard actions. Manual
 protocol requests and the automatic polling switch are grouped in a descriptive
 Diagnostics menu, while simulation remains available from the top bar. Full
