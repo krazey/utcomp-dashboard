@@ -27,6 +27,11 @@ internal data class ControllerCalibration(
             .takeIf { it >= 0 }
             ?.let(PHYSICAL_ANALOG_INPUTS::get)
 
+    fun adcChannelForAnalogMode(mode: Int): Int? =
+        analogInputModes.indexOfFirst { it == mode }
+            .takeIf { it >= 0 }
+            ?.plus(1)
+
     fun oilTemperatureNtcIndex(): Int? =
         ntc.indexOfFirst { it.role == TEMPERATURE_ROLE_OIL }
             .takeIf { it >= 0 }

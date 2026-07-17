@@ -70,7 +70,12 @@ fun main() {
     check(decoded.inputForAnalogMode(ControllerCalibration.ANALOG_MODE_AFR) == "ADC1")
     check(decoded.inputForAnalogMode(ControllerCalibration.ANALOG_MODE_BOOST) == "ADC3")
     check(decoded.inputForAnalogMode(ControllerCalibration.ANALOG_MODE_OIL_PRESSURE) == "ADC4")
+    check(decoded.adcChannelForAnalogMode(ControllerCalibration.ANALOG_MODE_AFR) == 1)
+    check(decoded.adcChannelForAnalogMode(ControllerCalibration.ANALOG_MODE_BOOST) == 3)
+    check(decoded.adcChannelForAnalogMode(ControllerCalibration.ANALOG_MODE_OIL_PRESSURE) == 4)
     check(decoded.physicalInputForNtc(0) == "ADCVCC1")
+    check(decoded.adcChannelForAnalogMode(ControllerCalibration.ANALOG_MODE_NTC1) == 6)
+    check(decoded.adcChannelForAnalogMode(99) == null)
 
     val edited = decoded.copy(
         afr = decoded.afr.copy(a = 2.125f),

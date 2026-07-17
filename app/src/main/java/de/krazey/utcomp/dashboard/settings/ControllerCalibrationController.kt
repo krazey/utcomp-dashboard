@@ -25,6 +25,7 @@ import de.krazey.utcomp.dashboard.protocol.TransmitterPacket
 import de.krazey.utcomp.dashboard.utcomp.ControllerCalibration
 import de.krazey.utcomp.dashboard.utcomp.ControllerCalibrationCodec
 import de.krazey.utcomp.dashboard.utcomp.LinearCalibration
+import de.krazey.utcomp.dashboard.utcomp.UtcompDataSnapshot
 import java.util.Locale
 
 /** Full-screen, USB-backed editor for the verified UTCOMP calibration fields. */
@@ -52,6 +53,7 @@ internal class ControllerCalibrationController(
         const val READ_TIMEOUT_MS = 4_000L
         const val WRITE_SETTLE_MS = 550L
         const val VERIFY_TIMEOUT_MS = 4_000L
+        const val LIVE_POLL_MS = 350L
 
         val BORDER_COLOR: Int = Color.rgb(38, 78, 104)
         val PANEL_COLOR: Int = Color.rgb(15, 18, 24)
@@ -67,6 +69,11 @@ internal class ControllerCalibrationController(
     private lateinit var mappingText: TextView
     private lateinit var oilNtcTitle: TextView
     private lateinit var oilNtcSource: TextView
+    private lateinit var afrLive: TextView
+    private lateinit var boostLive: TextView
+    private lateinit var oilPressureLive: TextView
+    private lateinit var oilTemperatureLive: TextView
+    private lateinit var vrefLive: TextView
     private lateinit var refreshButton: Button
     private lateinit var writeButton: Button
     private lateinit var undoButton: Button
@@ -96,6 +103,24 @@ internal class ControllerCalibrationController(
     private var lastRollback: RollbackBytes? = null
     private var pendingWriteIsRollback = false
     private var previousRequestedOrientation: Int? = null
+    private var liveAfr = Float.NaN
+    private var liveBoost = Float.NaN
+    private var liveOilPressure = Float.NaN
+    private var liveOilTemperature = Float.NaN
+    private var liveVrefMillivolts = 0
+    private val liveAdcVolts = FloatArray(8) { Float.NaN }
+
+    private val livePoll = object : Runnable {
+        override fun run() {
+            if (!visible || !isUsbConnected()) return
+            if (operation == Operation.IDLE && loadedCalibration != null) {
+                requestPacket(TransmitterConstants.UtcompPid.GENERAL_DATA1)
+                requestPacket(TransmitterConstants.UtcompPid.GENERAL_DATA2)
+                requestPacket(TransmitterConstants.UtcompPid.TEMPERATURES_DATA)
+            }
+            mainHandler.postDelayed(this, LIVE_POLL_MS)
+        }
+    }
 
     private val readTimeout = Runnable {
         if (operation != Operation.READING) return@Runnable
@@ -171,12 +196,14 @@ internal class ControllerCalibrationController(
         }
         content.addView(mappingText, panelLayoutParams())
 
+        afrLive = liveValueText()
         afrA = numberEditor("2")
         afrB = numberEditor("10")
         content.addView(
             linearSection(
                 title = "AFR",
                 description = "AFR = a × input voltage + b",
+                live = afrLive,
                 firstLabel = "a",
                 first = afrA,
                 secondLabel = "b",
@@ -185,12 +212,14 @@ internal class ControllerCalibrationController(
             panelLayoutParams(),
         )
 
+        boostLive = liveValueText()
         boostA = numberEditor("2")
         boostB = numberEditor("-1")
         content.addView(
             linearSection(
                 title = "Boost pressure",
                 description = "bar = a × input voltage + b",
+                live = boostLive,
                 firstLabel = "a",
                 first = boostA,
                 secondLabel = "b",
@@ -199,12 +228,14 @@ internal class ControllerCalibrationController(
             panelLayoutParams(),
         )
 
+        oilPressureLive = liveValueText()
         oilPressureA = numberEditor("2.5")
         oilPressureB = numberEditor("-1.25")
         content.addView(
             linearSection(
                 title = "Oil pressure",
                 description = "bar = a × input voltage + b",
+                live = oilPressureLive,
                 firstLabel = "a",
                 first = oilPressureA,
                 secondLabel = "b",
@@ -213,10 +244,12 @@ internal class ControllerCalibrationController(
             panelLayoutParams(),
         )
 
+        oilTemperatureLive = liveValueText()
         ntcR25 = numberEditor("10250")
         ntcBeta = numberEditor("3512")
         content.addView(ntcSection(), panelLayoutParams())
 
+        vrefLive = liveValueText()
         vrefMillivolts = integerEditor("5212")
         content.addView(vrefSection(), panelLayoutParams())
 
@@ -252,6 +285,7 @@ internal class ControllerCalibrationController(
 
         visible = true
         lastRollback = null
+        clearLiveValues()
         previousRequestedOrientation = activity.requestedOrientation
         activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
         root.visibility = View.VISIBLE
@@ -277,6 +311,7 @@ internal class ControllerCalibrationController(
         }
 
         cancelTimeouts()
+        stopLivePolling()
         visible = false
         operation = Operation.IDLE
         loadedCalibration = null
@@ -294,6 +329,7 @@ internal class ControllerCalibrationController(
     fun destroy() {
         visible = false
         cancelTimeouts()
+        stopLivePolling()
     }
 
     fun onConnectionChanged(connected: Boolean) {
@@ -306,12 +342,14 @@ internal class ControllerCalibrationController(
                 }
             } else {
                 cancelTimeouts()
+                stopLivePolling()
                 operation = Operation.IDLE
                 loadedCalibration = null
                 originalPayloads = emptyMap()
                 receivedPayloads.clear()
                 pendingVerification.clear()
                 lastRollback = null
+                clearLiveValues()
                 setStatus("UTCOMP disconnected. Reconnect it and tap Refresh.", ERROR_COLOR)
                 updateEnabledState()
             }
@@ -331,6 +369,54 @@ internal class ControllerCalibrationController(
         }
     }
 
+    fun offerSnapshot(snapshot: UtcompDataSnapshot, sourcePid: Int) {
+        if (!visible) return
+
+        when (sourcePid) {
+            TransmitterConstants.UtcompPid.GENERAL_DATA1 -> {
+                val adcVolts = floatArrayOf(
+                    snapshot.adcInValCh0,
+                    snapshot.adcInValCh1,
+                    snapshot.adcInValCh2,
+                    snapshot.adcInValCh3,
+                    snapshot.adcInValCh4,
+                    snapshot.adcInValCh5,
+                    snapshot.adcInValCh6,
+                    snapshot.adcInValCh7,
+                )
+                val vrefMillivolts = snapshot.vref
+                activity.runOnUiThread {
+                    if (!canShowLiveValues()) return@runOnUiThread
+                    adcVolts.copyInto(liveAdcVolts)
+                    liveVrefMillivolts = vrefMillivolts
+                    updateLiveReadouts()
+                }
+            }
+
+            TransmitterConstants.UtcompPid.GENERAL_DATA2 -> {
+                val afr = snapshot.afr1
+                val boost = snapshot.bar1
+                val oilPressure = snapshot.bar2
+                activity.runOnUiThread {
+                    if (!canShowLiveValues()) return@runOnUiThread
+                    liveAfr = afr
+                    liveBoost = boost
+                    liveOilPressure = oilPressure
+                    updateLiveReadouts()
+                }
+            }
+
+            TransmitterConstants.UtcompPid.TEMPERATURES_DATA -> {
+                val oilTemperature = snapshot.temperatureOil
+                activity.runOnUiThread {
+                    if (!canShowLiveValues()) return@runOnUiThread
+                    liveOilTemperature = oilTemperature
+                    updateLiveReadouts()
+                }
+            }
+        }
+    }
+
     private fun readFromController() {
         if (!visible) return
         if (!isUsbConnected()) {
@@ -340,8 +426,10 @@ internal class ControllerCalibrationController(
         }
 
         cancelTimeouts()
+        stopLivePolling()
         operation = Operation.READING
         loadedCalibration = null
+        clearLiveValues()
         originalPayloads = emptyMap()
         receivedPayloads.clear()
         lastRollback = null
@@ -394,6 +482,7 @@ internal class ControllerCalibrationController(
         )
         appendLog("Controller calibration read complete")
         updateEnabledState()
+        startLivePolling()
     }
 
     private fun receiveVerificationPayload(pid: Int, payload: ByteArray) {
@@ -447,6 +536,7 @@ internal class ControllerCalibrationController(
         pendingWriteIsRollback = false
         pendingVerification.clear()
         updateEnabledState()
+        startLivePolling()
     }
 
     private var verificationTargetCount = 0
@@ -523,6 +613,7 @@ internal class ControllerCalibrationController(
         }
 
         cancelTimeouts()
+        stopLivePolling()
         pendingVerification.clear()
         verificationFailures.clear()
         val rollbackByPid = linkedMapOf<Int, Map<Int, Byte>>()
@@ -573,6 +664,7 @@ internal class ControllerCalibrationController(
         pendingRollbackCandidate = null
         pendingWriteIsRollback = false
         lastRollback = null
+        clearLiveValues()
         setStatus("$message. Refresh before another write.", ERROR_COLOR)
         appendLog("Controller calibration verification failed: $message")
         updateEnabledState()
@@ -671,6 +763,7 @@ internal class ControllerCalibrationController(
                     } ?: "not assigned",
                 )
             }
+            updateLiveReadouts()
         } finally {
             populatingEditors = false
         }
@@ -738,9 +831,10 @@ internal class ControllerCalibrationController(
 
     private fun infoPanel(): View = TextView(activity).apply {
         text =
-            "Values are read from UTCOMP PRO, not app defaults. Live polling pauses while this " +
-                "page is open. A write changes only verified calibration bytes, sends no " +
-                "automatic retry, commits once, and must pass read-back verification."
+            "Values are read from UTCOMP PRO, not app defaults. Live sensor values and raw " +
+                "input voltages refresh while idle; polling pauses during settings operations. " +
+                "A write changes only verified calibration bytes, sends no automatic retry, " +
+                "commits once, and must pass read-back verification."
         textSize = 12f
         setTextColor(SECONDARY_TEXT)
         setPadding(dp(12f), dp(10f), dp(12f), dp(10f))
@@ -751,11 +845,13 @@ internal class ControllerCalibrationController(
     private fun linearSection(
         title: String,
         description: String,
+        live: TextView,
         firstLabel: String,
         first: EditText,
         secondLabel: String,
         second: EditText,
     ): View = section(title, description).apply {
+        addView(live)
         addView(editorRow(firstLabel, first, secondLabel, second))
     }
 
@@ -774,6 +870,7 @@ internal class ControllerCalibrationController(
             setPadding(0, dp(2f), 0, dp(7f))
         }
         addView(oilNtcSource)
+        addView(oilTemperatureLive)
         addView(editorRow("R25 (Ω)", ntcR25, "Beta (K)", ntcBeta))
     }
 
@@ -781,7 +878,16 @@ internal class ControllerCalibrationController(
         title = "ADC reference voltage",
         description = "Measured controller reference in millivolts; normally close to 5200 mV.",
     ).apply {
+        addView(vrefLive)
         addView(editorRow("Vref (mV)", vrefMillivolts, null, null))
+    }
+
+    private fun liveValueText(): TextView = TextView(activity).apply {
+        text = "LIVE · waiting for controller data"
+        textSize = 13f
+        setTextColor(GOOD_COLOR)
+        typeface = Typeface.DEFAULT_BOLD
+        setPadding(0, dp(1f), 0, dp(7f))
     }
 
     private fun section(title: String, description: String): LinearLayout =
@@ -941,6 +1047,111 @@ internal class ControllerCalibrationController(
 
     private fun formatVolts(millivolts: Int): String =
         String.format(Locale.US, "%.3f", millivolts / 1000f)
+
+    private fun updateLiveReadouts() {
+        if (!::afrLive.isInitialized) return
+        val calibration = loadedCalibration
+        if (calibration == null) {
+            listOf(
+                afrLive,
+                boostLive,
+                oilPressureLive,
+                oilTemperatureLive,
+                vrefLive,
+            ).forEach { it.text = "LIVE · waiting for controller data" }
+            return
+        }
+
+        afrLive.text = linearLiveText(
+            liveAfr,
+            "AFR",
+            calibration,
+            ControllerCalibration.ANALOG_MODE_AFR,
+            2,
+        )
+        boostLive.text = linearLiveText(
+            liveBoost,
+            "bar",
+            calibration,
+            ControllerCalibration.ANALOG_MODE_BOOST,
+            2,
+        )
+        oilPressureLive.text = linearLiveText(
+            liveOilPressure,
+            "bar",
+            calibration,
+            ControllerCalibration.ANALOG_MODE_OIL_PRESSURE,
+            2,
+        )
+
+        val ntcIndex = calibration.oilTemperatureNtcIndex()
+        val ntcMode = ntcIndex?.let { ControllerCalibration.ANALOG_MODE_NTC1 + it }
+        oilTemperatureLive.text = if (ntcMode == null) {
+            "LIVE · oil-temperature NTC not assigned"
+        } else {
+            linearLiveText(liveOilTemperature, "°C", calibration, ntcMode, 1)
+        }
+        vrefLive.text = if (liveVrefMillivolts > 0) {
+            "LIVE  $liveVrefMillivolts mV · ${formatVolts(liveVrefMillivolts)} V"
+        } else {
+            "LIVE · waiting for reference data"
+        }
+    }
+
+    private fun linearLiveText(
+        value: Float,
+        unit: String,
+        calibration: ControllerCalibration,
+        analogMode: Int,
+        decimals: Int,
+    ): String = buildString {
+        append("LIVE  ")
+        append(formatLive(value, decimals))
+        append(' ')
+        append(unit)
+
+        val input = calibration.inputForAnalogMode(analogMode)
+        val channel = calibration.adcChannelForAnalogMode(analogMode)
+        append(" · ")
+        if (input == null || channel == null) {
+            append("input not assigned")
+            return@buildString
+        }
+
+        append(input)
+        append(' ')
+        append(formatLive(liveAdcVolts.getOrElse(channel) { Float.NaN }, 3))
+        append(" V")
+    }
+
+    private fun formatLive(value: Float, decimals: Int): String =
+        if (value.isFinite()) {
+            String.format(Locale.US, "%.${decimals}f", value)
+        } else {
+            "—"
+        }
+
+    private fun clearLiveValues() {
+        liveAfr = Float.NaN
+        liveBoost = Float.NaN
+        liveOilPressure = Float.NaN
+        liveOilTemperature = Float.NaN
+        liveVrefMillivolts = 0
+        liveAdcVolts.fill(Float.NaN)
+        updateLiveReadouts()
+    }
+
+    private fun canShowLiveValues(): Boolean =
+        visible && operation == Operation.IDLE && loadedCalibration != null
+
+    private fun startLivePolling() {
+        stopLivePolling()
+        if (visible) mainHandler.post(livePoll)
+    }
+
+    private fun stopLivePolling() {
+        mainHandler.removeCallbacks(livePoll)
+    }
 
     private fun roundedBackground(color: Int, radiusDp: Float): GradientDrawable =
         GradientDrawable().apply {

@@ -1607,6 +1607,9 @@ class MainActivity : Activity(), DashboardRenderHost {
     private fun onDecodedSnapshot(snapshot: UtcompDataSnapshot, sourcePid: Int) {
         val nowMs = SystemClock.elapsedRealtime()
         updateSensorPacketTimes(sourcePid, nowMs)
+        if (::controllerCalibrationController.isInitialized) {
+            controllerCalibrationController.offerSnapshot(snapshot, sourcePid)
+        }
         if (::periodicNoiseCalibrationManager.isInitialized) {
             periodicNoiseCalibrationManager.offerSnapshot(snapshot, sourcePid, nowMs)
         }
@@ -1618,7 +1621,10 @@ class MainActivity : Activity(), DashboardRenderHost {
         if (::csvLogger.isInitialized) {
             csvLogger.offer(snapshot, source = "usb")
         }
-        if (decodedRenderPosted.compareAndSet(false, true)) {
+        if (
+            !controllerCalibrationPageVisible &&
+            decodedRenderPosted.compareAndSet(false, true)
+        ) {
             dashboardRenderHandler.post(decodedRenderRunnable)
         }
     }
