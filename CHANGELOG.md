@@ -47,6 +47,17 @@
 - Add per-box calibrated periodic cancellation for simple and Ralliart pages.
 - Replace dashboard alpha presets with time-based Off, Light, Medium, Strong, and Custom smoothing.
 - Preserve raw CSV values while using conditioned values for dashboard display and min/max tracking.
+- Correct the temperature-settings PID and stop interpreting unit bytes as Vref.
+- Add a top-bar UTCOMP PRO calibration page for AFR, boost, oil pressure, and oil-temperature NTC settings.
+- Preserve unknown controller bytes and require single-write commit plus read-back verification.
+- Add an explicit rollback for the last calibration write verified in the current page session.
+- Show calculated live values, assigned ADC voltages, and read-only Vref in the calibration page.
+- Read the three required sensor-setting packets sequentially and report any missing PID.
+- Configure all seven physical ADC inputs with every UTCOMP analog sensor function.
+- Assign all four DS and three NTC sources to the six logical temperature roles.
+- Edit all three NTC profiles and show live raw and decoded values beside assignments.
+- Add verified AFR/Lambda, fuel-pressure, EGT, fuel-level, ADC-voltage, averaging, and RPM settings.
+- Read and verify the second analog and general-settings packets before enabling those writes.
 
 ## 1.0.0
 

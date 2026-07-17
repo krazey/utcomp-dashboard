@@ -54,6 +54,23 @@ phone displays. Simple cards can display the physical UTCOMP input or channel
 name as a page-specific subtitle. Firmware and input mappings are refreshed
 automatically after USB connects.
 
+The top-bar CAL action opens a dedicated UTCOMP PRO sensor-calibration page.
+It reads the current controller payloads before exposing AFR/Lambda, boost, oil
+and fuel pressure, both EGT conversion pairs, fuel level, ADC-voltage
+calibration, analog averaging, verified RPM settings, all three NTC profiles,
+all seven physical ADC assignments, and all four DS plus three NTC
+temperature-role assignments. Available analog functions
+include AFR1/2, boost, oil and fuel pressure, EGT1-6, NTC1-3, fuel level, gear,
+battery voltage, lambda O2, and oscilloscope/raw voltage. Live raw voltage or
+temperature and available decoded values are shown beside every assignment;
+the factory-calibrated ADC reference remains read-only. UTCOMP OLED screen
+configuration is deliberately outside this page. Edits are applied to copies
+of the exact 48-byte controller packets, preserving every unrelated byte.
+Low-rate live polling runs while the page is idle and pauses for settings
+operations. Changed packets and the settings commit are each sent once without
+automatic write retries, then the changed bytes are read back and verified.
+The last verified write can be explicitly restored while the page remains open.
+
 The normal controls panel contains only driver-facing dashboard actions. Manual
 protocol requests and the automatic polling switch are grouped in a descriptive
 Diagnostics menu, while simulation remains available from the top bar. Full
