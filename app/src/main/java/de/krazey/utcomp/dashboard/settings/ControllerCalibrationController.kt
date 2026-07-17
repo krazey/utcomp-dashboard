@@ -69,6 +69,20 @@ internal class ControllerCalibrationController(
         const val WRITE_SETTLE_MS = 550L
         const val VERIFY_TIMEOUT_MS = 4_000L
         const val LIVE_POLL_MS = 350L
+        const val DIAGNOSTIC_REQUEST_SPACING_MS = 80L
+
+        // Read-only discovery packets. They are deliberately kept outside the codec's
+        // required/writable PID sets until their layouts have been verified.
+        val SUPPLEMENTAL_DIAGNOSTIC_PIDS: List<Int> = listOf(
+            TransmitterConstants.UtcompPid.VSS_SETTINGS,
+            TransmitterConstants.UtcompPid.CONSUMPTION_SETTINGS,
+            TransmitterConstants.UtcompPid.ANALOG_SETTINGS2,
+            TransmitterConstants.UtcompPid.GENERAL_SETTINGS1,
+            TransmitterConstants.UtcompPid.ANALOG_OSC_SETTINGS1,
+            TransmitterConstants.UtcompPid.ANALOG_OSC_SETTINGS2,
+            TransmitterConstants.UtcompPid.USERSCREEN_SETTINGS,
+            TransmitterConstants.UtcompPid.VREF_SETTINGS,
+        )
 
         val BORDER_COLOR: Int = Color.rgb(38, 78, 104)
         val PANEL_COLOR: Int = Color.rgb(15, 18, 24)
@@ -110,6 +124,7 @@ internal class ControllerCalibrationController(
     private var loadedCalibration: ControllerCalibration? = null
     private var originalPayloads: Map<Int, ByteArray> = emptyMap()
     private val receivedPayloads = linkedMapOf<Int, ByteArray>()
+    private val loggedDiagnosticPids = mutableSetOf<Int>()
     private val pendingVerification = linkedMapOf<Int, VerificationTarget>()
     private val verificationFailures = mutableListOf<String>()
     private var pendingRollbackCandidate: RollbackBytes? = null
@@ -371,7 +386,11 @@ internal class ControllerCalibrationController(
     }
 
     fun onPacketReceived(packet: TransmitterPacket) {
-        if (!visible || !ControllerCalibrationCodec.accepts(packet.pid)) return
+        if (
+            !visible ||
+            (packet.pid !in SUPPLEMENTAL_DIAGNOSTIC_PIDS &&
+                !ControllerCalibrationCodec.accepts(packet.pid))
+        ) return
         if (packet.cmd != TransmitterConstants.Command.TRANSFER_DATA) return
         if (packet.source != TransmitterConstants.Source.DEVICE) return
         if (packet.data.size != 48) return
@@ -379,7 +398,17 @@ internal class ControllerCalibrationController(
         val pid = packet.pid
         val payload = packet.data.copyOf()
         activity.runOnUiThread {
-            if (visible) receivePayload(pid, payload)
+            if (!visible) return@runOnUiThread
+            if (pid in SUPPLEMENTAL_DIAGNOSTIC_PIDS) {
+                if (loggedDiagnosticPids.add(pid)) {
+                    appendLog(
+                        "Controller diagnostic received ${describePid(pid)} " +
+                            "bytes=${payload.toCalibrationHex()}",
+                    )
+                }
+            } else {
+                receivePayload(pid, payload)
+            }
         }
     }
 
@@ -472,6 +501,7 @@ internal class ControllerCalibrationController(
         clearLiveValues()
         originalPayloads = emptyMap()
         receivedPayloads.clear()
+        loggedDiagnosticPids.clear()
         lastRollback = null
         pendingVerification.clear()
         verificationFailures.clear()
@@ -503,7 +533,10 @@ internal class ControllerCalibrationController(
             WARNING_COLOR,
         )
         if (firstReceipt) {
-            appendLog("Controller calibration received ${describePid(pid)}")
+            appendLog(
+                "Controller calibration received ${describePid(pid)} " +
+                    "bytes=${payload.toCalibrationHex()}",
+            )
         }
         if (count != ControllerCalibrationCodec.requiredPids.size) {
             mainHandler.removeCallbacks(readTimeout)
@@ -530,6 +563,7 @@ internal class ControllerCalibrationController(
             GOOD_COLOR,
         )
         appendLog("Controller calibration read complete")
+        requestSupplementalDiagnostics()
         updateEnabledState()
         startLivePolling()
     }
@@ -1278,14 +1312,43 @@ internal class ControllerCalibrationController(
         pendingVerification.keys.firstOrNull()?.let(requestPacket)
     }
 
+    private fun requestSupplementalDiagnostics() {
+        appendLog(
+            "Controller supplemental diagnostic read started pids=" +
+                SUPPLEMENTAL_DIAGNOSTIC_PIDS.joinToString { "0x%04X".format(it) },
+        )
+        SUPPLEMENTAL_DIAGNOSTIC_PIDS.forEachIndexed { index, pid ->
+            mainHandler.postDelayed(
+                {
+                    if (visible && isUsbConnected()) requestPacket(pid)
+                },
+                index * DIAGNOSTIC_REQUEST_SPACING_MS,
+            )
+        }
+    }
+
     private fun missingReadPids(): List<Int> =
         ControllerCalibrationCodec.requiredPids.filterNot(receivedPayloads::containsKey)
 
     private fun describePid(pid: Int): String = when (pid) {
         TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS -> "temperature settings (0x1002)"
+        TransmitterConstants.UtcompPid.VSS_SETTINGS -> "VSS settings (0x1004)"
+        TransmitterConstants.UtcompPid.CONSUMPTION_SETTINGS -> "consumption settings (0x1006)"
         TransmitterConstants.UtcompPid.GPIO_SETTINGS -> "input assignments (0x1009)"
         TransmitterConstants.UtcompPid.ANALOG_SETTINGS1 -> "analog settings (0x100A)"
+        TransmitterConstants.UtcompPid.ANALOG_SETTINGS2 -> "analog settings 2 (0x100B)"
+        TransmitterConstants.UtcompPid.GENERAL_SETTINGS1 -> "general settings (0x100C)"
+        TransmitterConstants.UtcompPid.ANALOG_OSC_SETTINGS1 ->
+            "analog sampling settings 1 (0x1017)"
+        TransmitterConstants.UtcompPid.ANALOG_OSC_SETTINGS2 ->
+            "analog sampling settings 2 (0x1018)"
+        TransmitterConstants.UtcompPid.USERSCREEN_SETTINGS -> "user-screen settings (0x1019)"
+        TransmitterConstants.UtcompPid.VREF_SETTINGS -> "Vref settings (0x101A)"
         else -> "0x%04X".format(pid)
+    }
+
+    private fun ByteArray.toCalibrationHex(): String = joinToString(separator = "") { byte ->
+        "%02X".format(Locale.US, byte.toInt() and 0xFF)
     }
 
     private fun updateLiveReadouts() {
