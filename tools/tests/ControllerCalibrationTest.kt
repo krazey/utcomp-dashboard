@@ -11,6 +11,9 @@ private fun assertClose(expected: Float, actual: Float, tolerance: Float = 0.000
     check(abs(expected - actual) <= tolerance) { "expected=$expected actual=$actual" }
 }
 
+private fun String.hexBytes(): ByteArray =
+    chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+
 private fun settingsPayloads(): Map<Int, ByteArray> {
     val temperatures = ByteArray(48) { (0x40 + it).toByte() }
     temperatures[4] = 4
@@ -42,18 +45,43 @@ private fun settingsPayloads(): Map<Int, ByteArray> {
     analog.putF32le(16, -1f)
     analog.putF32le(20, 2.5f)
     analog.putF32le(24, -1.25f)
+    analog.putF32le(28, 250f)
+    analog.putF32le(32, 0f)
+    analog.putF32le(36, 125f)
+    analog.putF32le(40, 1f)
+    analog[44] = 0
+
+    val analog2 = ByteArray(48)
+    analog2.putF32le(0, 0f)
+    analog2.putF32le(4, 5f)
+    analog2.putF32le(8, 6f)
+    analog2.putF32le(12, 0f)
+    analog2.putF32le(16, 1f)
+    analog2.putF32le(20, 0f)
+    analog2.putF32le(24, 450f)
+    analog2.putF32le(28, -225f)
+
+    val general = ByteArray(48)
+    general[6] = 0
+    general[7] = 2
+
+    listOf(5, 10, 20, 5, 50).forEachIndexed { index, value ->
+        gpio[11 + index] = value.toByte()
+    }
 
     return mapOf(
         TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS to temperatures,
         TransmitterConstants.UtcompPid.GPIO_SETTINGS to gpio,
         TransmitterConstants.UtcompPid.ANALOG_SETTINGS1 to analog,
+        TransmitterConstants.UtcompPid.ANALOG_SETTINGS2 to analog2,
+        TransmitterConstants.UtcompPid.GENERAL_SETTINGS1 to general,
     )
 }
 
 fun main() {
     check(TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS == 0x1002)
     check(TransmitterConstants.UtcompPid.SETTINGS_STOP == 0x1030)
-    check(ControllerCalibrationCodec.requiredPids.size == 3)
+    check(ControllerCalibrationCodec.requiredPids.size == 5)
     check(TransmitterConstants.UtcompPid.VREF_SETTINGS !in ControllerCalibrationCodec.requiredPids)
     check(TransmitterConstants.UtcompPid.VREF_SETTINGS !in ControllerCalibrationCodec.writablePids)
 
@@ -65,6 +93,15 @@ fun main() {
     assertClose(-1f, decoded.boost.b)
     assertClose(2.5f, decoded.oilPressure.a)
     assertClose(-1.25f, decoded.oilPressure.b)
+    assertClose(450f, decoded.fuelPressure.a)
+    assertClose(-225f, decoded.fuelPressure.b)
+    assertClose(250f, decoded.egt1.a)
+    assertClose(5f, decoded.fuelLevel.b)
+    assertClose(6f, decoded.adcVoltage1.a)
+    check(decoded.averaging.egtAfr == 5)
+    check(decoded.averaging.ntc == 50)
+    check(decoded.rpmMode == 0)
+    check(decoded.rpmMultiplierCode == 2)
     assertClose(10_250f, decoded.ntc[0].r25Ohms)
     assertClose(3_512f, decoded.ntc[0].betaKelvin)
     check(decoded.temperatureRoles == listOf(1, 2, 3, 0, 4, 0, 0))
@@ -79,8 +116,55 @@ fun main() {
     check(decoded.adcChannelForAnalogMode(ControllerCalibration.ANALOG_MODE_NTC1) == 6)
     check(decoded.adcChannelForAnalogMode(99) == null)
 
+    val brick = checkNotNull(
+        ControllerCalibrationCodec.decode(
+            mapOf(
+                TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS to
+                    ("01020000030100D00446000096440000000000509A44CD0CD8430000000002" +
+                        "CDC0A945CDCCF642000000000000000000").hexBytes(),
+                TransmitterConstants.UtcompPid.GPIO_SETTINGS to
+                    ("0600000003000506000C000A14321414000000000000000000000000000000" +
+                        "0000000000000000000000000000000000").hexBytes(),
+                TransmitterConstants.UtcompPid.ANALOG_SETTINGS1 to
+                    ("000000007B148E3F7B140E417B144E408FC2F5BDAE47E13F7B148EBF9A19AC" +
+                        "439A99993F000000000000000001000000").hexBytes(),
+                TransmitterConstants.UtcompPid.ANALOG_SETTINGS2 to
+                    ("A4709D3FA4704D4085EB0141CDCC0C400000000000000000333348439A9921" +
+                        "C100000000000000000000000000000000").hexBytes(),
+                TransmitterConstants.UtcompPid.GENERAL_SETTINGS1 to
+                    ("0001000000000106000133FF0D09000101000000000000000000000000000201" +
+                        "5C14010000000000000000000000000000").hexBytes(),
+            ),
+        ),
+    )
+    assertClose(1.11f, brick.afr.a)
+    assertClose(8.88f, brick.afr.b)
+    check(brick.afrLambda)
+    assertClose(3.22f, brick.boost.a)
+    assertClose(-0.12f, brick.boost.b)
+    assertClose(1.76f, brick.oilPressure.a)
+    assertClose(-1.11f, brick.oilPressure.b)
+    assertClose(344.2f, brick.egt1.a)
+    assertClose(1.2f, brick.egt1.b)
+    assertClose(1.23f, brick.fuelLevel.a)
+    assertClose(3.21f, brick.fuelLevel.b)
+    assertClose(8.12f, brick.adcVoltage1.a)
+    assertClose(2.2f, brick.adcVoltage1.b)
+    assertClose(200.2f, brick.fuelPressure.a)
+    assertClose(-10.1f, brick.fuelPressure.b)
+    check(brick.averaging == AnalogAveraging(10, 20, 50, 20, 20))
+    check(brick.rpmMode == 1)
+    check(brick.rpmMultiplierCode == 6)
+
     val edited = decoded.copy(
         afr = decoded.afr.copy(a = 2.125f),
+        afrLambda = true,
+        fuelPressure = decoded.fuelPressure.copy(a = 200.2f),
+        fuelLevel = decoded.fuelLevel.copy(a = 1.23f),
+        adcVoltage1 = decoded.adcVoltage1.copy(a = 8.12f, b = 2.2f),
+        averaging = decoded.averaging.copy(egtAfr = 10, ntc = 20),
+        rpmMode = 1,
+        rpmMultiplierCode = 6,
         analogInputModes = decoded.analogInputModes.toMutableList().apply {
             this[1] = ControllerCalibration.ANALOG_MODE_AFR2
         },
@@ -98,6 +182,8 @@ fun main() {
         TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
         TransmitterConstants.UtcompPid.GPIO_SETTINGS,
         TransmitterConstants.UtcompPid.ANALOG_SETTINGS1,
+        TransmitterConstants.UtcompPid.ANALOG_SETTINGS2,
+        TransmitterConstants.UtcompPid.GENERAL_SETTINGS1,
     ))
 
     val roundTripPayloads = originals.toMutableMap().apply { putAll(encoded) }
@@ -106,6 +192,15 @@ fun main() {
     assertClose(10_300f, roundTrip.ntc[0].r25Ohms)
     assertClose(3_520f, roundTrip.ntc[0].betaKelvin)
     assertClose(0.5f, roundTrip.ntc[0].correctionCelsius)
+    check(roundTrip.afrLambda)
+    assertClose(200.2f, roundTrip.fuelPressure.a)
+    assertClose(1.23f, roundTrip.fuelLevel.a)
+    assertClose(8.12f, roundTrip.adcVoltage1.a)
+    assertClose(2.2f, roundTrip.adcVoltage1.b)
+    check(roundTrip.averaging.egtAfr == 10)
+    check(roundTrip.averaging.ntc == 20)
+    check(roundTrip.rpmMode == 1)
+    check(roundTrip.rpmMultiplierCode == 6)
     check(roundTrip.temperatureRoles == listOf(1, 2, 3, 5, 4, 6, 0))
     check(roundTrip.analogInputModes[1] == ControllerCalibration.ANALOG_MODE_AFR2)
     val analogOriginal = originals.getValue(TransmitterConstants.UtcompPid.ANALOG_SETTINGS1)
@@ -115,7 +210,7 @@ fun main() {
         analogUpdated,
     )
     check(analogChangedOffsets.isNotEmpty())
-    check(analogChangedOffsets.all { it in 4..7 }) { analogChangedOffsets }
+    check(analogChangedOffsets.all { it in 4..7 || it == 44 }) { analogChangedOffsets }
     analogOriginal.indices
         .filterNot(analogChangedOffsets::contains)
         .forEach { offset ->
@@ -126,7 +221,27 @@ fun main() {
 
     val gpioOriginal = originals.getValue(TransmitterConstants.UtcompPid.GPIO_SETTINGS)
     val gpioUpdated = encoded.getValue(TransmitterConstants.UtcompPid.GPIO_SETTINGS)
-    check(ControllerCalibrationCodec.changedByteOffsets(gpioOriginal, gpioUpdated) == setOf(5))
+    check(
+        ControllerCalibrationCodec.changedByteOffsets(gpioOriginal, gpioUpdated) ==
+            setOf(5, 11, 15),
+    )
+
+    val analog2Original = originals.getValue(TransmitterConstants.UtcompPid.ANALOG_SETTINGS2)
+    val analog2Updated = encoded.getValue(TransmitterConstants.UtcompPid.ANALOG_SETTINGS2)
+    val analog2ChangedOffsets = ControllerCalibrationCodec.changedByteOffsets(
+        analog2Original,
+        analog2Updated,
+    )
+    check(analog2ChangedOffsets.all { it in 0..3 || it in 8..15 || it in 24..27 }) {
+        analog2ChangedOffsets
+    }
+
+    val generalOriginal = originals.getValue(TransmitterConstants.UtcompPid.GENERAL_SETTINGS1)
+    val generalUpdated = encoded.getValue(TransmitterConstants.UtcompPid.GENERAL_SETTINGS1)
+    check(
+        ControllerCalibrationCodec.changedByteOffsets(generalOriginal, generalUpdated) ==
+            setOf(6, 7),
+    )
 
     val temperaturesOriginal = originals.getValue(
         TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,

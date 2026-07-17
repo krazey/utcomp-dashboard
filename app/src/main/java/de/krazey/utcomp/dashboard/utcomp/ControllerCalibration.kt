@@ -19,10 +19,28 @@ internal data class NtcCalibration(
     val correctionCelsius: Float,
 )
 
+internal data class AnalogAveraging(
+    val egtAfr: Int,
+    val oilPressure: Int,
+    val fuelPressure: Int,
+    val boostPressure: Int,
+    val ntc: Int,
+)
+
 internal data class ControllerCalibration(
     val afr: LinearCalibration,
+    val afrLambda: Boolean,
     val boost: LinearCalibration,
     val oilPressure: LinearCalibration,
+    val fuelPressure: LinearCalibration,
+    val egt1: LinearCalibration,
+    val egt2: LinearCalibration,
+    val fuelLevel: LinearCalibration,
+    val adcVoltage1: LinearCalibration,
+    val adcVoltage2: LinearCalibration,
+    val averaging: AnalogAveraging,
+    val rpmMode: Int,
+    val rpmMultiplierCode: Int,
     val digitalTemperatureRoles: List<Int>,
     val ntc: List<NtcCalibration>,
     val analogInputModes: List<Int>,
@@ -93,6 +111,26 @@ internal data class ControllerCalibration(
         const val ANALOG_MODE_EGT6 = 18
         const val ANALOG_MODE_BATTERY = 19
 
+        const val RPM_MODE_INJECTION = 0
+        const val RPM_MODE_HALL = 1
+
+        val AFR_UNIT_CHOICES = listOf(
+            SettingChoice(0, "AFR"),
+            SettingChoice(1, "Lambda"),
+        )
+
+        val RPM_MODE_CHOICES = listOf(
+            SettingChoice(RPM_MODE_INJECTION, "Injection signal"),
+            SettingChoice(RPM_MODE_HALL, "RPM Hall sensor"),
+        )
+
+        // These two desktop-program values are verified by the supplied profiles.
+        // Unknown controller codes are preserved unless the user explicitly selects one.
+        val RPM_MULTIPLIER_CHOICES = listOf(
+            SettingChoice(2, "2.0×"),
+            SettingChoice(6, "6.5×"),
+        )
+
         val PHYSICAL_ANALOG_INPUTS = listOf(
             "ADC1",
             "ADC2",
@@ -159,17 +197,22 @@ internal object ControllerCalibrationCodec {
     private val TEMPERATURE_ROLE_OFFSETS = listOf(0, 1, 2, 3, 4, 5, 30)
     private val NTC_FLOAT_OFFSETS = listOf(6, 18, 31)
     private val ANALOG_INPUT_MODE_OFFSETS = (4..10).toList()
+    private val AVERAGING_OFFSETS = listOf(11, 12, 13, 14, 15)
 
     val requiredPids: List<Int> = listOf(
         TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
         TransmitterConstants.UtcompPid.GPIO_SETTINGS,
         TransmitterConstants.UtcompPid.ANALOG_SETTINGS1,
+        TransmitterConstants.UtcompPid.ANALOG_SETTINGS2,
+        TransmitterConstants.UtcompPid.GENERAL_SETTINGS1,
     )
 
     val writablePids: Set<Int> = setOf(
         TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
         TransmitterConstants.UtcompPid.GPIO_SETTINGS,
         TransmitterConstants.UtcompPid.ANALOG_SETTINGS1,
+        TransmitterConstants.UtcompPid.ANALOG_SETTINGS2,
+        TransmitterConstants.UtcompPid.GENERAL_SETTINGS1,
     )
 
     fun accepts(pid: Int): Boolean = pid in requiredPids
@@ -182,12 +225,30 @@ internal object ControllerCalibrationCodec {
         )
         val gpio = payloads.getValue(TransmitterConstants.UtcompPid.GPIO_SETTINGS)
         val analog = payloads.getValue(TransmitterConstants.UtcompPid.ANALOG_SETTINGS1)
+        val analog2 = payloads.getValue(TransmitterConstants.UtcompPid.ANALOG_SETTINGS2)
+        val general = payloads.getValue(TransmitterConstants.UtcompPid.GENERAL_SETTINGS1)
 
         val roles = TEMPERATURE_ROLE_OFFSETS.map(temperatures::u8)
         return ControllerCalibration(
             afr = LinearCalibration(analog.f32le(4), analog.f32le(8)),
+            afrLambda = analog.u8(44) != 0,
             boost = LinearCalibration(analog.f32le(12), analog.f32le(16)),
             oilPressure = LinearCalibration(analog.f32le(20), analog.f32le(24)),
+            fuelPressure = LinearCalibration(analog2.f32le(24), analog2.f32le(28)),
+            egt1 = LinearCalibration(analog.f32le(28), analog.f32le(32)),
+            egt2 = LinearCalibration(analog.f32le(36), analog.f32le(40)),
+            fuelLevel = LinearCalibration(analog2.f32le(0), analog2.f32le(4)),
+            adcVoltage1 = LinearCalibration(analog2.f32le(8), analog2.f32le(12)),
+            adcVoltage2 = LinearCalibration(analog2.f32le(16), analog2.f32le(20)),
+            averaging = AnalogAveraging(
+                egtAfr = gpio.u8(AVERAGING_OFFSETS[0]),
+                oilPressure = gpio.u8(AVERAGING_OFFSETS[1]),
+                fuelPressure = gpio.u8(AVERAGING_OFFSETS[2]),
+                boostPressure = gpio.u8(AVERAGING_OFFSETS[3]),
+                ntc = gpio.u8(AVERAGING_OFFSETS[4]),
+            ),
+            rpmMode = general.u8(6),
+            rpmMultiplierCode = general.u8(7),
             digitalTemperatureRoles = roles.take(4),
             ntc = NTC_FLOAT_OFFSETS.mapIndexed { index, offset ->
                 NtcCalibration(
@@ -235,6 +296,23 @@ internal object ControllerCalibrationCodec {
                 calibration.analogInputModes[index],
             )
         }
+        val averagingBefore = listOf(
+            original.averaging.egtAfr,
+            original.averaging.oilPressure,
+            original.averaging.fuelPressure,
+            original.averaging.boostPressure,
+            original.averaging.ntc,
+        )
+        val averagingAfter = listOf(
+            calibration.averaging.egtAfr,
+            calibration.averaging.oilPressure,
+            calibration.averaging.fuelPressure,
+            calibration.averaging.boostPressure,
+            calibration.averaging.ntc,
+        )
+        AVERAGING_OFFSETS.forEachIndexed { index, offset ->
+            gpio.putChangedByte(offset, averagingBefore[index], averagingAfter[index])
+        }
 
         val analog = originalPayload(
             originalPayloads,
@@ -246,11 +324,38 @@ internal object ControllerCalibrationCodec {
         analog.putChangedFloat(16, original.boost.b, calibration.boost.b)
         analog.putChangedFloat(20, original.oilPressure.a, calibration.oilPressure.a)
         analog.putChangedFloat(24, original.oilPressure.b, calibration.oilPressure.b)
+        analog.putChangedFloat(28, original.egt1.a, calibration.egt1.a)
+        analog.putChangedFloat(32, original.egt1.b, calibration.egt1.b)
+        analog.putChangedFloat(36, original.egt2.a, calibration.egt2.a)
+        analog.putChangedFloat(40, original.egt2.b, calibration.egt2.b)
+        analog.putChangedByte(44, if (original.afrLambda) 1 else 0, if (calibration.afrLambda) 1 else 0)
+
+        val analog2 = originalPayload(
+            originalPayloads,
+            TransmitterConstants.UtcompPid.ANALOG_SETTINGS2,
+        )
+        analog2.putChangedFloat(0, original.fuelLevel.a, calibration.fuelLevel.a)
+        analog2.putChangedFloat(4, original.fuelLevel.b, calibration.fuelLevel.b)
+        analog2.putChangedFloat(8, original.adcVoltage1.a, calibration.adcVoltage1.a)
+        analog2.putChangedFloat(12, original.adcVoltage1.b, calibration.adcVoltage1.b)
+        analog2.putChangedFloat(16, original.adcVoltage2.a, calibration.adcVoltage2.a)
+        analog2.putChangedFloat(20, original.adcVoltage2.b, calibration.adcVoltage2.b)
+        analog2.putChangedFloat(24, original.fuelPressure.a, calibration.fuelPressure.a)
+        analog2.putChangedFloat(28, original.fuelPressure.b, calibration.fuelPressure.b)
+
+        val general = originalPayload(
+            originalPayloads,
+            TransmitterConstants.UtcompPid.GENERAL_SETTINGS1,
+        )
+        general.putChangedByte(6, original.rpmMode, calibration.rpmMode)
+        general.putChangedByte(7, original.rpmMultiplierCode, calibration.rpmMultiplierCode)
 
         return linkedMapOf(
             TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS to temperatures,
             TransmitterConstants.UtcompPid.GPIO_SETTINGS to gpio,
             TransmitterConstants.UtcompPid.ANALOG_SETTINGS1 to analog,
+            TransmitterConstants.UtcompPid.ANALOG_SETTINGS2 to analog2,
+            TransmitterConstants.UtcompPid.GENERAL_SETTINGS1 to general,
         )
     }
 

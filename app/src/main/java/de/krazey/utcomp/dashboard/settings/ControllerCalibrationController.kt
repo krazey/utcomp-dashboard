@@ -76,8 +76,6 @@ internal class ControllerCalibrationController(
         val SUPPLEMENTAL_DIAGNOSTIC_PIDS: List<Int> = listOf(
             TransmitterConstants.UtcompPid.VSS_SETTINGS,
             TransmitterConstants.UtcompPid.CONSUMPTION_SETTINGS,
-            TransmitterConstants.UtcompPid.ANALOG_SETTINGS2,
-            TransmitterConstants.UtcompPid.GENERAL_SETTINGS1,
             TransmitterConstants.UtcompPid.ANALOG_OSC_SETTINGS1,
             TransmitterConstants.UtcompPid.ANALOG_OSC_SETTINGS2,
             TransmitterConstants.UtcompPid.USERSCREEN_SETTINGS,
@@ -110,6 +108,31 @@ internal class ControllerCalibrationController(
     private lateinit var boostB: EditText
     private lateinit var oilPressureA: EditText
     private lateinit var oilPressureB: EditText
+    private lateinit var fuelPressureA: EditText
+    private lateinit var fuelPressureB: EditText
+    private lateinit var egt1A: EditText
+    private lateinit var egt1B: EditText
+    private lateinit var egt2A: EditText
+    private lateinit var egt2B: EditText
+    private lateinit var fuelLevelA: EditText
+    private lateinit var fuelLevelB: EditText
+    private lateinit var adcVoltage1A: EditText
+    private lateinit var adcVoltage1B: EditText
+    private lateinit var adcVoltage2A: EditText
+    private lateinit var adcVoltage2B: EditText
+    private lateinit var averagingEgtAfr: EditText
+    private lateinit var averagingOil: EditText
+    private lateinit var averagingFuel: EditText
+    private lateinit var averagingBoost: EditText
+    private lateinit var averagingNtc: EditText
+    private lateinit var afrUnitEditor: ChoiceEditor
+    private lateinit var rpmModeEditor: ChoiceEditor
+    private lateinit var rpmMultiplierEditor: ChoiceEditor
+    private lateinit var fuelPressureLive: TextView
+    private lateinit var egt1Live: TextView
+    private lateinit var egt2Live: TextView
+    private lateinit var fuelLevelLive: TextView
+    private lateinit var rpmLive: TextView
     private val editors = mutableListOf<EditText>()
     private val analogModeEditors = mutableListOf<ChoiceEditor>()
     private val temperatureRoleEditors = mutableListOf<ChoiceEditor>()
@@ -138,6 +161,7 @@ internal class ControllerCalibrationController(
     private var liveAfr2 = Float.NaN
     private var liveFuelPressure = Float.NaN
     private var liveGear = 0
+    private var liveRpm = 0
     private var liveVrefMillivolts = 0
     private val liveAdcVolts = FloatArray(8) { Float.NaN }
     private val livePhysicalTemperatures = FloatArray(7) { Float.NaN }
@@ -231,6 +255,7 @@ internal class ControllerCalibrationController(
         afrLive = liveValueText()
         afrA = numberEditor("2")
         afrB = numberEditor("10")
+        afrUnitEditor = choiceEditor("AFR display unit", ControllerCalibration.AFR_UNIT_CHOICES)
         content.addView(
             linearSection(
                 title = "AFR",
@@ -240,7 +265,9 @@ internal class ControllerCalibrationController(
                 first = afrA,
                 secondLabel = "b",
                 second = afrB,
-            ),
+            ).apply {
+                addView(assignmentRow("Output unit", assignmentLiveText(), afrUnitEditor.button))
+            },
             panelLayoutParams(),
         )
 
@@ -275,6 +302,91 @@ internal class ControllerCalibrationController(
             ),
             panelLayoutParams(),
         )
+
+        fuelPressureLive = liveValueText()
+        fuelPressureA = numberEditor("450")
+        fuelPressureB = numberEditor("-225")
+        content.addView(
+            linearSection(
+                title = "Fuel pressure",
+                description = "bar = a × input voltage + b",
+                live = fuelPressureLive,
+                firstLabel = "a",
+                first = fuelPressureA,
+                secondLabel = "b",
+                second = fuelPressureB,
+            ),
+            panelLayoutParams(),
+        )
+
+        egt1Live = liveValueText()
+        egt1A = numberEditor("250")
+        egt1B = numberEditor("0")
+        content.addView(
+            linearSection(
+                title = "EGT calibration 1",
+                description = "Primary UTCOMP EGT conversion pair: °C = a × voltage + b",
+                live = egt1Live,
+                firstLabel = "a",
+                first = egt1A,
+                secondLabel = "b",
+                second = egt1B,
+            ),
+            panelLayoutParams(),
+        )
+
+        egt2Live = liveValueText()
+        egt2A = numberEditor("0")
+        egt2B = numberEditor("0")
+        content.addView(
+            linearSection(
+                title = "EGT calibration 2",
+                description = "Secondary UTCOMP EGT conversion pair: °C = a × voltage + b",
+                live = egt2Live,
+                firstLabel = "a",
+                first = egt2A,
+                secondLabel = "b",
+                second = egt2B,
+            ),
+            panelLayoutParams(),
+        )
+
+        fuelLevelLive = liveValueText()
+        fuelLevelA = numberEditor("0")
+        fuelLevelB = numberEditor("5")
+        content.addView(
+            linearSection(
+                title = "Fuel level",
+                description = "Fuel-level conversion = a × input voltage + b",
+                live = fuelLevelLive,
+                firstLabel = "a",
+                first = fuelLevelA,
+                secondLabel = "b",
+                second = fuelLevelB,
+            ),
+            panelLayoutParams(),
+        )
+
+        adcVoltage1A = numberEditor("6")
+        adcVoltage1B = numberEditor("0")
+        adcVoltage2A = numberEditor("0")
+        adcVoltage2B = numberEditor("0")
+        content.addView(adcVoltageCalibrationSection(), panelLayoutParams())
+
+        averagingEgtAfr = integerEditor("5")
+        averagingOil = integerEditor("10")
+        averagingFuel = integerEditor("20")
+        averagingBoost = integerEditor("5")
+        averagingNtc = integerEditor("50")
+        content.addView(averagingSection(), panelLayoutParams())
+
+        rpmLive = liveValueText()
+        rpmModeEditor = choiceEditor("RPM source", ControllerCalibration.RPM_MODE_CHOICES)
+        rpmMultiplierEditor = choiceEditor(
+            "RPM multiplier",
+            ControllerCalibration.RPM_MULTIPLIER_CHOICES,
+        )
+        content.addView(rpmSection(), panelLayoutParams())
 
         oilTemperatureLive = liveValueText()
         content.addView(ntcProfilesSection(), panelLayoutParams())
@@ -453,6 +565,7 @@ internal class ControllerCalibrationController(
                     snapshot.egt5,
                     snapshot.egt6,
                 )
+                val rpm = snapshot.rpm
                 activity.runOnUiThread {
                     if (!canShowLiveValues()) return@runOnUiThread
                     liveAfr = afr
@@ -462,6 +575,7 @@ internal class ControllerCalibrationController(
                     liveFuelPressure = fuelPressure
                     livePhysicalTemperatures[6] = ntc3
                     egt.copyInto(liveEgt)
+                    liveRpm = rpm
                     updateLiveReadouts()
                 }
             }
@@ -798,6 +912,7 @@ internal class ControllerCalibrationController(
                 parseLinear(afrA, "AFR a"),
                 parseLinear(afrB, "AFR b"),
             ),
+            afrLambda = afrUnitEditor.value != 0,
             boost = LinearCalibration(
                 parseLinear(boostA, "Boost a"),
                 parseLinear(boostB, "Boost b"),
@@ -806,6 +921,39 @@ internal class ControllerCalibrationController(
                 parseLinear(oilPressureA, "Oil pressure a"),
                 parseLinear(oilPressureB, "Oil pressure b"),
             ),
+            fuelPressure = LinearCalibration(
+                parseLinear(fuelPressureA, "Fuel pressure a"),
+                parseLinear(fuelPressureB, "Fuel pressure b"),
+            ),
+            egt1 = LinearCalibration(
+                parseLinear(egt1A, "EGT calibration 1 a"),
+                parseLinear(egt1B, "EGT calibration 1 b"),
+            ),
+            egt2 = LinearCalibration(
+                parseLinear(egt2A, "EGT calibration 2 a"),
+                parseLinear(egt2B, "EGT calibration 2 b"),
+            ),
+            fuelLevel = LinearCalibration(
+                parseLinear(fuelLevelA, "Fuel level a"),
+                parseLinear(fuelLevelB, "Fuel level b"),
+            ),
+            adcVoltage1 = LinearCalibration(
+                parseLinear(adcVoltage1A, "ADC calibration 1 multiplier"),
+                parseLinear(adcVoltage1B, "ADC calibration 1 offset"),
+            ),
+            adcVoltage2 = LinearCalibration(
+                parseLinear(adcVoltage2A, "ADC calibration 2 multiplier"),
+                parseLinear(adcVoltage2B, "ADC calibration 2 offset"),
+            ),
+            averaging = base.averaging.copy(
+                egtAfr = parseByte(averagingEgtAfr, "EGT + AFR averaging"),
+                oilPressure = parseByte(averagingOil, "Oil-pressure averaging"),
+                fuelPressure = parseByte(averagingFuel, "Fuel-pressure averaging"),
+                boostPressure = parseByte(averagingBoost, "Boost-pressure averaging"),
+                ntc = parseByte(averagingNtc, "NTC averaging"),
+            ),
+            rpmMode = rpmModeEditor.value,
+            rpmMultiplierCode = rpmMultiplierEditor.value,
             ntc = editedNtc,
             analogInputModes = analogModes,
         ).withTemperatureRoles(temperatureRoles)
@@ -840,6 +988,13 @@ internal class ControllerCalibrationController(
     private fun parseLinear(editor: EditText, name: String): Float =
         parseFloat(editor, name).requireRange(-10_000f, 10_000f, name)
 
+    private fun parseByte(editor: EditText, name: String): Int {
+        val value = editor.text.toString().trim().toIntOrNull()
+            ?: throw IllegalArgumentException("$name is not a whole number")
+        require(value in 1..255) { "$name must be between 1 and 255" }
+        return value
+    }
+
     private fun parseFloat(editor: EditText, name: String): Float {
         val value = editor.text.toString().trim().replace(',', '.').toFloatOrNull()
             ?: throw IllegalArgumentException("$name is not a valid number")
@@ -857,10 +1012,33 @@ internal class ControllerCalibrationController(
         try {
             afrA.setText(format(calibration.afr.a))
             afrB.setText(format(calibration.afr.b))
+            afrUnitEditor.value = if (calibration.afrLambda) 1 else 0
+            updateChoiceButton(afrUnitEditor)
             boostA.setText(format(calibration.boost.a))
             boostB.setText(format(calibration.boost.b))
             oilPressureA.setText(format(calibration.oilPressure.a))
             oilPressureB.setText(format(calibration.oilPressure.b))
+            fuelPressureA.setText(format(calibration.fuelPressure.a))
+            fuelPressureB.setText(format(calibration.fuelPressure.b))
+            egt1A.setText(format(calibration.egt1.a))
+            egt1B.setText(format(calibration.egt1.b))
+            egt2A.setText(format(calibration.egt2.a))
+            egt2B.setText(format(calibration.egt2.b))
+            fuelLevelA.setText(format(calibration.fuelLevel.a))
+            fuelLevelB.setText(format(calibration.fuelLevel.b))
+            adcVoltage1A.setText(format(calibration.adcVoltage1.a))
+            adcVoltage1B.setText(format(calibration.adcVoltage1.b))
+            adcVoltage2A.setText(format(calibration.adcVoltage2.a))
+            adcVoltage2B.setText(format(calibration.adcVoltage2.b))
+            averagingEgtAfr.setText(calibration.averaging.egtAfr.toString())
+            averagingOil.setText(calibration.averaging.oilPressure.toString())
+            averagingFuel.setText(calibration.averaging.fuelPressure.toString())
+            averagingBoost.setText(calibration.averaging.boostPressure.toString())
+            averagingNtc.setText(calibration.averaging.ntc.toString())
+            rpmModeEditor.value = calibration.rpmMode
+            updateChoiceButton(rpmModeEditor)
+            rpmMultiplierEditor.value = calibration.rpmMultiplierCode
+            updateChoiceButton(rpmMultiplierEditor)
             analogModeEditors.forEachIndexed { index, editor ->
                 editor.value = calibration.analogInputModes[index]
                 updateChoiceButton(editor)
@@ -892,8 +1070,42 @@ internal class ControllerCalibrationController(
         after: ControllerCalibration,
     ): List<String> = buildList {
         addLinearChanges("AFR", before.afr, after.afr)
+        if (before.afrLambda != after.afrLambda) {
+            val oldUnit = if (before.afrLambda) "Lambda" else "AFR"
+            val newUnit = if (after.afrLambda) "Lambda" else "AFR"
+            add("AFR unit: $oldUnit → $newUnit")
+        }
         addLinearChanges("Boost", before.boost, after.boost)
         addLinearChanges("Oil pressure", before.oilPressure, after.oilPressure)
+        addLinearChanges("Fuel pressure", before.fuelPressure, after.fuelPressure)
+        addLinearChanges("EGT calibration 1", before.egt1, after.egt1)
+        addLinearChanges("EGT calibration 2", before.egt2, after.egt2)
+        addLinearChanges("Fuel level", before.fuelLevel, after.fuelLevel)
+        addLinearChanges("ADC calibration 1", before.adcVoltage1, after.adcVoltage1)
+        addLinearChanges("ADC calibration 2", before.adcVoltage2, after.adcVoltage2)
+        addIntChange("EGT + AFR averaging", before.averaging.egtAfr, after.averaging.egtAfr)
+        addIntChange(
+            "Oil-pressure averaging",
+            before.averaging.oilPressure,
+            after.averaging.oilPressure,
+        )
+        addIntChange(
+            "Fuel-pressure averaging",
+            before.averaging.fuelPressure,
+            after.averaging.fuelPressure,
+        )
+        addIntChange(
+            "Boost-pressure averaging",
+            before.averaging.boostPressure,
+            after.averaging.boostPressure,
+        )
+        addIntChange("NTC averaging", before.averaging.ntc, after.averaging.ntc)
+        addIntChange("RPM source code", before.rpmMode, after.rpmMode)
+        addIntChange(
+            "RPM multiplier code",
+            before.rpmMultiplierCode,
+            after.rpmMultiplierCode,
+        )
         before.analogInputModes.indices.forEach { index ->
             val old = before.analogInputModes[index]
             val new = after.analogInputModes[index]
@@ -947,6 +1159,10 @@ internal class ControllerCalibrationController(
         }
     }
 
+    private fun MutableList<String>.addIntChange(name: String, before: Int, after: Int) {
+        if (before != after) add("$name: $before → $after")
+    }
+
     private fun sameFloat(first: Float, second: Float): Boolean =
         first.toRawBits() == second.toRawBits()
 
@@ -994,9 +1210,45 @@ internal class ControllerCalibrationController(
         first: EditText,
         secondLabel: String,
         second: EditText,
-    ): View = section(title, description).apply {
+    ): LinearLayout = section(title, description).apply {
         addView(live)
         addView(editorRow(firstLabel, first, secondLabel, second))
+    }
+
+    private fun adcVoltageCalibrationSection(): View = section(
+        title = "ADC voltage calibration",
+        description = "Controller voltage = multiplier × measured voltage + offset.",
+    ).apply {
+        addView(TextView(activity).apply {
+            text = "ADC calibration 1"
+            setTextColor(Color.WHITE)
+        })
+        addView(editorRow("Multiplier", adcVoltage1A, "Offset", adcVoltage1B))
+        addView(TextView(activity).apply {
+            text = "ADC calibration 2"
+            setTextColor(Color.WHITE)
+            setPadding(0, dp(10f), 0, 0)
+        })
+        addView(editorRow("Multiplier", adcVoltage2A, "Offset", adcVoltage2B))
+    }
+
+    private fun averagingSection(): View = section(
+        title = "Analog sensor averaging",
+        description = "Number of samples per measurement; larger values react more slowly.",
+    ).apply {
+        addView(editorRow("EGT + AFR", averagingEgtAfr, "Oil pressure", averagingOil))
+        addView(editorRow("Fuel pressure", averagingFuel, "Boost pressure", averagingBoost))
+        addView(editorRow("NTC sensors", averagingNtc, null, null))
+    }
+
+    private fun rpmSection(): View = section(
+        title = "RPM input",
+        description =
+            "Only multiplier codes verified from the supplied desktop profiles are offered.",
+    ).apply {
+        addView(rpmLive)
+        addView(assignmentRow("Signal source", assignmentLiveText(), rpmModeEditor.button))
+        addView(assignmentRow("Multiplier", assignmentLiveText(), rpmMultiplierEditor.button))
     }
 
     private fun analogAssignmentsSection(): View = section(
@@ -1209,6 +1461,11 @@ internal class ControllerCalibrationController(
             InputType.TYPE_NUMBER_FLAG_SIGNED,
     )
 
+    private fun integerEditor(hintText: String): EditText = createEditor(
+        hintText,
+        InputType.TYPE_CLASS_NUMBER,
+    )
+
     private fun createEditor(hintText: String, input: Int): EditText =
         EditText(activity).apply {
             hint = hintText
@@ -1279,6 +1536,12 @@ internal class ControllerCalibrationController(
         temperatureRoleEditors.forEach { editor ->
             editor.button.isEnabled = canEdit
             setButtonVisual(editor.button)
+        }
+        if (::afrUnitEditor.isInitialized) {
+            listOf(afrUnitEditor, rpmModeEditor, rpmMultiplierEditor).forEach { editor ->
+                editor.button.isEnabled = canEdit
+                setButtonVisual(editor.button)
+            }
         }
         refreshButton.isEnabled = idle
         writeButton.isEnabled = canEdit
@@ -1360,6 +1623,11 @@ internal class ControllerCalibrationController(
                 boostLive,
                 oilPressureLive,
                 oilTemperatureLive,
+                fuelPressureLive,
+                egt1Live,
+                egt2Live,
+                fuelLevelLive,
+                rpmLive,
                 vrefLive,
             ).forEach { it.text = "LIVE · waiting for controller data" }
             analogAssignmentLive.forEach { it.text = "LIVE · waiting" }
@@ -1413,7 +1681,7 @@ internal class ControllerCalibrationController(
 
         afrLive.text = linearLiveText(
             liveAfr,
-            "AFR",
+            if (calibration.afrLambda) "λ" else "AFR",
             calibration,
             ControllerCalibration.ANALOG_MODE_AFR,
             2,
@@ -1432,6 +1700,22 @@ internal class ControllerCalibrationController(
             ControllerCalibration.ANALOG_MODE_OIL_PRESSURE,
             2,
         )
+        fuelPressureLive.text = linearLiveText(
+            liveFuelPressure,
+            "bar",
+            calibration,
+            ControllerCalibration.ANALOG_MODE_FUEL_PRESSURE,
+            2,
+        )
+        egt1Live.text =
+            "LIVE  EGT1 ${liveEgt[0]} °C · EGT2 ${liveEgt[1]} °C · EGT3 ${liveEgt[2]} °C"
+        egt2Live.text =
+            "LIVE  EGT4 ${liveEgt[3]} °C · EGT5 ${liveEgt[4]} °C · EGT6 ${liveEgt[5]} °C"
+        fuelLevelLive.text = rawInputLiveText(
+            calibration,
+            ControllerCalibration.ANALOG_MODE_FUEL_LEVEL,
+        )
+        rpmLive.text = "LIVE  $liveRpm rpm"
 
         val ntcIndex = calibration.oilTemperatureNtcIndex()
         val ntcMode = ntcIndex?.let { ControllerCalibration.ANALOG_MODE_NTC1 + it }
@@ -1500,6 +1784,16 @@ internal class ControllerCalibrationController(
         append(" V")
     }
 
+    private fun rawInputLiveText(calibration: ControllerCalibration, analogMode: Int): String {
+        val input = calibration.inputForAnalogMode(analogMode)
+        val channel = calibration.adcChannelForAnalogMode(analogMode)
+        return if (input == null || channel == null) {
+            "LIVE · input not assigned"
+        } else {
+            "LIVE  $input ${formatLive(liveAdcVolts.getOrElse(channel) { Float.NaN }, 3)} V"
+        }
+    }
+
     private fun formatLive(value: Float, decimals: Int): String =
         if (value.isFinite()) {
             String.format(Locale.US, "%.${decimals}f", value)
@@ -1515,6 +1809,7 @@ internal class ControllerCalibrationController(
         liveAfr2 = Float.NaN
         liveFuelPressure = Float.NaN
         liveGear = 0
+        liveRpm = 0
         liveVrefMillivolts = 0
         liveAdcVolts.fill(Float.NaN)
         livePhysicalTemperatures.fill(Float.NaN)

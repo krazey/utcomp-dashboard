@@ -55,9 +55,11 @@ name as a page-specific subtitle. Firmware and input mappings are refreshed
 automatically after USB connects.
 
 The top-bar CAL action opens a dedicated UTCOMP PRO sensor-calibration page.
-It reads the current controller payloads before exposing AFR, boost, oil
-pressure, all three NTC profiles, all seven physical ADC assignments, and all
-four DS plus three NTC temperature-role assignments. Available analog functions
+It reads the current controller payloads before exposing AFR/Lambda, boost, oil
+and fuel pressure, both EGT conversion pairs, fuel level, ADC-voltage
+calibration, analog averaging, verified RPM settings, all three NTC profiles,
+all seven physical ADC assignments, and all four DS plus three NTC
+temperature-role assignments. Available analog functions
 include AFR1/2, boost, oil and fuel pressure, EGT1-6, NTC1-3, fuel level, gear,
 battery voltage, lambda O2, and oscilloscope/raw voltage. Live raw voltage or
 temperature and available decoded values are shown beside every assignment;

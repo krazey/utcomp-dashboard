@@ -56,6 +56,8 @@
 - Configure all seven physical ADC inputs with every UTCOMP analog sensor function.
 - Assign all four DS and three NTC sources to the six logical temperature roles.
 - Edit all three NTC profiles and show live raw and decoded values beside assignments.
+- Add verified AFR/Lambda, fuel-pressure, EGT, fuel-level, ADC-voltage, averaging, and RPM settings.
+- Read and verify the second analog and general-settings packets before enabling those writes.
 
 ## 1.0.0
 
