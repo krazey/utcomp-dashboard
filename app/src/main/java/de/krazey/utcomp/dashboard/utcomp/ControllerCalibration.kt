@@ -20,7 +20,6 @@ internal data class ControllerCalibration(
     val oilPressure: LinearCalibration,
     val ntc: List<NtcCalibration>,
     val analogInputModes: List<Int>,
-    val vrefMillivolts: Int,
 ) {
     fun inputForAnalogMode(mode: Int): String? =
         analogInputModes.indexOfFirst { it == mode }
@@ -70,13 +69,11 @@ internal object ControllerCalibrationCodec {
         TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
         TransmitterConstants.UtcompPid.GPIO_SETTINGS,
         TransmitterConstants.UtcompPid.ANALOG_SETTINGS1,
-        TransmitterConstants.UtcompPid.VREF_SETTINGS,
     )
 
     val writablePids: Set<Int> = setOf(
         TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
         TransmitterConstants.UtcompPid.ANALOG_SETTINGS1,
-        TransmitterConstants.UtcompPid.VREF_SETTINGS,
     )
 
     fun accepts(pid: Int): Boolean = pid in requiredPids
@@ -89,7 +86,6 @@ internal object ControllerCalibrationCodec {
         )
         val gpio = payloads.getValue(TransmitterConstants.UtcompPid.GPIO_SETTINGS)
         val analog = payloads.getValue(TransmitterConstants.UtcompPid.ANALOG_SETTINGS1)
-        val vref = payloads.getValue(TransmitterConstants.UtcompPid.VREF_SETTINGS)
 
         return ControllerCalibration(
             afr = LinearCalibration(analog.f32le(4), analog.f32le(8)),
@@ -116,7 +112,6 @@ internal object ControllerCalibrationCodec {
                 ),
             ),
             analogInputModes = (4..10).map(gpio::u8),
-            vrefMillivolts = vref.u16le(0),
         )
     }
 
@@ -148,18 +143,9 @@ internal object ControllerCalibrationCodec {
         analog.putChangedFloat(20, original.oilPressure.a, calibration.oilPressure.a)
         analog.putChangedFloat(24, original.oilPressure.b, calibration.oilPressure.b)
 
-        val vref = originalPayload(
-            originalPayloads,
-            TransmitterConstants.UtcompPid.VREF_SETTINGS,
-        )
-        if (original.vrefMillivolts != calibration.vrefMillivolts) {
-            vref.putU16le(0, calibration.vrefMillivolts)
-        }
-
         return linkedMapOf(
             TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS to temperatures,
             TransmitterConstants.UtcompPid.ANALOG_SETTINGS1 to analog,
-            TransmitterConstants.UtcompPid.VREF_SETTINGS to vref,
         )
     }
 

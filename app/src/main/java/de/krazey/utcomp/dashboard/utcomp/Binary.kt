@@ -24,13 +24,6 @@ internal fun ByteArray.f32le(offset: Int): Float {
     return Float.fromBits(bits)
 }
 
-internal fun ByteArray.putU16le(offset: Int, value: Int) {
-    require(offset >= 0 && offset + 1 < size) { "u16 write exceeds payload" }
-    require(value in 0..0xffff) { "u16 value out of range: $value" }
-    this[offset] = (value and 0xff).toByte()
-    this[offset + 1] = ((value ushr 8) and 0xff).toByte()
-}
-
 internal fun ByteArray.putF32le(offset: Int, value: Float) {
     require(offset >= 0 && offset + Float.SIZE_BYTES <= size) {
         "f32 write exceeds payload"

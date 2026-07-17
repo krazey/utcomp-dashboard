@@ -86,7 +86,6 @@ internal class ControllerCalibrationController(
     private lateinit var oilPressureB: EditText
     private lateinit var ntcR25: EditText
     private lateinit var ntcBeta: EditText
-    private lateinit var vrefMillivolts: EditText
     private val editors = mutableListOf<EditText>()
 
     private var operation = Operation.IDLE
@@ -126,10 +125,16 @@ internal class ControllerCalibrationController(
         if (operation != Operation.READING) return@Runnable
         operation = Operation.IDLE
         loadedCalibration = null
+        val missing = missingReadPids()
+        val missingText = missing.joinToString { describePid(it) }
         setStatus(
-            "Read timed out (${receivedPayloads.size}/${ControllerCalibrationCodec.requiredPids.size} packets). " +
-                "Check USB and tap Refresh.",
+            "Sensor-settings read timed out; missing $missingText. Check USB and tap Refresh.",
             ERROR_COLOR,
+        )
+        appendLog(
+            "Controller calibration read timed out; received=" +
+                receivedPayloads.keys.joinToString { describePid(it) } +
+                " missing=$missingText",
         )
         updateEnabledState()
     }
@@ -151,7 +156,7 @@ internal class ControllerCalibrationController(
             WARNING_COLOR,
         )
         updateEnabledState()
-        pendingVerification.keys.forEach(requestPacket)
+        requestNextVerificationPacket()
         mainHandler.removeCallbacks(verifyTimeout)
         mainHandler.postDelayed(verifyTimeout, VERIFY_TIMEOUT_MS)
     }
@@ -250,7 +255,6 @@ internal class ControllerCalibrationController(
         content.addView(ntcSection(), panelLayoutParams())
 
         vrefLive = liveValueText()
-        vrefMillivolts = integerEditor("5212")
         content.addView(vrefSection(), panelLayoutParams())
 
         val scroll = ScrollView(activity).apply {
@@ -436,11 +440,11 @@ internal class ControllerCalibrationController(
         pendingVerification.clear()
         verificationFailures.clear()
         setStatus(
-            "Reading 0/${ControllerCalibrationCodec.requiredPids.size} settings packets…",
+            "Reading 0/${ControllerCalibrationCodec.requiredPids.size} sensor-settings packets…",
             WARNING_COLOR,
         )
         updateEnabledState()
-        ControllerCalibrationCodec.requiredPids.forEach(requestPacket)
+        requestNextReadPacket()
         mainHandler.postDelayed(readTimeout, READ_TIMEOUT_MS)
         appendLog("Controller calibration read started")
     }
@@ -455,13 +459,22 @@ internal class ControllerCalibrationController(
     }
 
     private fun receiveReadPayload(pid: Int, payload: ByteArray) {
+        val firstReceipt = pid !in receivedPayloads
         receivedPayloads[pid] = payload
         val count = ControllerCalibrationCodec.requiredPids.count(receivedPayloads::containsKey)
         setStatus(
-            "Reading $count/${ControllerCalibrationCodec.requiredPids.size} settings packets…",
+            "Reading $count/${ControllerCalibrationCodec.requiredPids.size} sensor-settings packets…",
             WARNING_COLOR,
         )
-        if (count != ControllerCalibrationCodec.requiredPids.size) return
+        if (firstReceipt) {
+            appendLog("Controller calibration received ${describePid(pid)}")
+        }
+        if (count != ControllerCalibrationCodec.requiredPids.size) {
+            mainHandler.removeCallbacks(readTimeout)
+            requestNextReadPacket()
+            mainHandler.postDelayed(readTimeout, READ_TIMEOUT_MS)
+            return
+        }
 
         val decoded = ControllerCalibrationCodec.decode(receivedPayloads)
         if (decoded == null) {
@@ -477,7 +490,7 @@ internal class ControllerCalibrationController(
         loadedCalibration = decoded
         populateEditors(decoded)
         setStatus(
-            "Loaded directly from UTCOMP · Vref ${formatVolts(decoded.vrefMillivolts)} V",
+            "Sensor calibration loaded directly from UTCOMP.",
             GOOD_COLOR,
         )
         appendLog("Controller calibration read complete")
@@ -503,7 +516,12 @@ internal class ControllerCalibrationController(
             "Reading back ${receivedVerificationCount()}/$verificationTargetCount changed packets…",
             WARNING_COLOR,
         )
-        if (pendingVerification.isNotEmpty()) return
+        if (pendingVerification.isNotEmpty()) {
+            mainHandler.removeCallbacks(verifyTimeout)
+            requestNextVerificationPacket()
+            mainHandler.postDelayed(verifyTimeout, VERIFY_TIMEOUT_MS)
+            return
+        }
 
         mainHandler.removeCallbacks(verifyTimeout)
         if (verificationFailures.isNotEmpty()) {
@@ -682,10 +700,6 @@ internal class ControllerCalibrationController(
             )
         }
 
-        val vref = vrefMillivolts.text.toString().trim().toIntOrNull()
-            ?: throw IllegalArgumentException("Vref must be an integer in millivolts")
-        require(vref in 4_000..6_000) { "Vref must be between 4000 and 6000 mV" }
-
         return base.copy(
             afr = LinearCalibration(
                 parseLinear(afrA, "AFR a"),
@@ -700,7 +714,6 @@ internal class ControllerCalibrationController(
                 parseLinear(oilPressureB, "Oil pressure b"),
             ),
             ntc = editedNtc,
-            vrefMillivolts = vref,
         )
     }
 
@@ -728,8 +741,6 @@ internal class ControllerCalibrationController(
             boostB.setText(format(calibration.boost.b))
             oilPressureA.setText(format(calibration.oilPressure.a))
             oilPressureB.setText(format(calibration.oilPressure.b))
-            vrefMillivolts.setText(calibration.vrefMillivolts.toString())
-
             oilNtcIndex = calibration.oilTemperatureNtcIndex()
             val ntcIndex = oilNtcIndex
             if (ntcIndex != null) {
@@ -785,9 +796,6 @@ internal class ControllerCalibrationController(
             if (!sameFloat(old.betaKelvin, new.betaKelvin)) {
                 add("NTC${index + 1} beta: ${format(old.betaKelvin)} → ${format(new.betaKelvin)} K")
             }
-        }
-        if (before.vrefMillivolts != after.vrefMillivolts) {
-            add("Vref: ${before.vrefMillivolts} → ${after.vrefMillivolts} mV")
         }
     }
 
@@ -875,11 +883,11 @@ internal class ControllerCalibrationController(
     }
 
     private fun vrefSection(): View = section(
-        title = "ADC reference voltage",
-        description = "Measured controller reference in millivolts; normally close to 5200 mV.",
+        title = "ADC reference voltage · read only",
+        description =
+            "Factory-calibrated controller reference reported by live data; CAL never writes it.",
     ).apply {
         addView(vrefLive)
-        addView(editorRow("Vref (mV)", vrefMillivolts, null, null))
     }
 
     private fun liveValueText(): TextView = TextView(activity).apply {
@@ -954,9 +962,6 @@ internal class ControllerCalibrationController(
             InputType.TYPE_NUMBER_FLAG_DECIMAL or
             InputType.TYPE_NUMBER_FLAG_SIGNED,
     )
-
-    private fun integerEditor(hintText: String): EditText =
-        createEditor(hintText, InputType.TYPE_CLASS_NUMBER)
 
     private fun createEditor(hintText: String, input: Int): EditText =
         EditText(activity).apply {
@@ -1047,6 +1052,24 @@ internal class ControllerCalibrationController(
 
     private fun formatVolts(millivolts: Int): String =
         String.format(Locale.US, "%.3f", millivolts / 1000f)
+
+    private fun requestNextReadPacket() {
+        missingReadPids().firstOrNull()?.let(requestPacket)
+    }
+
+    private fun requestNextVerificationPacket() {
+        pendingVerification.keys.firstOrNull()?.let(requestPacket)
+    }
+
+    private fun missingReadPids(): List<Int> =
+        ControllerCalibrationCodec.requiredPids.filterNot(receivedPayloads::containsKey)
+
+    private fun describePid(pid: Int): String = when (pid) {
+        TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS -> "temperature settings (0x1002)"
+        TransmitterConstants.UtcompPid.GPIO_SETTINGS -> "input assignments (0x1009)"
+        TransmitterConstants.UtcompPid.ANALOG_SETTINGS1 -> "analog settings (0x100A)"
+        else -> "0x%04X".format(pid)
+    }
 
     private fun updateLiveReadouts() {
         if (!::afrLive.isInitialized) return

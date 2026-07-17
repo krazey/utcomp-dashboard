@@ -48,9 +48,11 @@
 - Replace dashboard alpha presets with time-based Off, Light, Medium, Strong, and Custom smoothing.
 - Preserve raw CSV values while using conditioned values for dashboard display and min/max tracking.
 - Correct the temperature-settings PID and stop interpreting unit bytes as Vref.
-- Add a top-bar UTCOMP PRO calibration page for AFR, boost, oil pressure, oil-temperature NTC, and Vref.
+- Add a top-bar UTCOMP PRO calibration page for AFR, boost, oil pressure, and oil-temperature NTC settings.
 - Preserve unknown controller bytes and require single-write commit plus read-back verification.
 - Add an explicit rollback for the last calibration write verified in the current page session.
+- Show calculated live values, assigned ADC voltages, and read-only Vref in the calibration page.
+- Read the three required sensor-setting packets sequentially and report any missing PID.
 
 ## 1.0.0
 

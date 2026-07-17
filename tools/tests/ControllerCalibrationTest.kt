@@ -39,21 +39,19 @@ private fun settingsPayloads(): Map<Int, ByteArray> {
     analog.putF32le(20, 2.5f)
     analog.putF32le(24, -1.25f)
 
-    val vref = ByteArray(48) { (0x10 + it).toByte() }
-    vref.putU16le(0, 5_212)
-
     return mapOf(
         TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS to temperatures,
         TransmitterConstants.UtcompPid.GPIO_SETTINGS to gpio,
         TransmitterConstants.UtcompPid.ANALOG_SETTINGS1 to analog,
-        TransmitterConstants.UtcompPid.VREF_SETTINGS to vref,
     )
 }
 
 fun main() {
     check(TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS == 0x1002)
-    check(TransmitterConstants.UtcompPid.VREF_SETTINGS == 0x101A)
     check(TransmitterConstants.UtcompPid.SETTINGS_STOP == 0x1030)
+    check(ControllerCalibrationCodec.requiredPids.size == 3)
+    check(TransmitterConstants.UtcompPid.VREF_SETTINGS !in ControllerCalibrationCodec.requiredPids)
+    check(TransmitterConstants.UtcompPid.VREF_SETTINGS !in ControllerCalibrationCodec.writablePids)
 
     val originals = settingsPayloads()
     val decoded = checkNotNull(ControllerCalibrationCodec.decode(originals))
@@ -65,7 +63,6 @@ fun main() {
     assertClose(-1.25f, decoded.oilPressure.b)
     assertClose(10_250f, decoded.ntc[0].r25Ohms)
     assertClose(3_512f, decoded.ntc[0].betaKelvin)
-    check(decoded.vrefMillivolts == 5_212)
     check(decoded.oilTemperatureNtcIndex() == 0)
     check(decoded.inputForAnalogMode(ControllerCalibration.ANALOG_MODE_AFR) == "ADC1")
     check(decoded.inputForAnalogMode(ControllerCalibration.ANALOG_MODE_BOOST) == "ADC3")
@@ -82,14 +79,12 @@ fun main() {
         ntc = decoded.ntc.toMutableList().apply {
             this[0] = this[0].copy(r25Ohms = 10_300f, betaKelvin = 3_520f)
         },
-        vrefMillivolts = 5_200,
     )
     val encoded = ControllerCalibrationCodec.encode(originals, edited)
     val changed = ControllerCalibrationCodec.changedPayloads(originals, encoded)
     check(changed.keys == setOf(
         TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
         TransmitterConstants.UtcompPid.ANALOG_SETTINGS1,
-        TransmitterConstants.UtcompPid.VREF_SETTINGS,
     ))
 
     val roundTripPayloads = originals.toMutableMap().apply { putAll(encoded) }
@@ -97,8 +92,6 @@ fun main() {
     assertClose(2.125f, roundTrip.afr.a)
     assertClose(10_300f, roundTrip.ntc[0].r25Ohms)
     assertClose(3_520f, roundTrip.ntc[0].betaKelvin)
-    check(roundTrip.vrefMillivolts == 5_200)
-
     val analogOriginal = originals.getValue(TransmitterConstants.UtcompPid.ANALOG_SETTINGS1)
     val analogUpdated = encoded.getValue(TransmitterConstants.UtcompPid.ANALOG_SETTINGS1)
     val analogChangedOffsets = ControllerCalibrationCodec.changedByteOffsets(
