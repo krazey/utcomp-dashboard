@@ -34,7 +34,7 @@ enum class Command(val id: Int) {
 
     @Suppress("unused")
 object UtcompPid {
-        const val TEMPERATURES_SETTINGS = 0x1004
+        const val TEMPERATURES_SETTINGS = 0x1002
         const val GPIO_SETTINGS = 0x1009
         const val ANALOG_SETTINGS1 = 0x100A
         const val ANALOG_SETTINGS2 = 0x100B
@@ -42,6 +42,8 @@ object UtcompPid {
         const val ANALOG_OSC_SETTINGS1 = 0x1017
         const val ANALOG_OSC_SETTINGS2 = 0x1018
         const val USERSCREEN_SETTINGS = 0x1019
+        const val VREF_SETTINGS = 0x101A
+        const val SETTINGS_STOP = 0x1030
 
         const val FIRMWARE = 0x0001
         const val TEMPERATURES_DATA = 0x1001

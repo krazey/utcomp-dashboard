@@ -210,14 +210,14 @@ object UtcompDecoder {
             }
 
             TransmitterConstants.UtcompPid.GENERAL_SETTINGS1 -> {
-                snapshot.vref = b.u16le(32)
                 if (debugLog != null) {
                     debugLog(
                         "settings1 buzzer=${b.u8(0)} sleep=${b.u8(1)} " +
                             "unitsTacho=${b.u8(3)} unitsTemp=${b.u8(4)} " +
                             "rpmMode=${b.u8(6)} brightness=${b.u8(11)} " +
                             "defaultScreen=${b.u8(13)} lang=${b.u8(16)} " +
-                            "pressureUnit=${b.u8(31)} vref=${snapshot.vref} " +
+                            "pressureUnit=${b.u8(31)} distanceUnit=${b.u8(32)} " +
+                            "consumptionUnit=${b.u8(33)} " +
                             "orientation=${b.u8(34)}",
                     )
                 }

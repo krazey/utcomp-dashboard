@@ -120,33 +120,40 @@ object UtcompDeviceConfig {
             }
         }
 
-        // Temperature settings have a separate mapping table. We keep this conservative
-        // until we verify the exact enum values from real logs, but still expose physical
-        // inputs where the role is already explicit in UTCOMP data names.
         return when (sensor) {
-            DashboardSensor.OUTSIDE_TEMP -> temperatureInputForLikelyRole(setOf(1), "outside temperature")
-            DashboardSensor.INSIDE_TEMP -> temperatureInputForLikelyRole(setOf(2), "inside temperature")
-            DashboardSensor.OIL_TEMP -> physicalAnalogNtcInput()
+            DashboardSensor.OUTSIDE_TEMP -> temperatureInputForRole(1, "outside temperature")
+            DashboardSensor.INSIDE_TEMP -> temperatureInputForRole(2, "inside temperature")
+            DashboardSensor.OIL_TEMP -> temperatureInputForRole(4, "oil temperature")
             else -> null
         }
     }
 
-    private fun physicalAnalogNtcInput(): PhysicalInput? {
-        val adc = adcInputMode.entries.firstOrNull { (_, mode) ->
-            mode == ANALOG_IN_NTC1 || mode == ANALOG_IN_NTC2 || mode == ANALOG_IN_NTC3
-        } ?: return null
-
-        val input = adc.key
-        return PhysicalInput(
-            input = input,
-            name = adcDisplayName[input].orEmpty().sanitizeAdcName(input),
-            mode = adc.value,
-        )
-    }
-
-    private fun temperatureInputForLikelyRole(roleValues: Set<Int>, fallbackName: String): PhysicalInput? {
-        val entry = temperatureInputMode.entries.firstOrNull { (_, value) -> value in roleValues }
+    private fun temperatureInputForRole(role: Int, fallbackName: String): PhysicalInput? {
+        val entry = temperatureInputMode.entries.firstOrNull { (_, value) -> value == role }
             ?: return null
+
+        val ntcIndex = when (entry.key) {
+            "NTC1" -> 0
+            "NTC2" -> 1
+            "NTC3" -> 2
+            else -> null
+        }
+        if (ntcIndex != null) {
+            val adc = adcInputMode.entries.firstOrNull { (_, mode) ->
+                mode == ANALOG_IN_NTC1 + ntcIndex
+            }
+            if (adc != null) {
+                val input = adc.key
+                val customName = adcDisplayName[input].orEmpty().sanitizeAdcName(input)
+                return PhysicalInput(
+                    input = input,
+                    name = listOf(entry.key, customName)
+                        .filter { it.isNotBlank() }
+                        .joinToString(" · "),
+                    mode = adc.value,
+                )
+            }
+        }
 
         return PhysicalInput(
             input = entry.key,
