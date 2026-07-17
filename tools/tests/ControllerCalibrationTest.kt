@@ -16,6 +16,10 @@ private fun settingsPayloads(): Map<Int, ByteArray> {
     temperatures[4] = 4
     temperatures[5] = 0
     temperatures[30] = 0
+    temperatures[0] = 1
+    temperatures[1] = 2
+    temperatures[2] = 3
+    temperatures[3] = 0
     temperatures.putF32le(6, 10_250f)
     temperatures.putF32le(10, 3_512f)
     temperatures.putF32le(14, 0f)
@@ -63,6 +67,7 @@ fun main() {
     assertClose(-1.25f, decoded.oilPressure.b)
     assertClose(10_250f, decoded.ntc[0].r25Ohms)
     assertClose(3_512f, decoded.ntc[0].betaKelvin)
+    check(decoded.temperatureRoles == listOf(1, 2, 3, 0, 4, 0, 0))
     check(decoded.oilTemperatureNtcIndex() == 0)
     check(decoded.inputForAnalogMode(ControllerCalibration.ANALOG_MODE_AFR) == "ADC1")
     check(decoded.inputForAnalogMode(ControllerCalibration.ANALOG_MODE_BOOST) == "ADC3")
@@ -76,14 +81,22 @@ fun main() {
 
     val edited = decoded.copy(
         afr = decoded.afr.copy(a = 2.125f),
-        ntc = decoded.ntc.toMutableList().apply {
-            this[0] = this[0].copy(r25Ohms = 10_300f, betaKelvin = 3_520f)
+        analogInputModes = decoded.analogInputModes.toMutableList().apply {
+            this[1] = ControllerCalibration.ANALOG_MODE_AFR2
         },
-    )
+        ntc = decoded.ntc.toMutableList().apply {
+            this[0] = this[0].copy(
+                r25Ohms = 10_300f,
+                betaKelvin = 3_520f,
+                correctionCelsius = 0.5f,
+            )
+        },
+    ).withTemperatureRoles(listOf(1, 2, 3, 5, 4, 6, 0))
     val encoded = ControllerCalibrationCodec.encode(originals, edited)
     val changed = ControllerCalibrationCodec.changedPayloads(originals, encoded)
     check(changed.keys == setOf(
         TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
+        TransmitterConstants.UtcompPid.GPIO_SETTINGS,
         TransmitterConstants.UtcompPid.ANALOG_SETTINGS1,
     ))
 
@@ -92,6 +105,9 @@ fun main() {
     assertClose(2.125f, roundTrip.afr.a)
     assertClose(10_300f, roundTrip.ntc[0].r25Ohms)
     assertClose(3_520f, roundTrip.ntc[0].betaKelvin)
+    assertClose(0.5f, roundTrip.ntc[0].correctionCelsius)
+    check(roundTrip.temperatureRoles == listOf(1, 2, 3, 5, 4, 6, 0))
+    check(roundTrip.analogInputModes[1] == ControllerCalibration.ANALOG_MODE_AFR2)
     val analogOriginal = originals.getValue(TransmitterConstants.UtcompPid.ANALOG_SETTINGS1)
     val analogUpdated = encoded.getValue(TransmitterConstants.UtcompPid.ANALOG_SETTINGS1)
     val analogChangedOffsets = ControllerCalibrationCodec.changedByteOffsets(
@@ -107,6 +123,25 @@ fun main() {
                 "unrelated analog byte changed at $offset"
             }
         }
+
+    val gpioOriginal = originals.getValue(TransmitterConstants.UtcompPid.GPIO_SETTINGS)
+    val gpioUpdated = encoded.getValue(TransmitterConstants.UtcompPid.GPIO_SETTINGS)
+    check(ControllerCalibrationCodec.changedByteOffsets(gpioOriginal, gpioUpdated) == setOf(5))
+
+    val temperaturesOriginal = originals.getValue(
+        TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
+    )
+    val temperaturesUpdated = encoded.getValue(
+        TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
+    )
+    val temperatureChanges = ControllerCalibrationCodec.changedByteOffsets(
+        temperaturesOriginal,
+        temperaturesUpdated,
+    )
+    check(temperatureChanges.containsAll(setOf(3, 5)))
+    check(temperatureChanges.all { it == 3 || it == 5 || it in 6..17 }) {
+        temperatureChanges
+    }
 
     val unchanged = ControllerCalibrationCodec.encode(originals, decoded)
     check(ControllerCalibrationCodec.changedPayloads(originals, unchanged).isEmpty())

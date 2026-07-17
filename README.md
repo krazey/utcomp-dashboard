@@ -56,14 +56,18 @@ automatically after USB connects.
 
 The top-bar CAL action opens a dedicated UTCOMP PRO sensor-calibration page.
 It reads the current controller payloads before exposing AFR, boost, oil
-pressure, and the active oil-temperature NTC profile. Physical ADC assignments,
-calculated sensor values, raw input voltages, and the factory-calibrated ADC
-reference are shown read-only. Edits are applied to copies of the exact 48-byte
-controller packets, preserving every unrelated byte. Low-rate live polling runs
-while the page is idle and pauses for settings operations. Changed packets and
-the settings commit are each sent once without automatic write retries, then
-the changed bytes are read back and verified. The last verified write can be
-explicitly restored while the page remains open.
+pressure, all three NTC profiles, all seven physical ADC assignments, and all
+four DS plus three NTC temperature-role assignments. Available analog functions
+include AFR1/2, boost, oil and fuel pressure, EGT1-6, NTC1-3, fuel level, gear,
+battery voltage, lambda O2, and oscilloscope/raw voltage. Live raw voltage or
+temperature and available decoded values are shown beside every assignment;
+the factory-calibrated ADC reference remains read-only. UTCOMP OLED screen
+configuration is deliberately outside this page. Edits are applied to copies
+of the exact 48-byte controller packets, preserving every unrelated byte.
+Low-rate live polling runs while the page is idle and pauses for settings
+operations. Changed packets and the settings commit are each sent once without
+automatic write retries, then the changed bytes are read back and verified.
+The last verified write can be explicitly restored while the page remains open.
 
 The normal controls panel contains only driver-facing dashboard actions. Manual
 protocol requests and the automatic polling switch are grouped in a descriptive

@@ -2,6 +2,11 @@ package de.krazey.utcomp.dashboard.utcomp
 
 import de.krazey.utcomp.dashboard.protocol.TransmitterConstants
 
+internal data class SettingChoice(
+    val value: Int,
+    val label: String,
+)
+
 internal data class LinearCalibration(
     val a: Float,
     val b: Float,
@@ -18,9 +23,19 @@ internal data class ControllerCalibration(
     val afr: LinearCalibration,
     val boost: LinearCalibration,
     val oilPressure: LinearCalibration,
+    val digitalTemperatureRoles: List<Int>,
     val ntc: List<NtcCalibration>,
     val analogInputModes: List<Int>,
 ) {
+    init {
+        require(digitalTemperatureRoles.size == DIGITAL_TEMPERATURE_INPUTS.size)
+        require(ntc.size == NTC_INPUTS.size)
+        require(analogInputModes.size == PHYSICAL_ANALOG_INPUTS.size)
+    }
+
+    val temperatureRoles: List<Int>
+        get() = digitalTemperatureRoles + ntc.map(NtcCalibration::role)
+
     fun inputForAnalogMode(mode: Int): String? =
         analogInputModes.indexOfFirst { it == mode }
             .takeIf { it >= 0 }
@@ -38,14 +53,47 @@ internal data class ControllerCalibration(
     fun physicalInputForNtc(index: Int): String? =
         inputForAnalogMode(ANALOG_MODE_NTC1 + index)
 
+    fun withTemperatureRoles(roles: List<Int>): ControllerCalibration {
+        require(roles.size == TEMPERATURE_INPUTS.size)
+        return copy(
+            digitalTemperatureRoles = roles.take(DIGITAL_TEMPERATURE_INPUTS.size),
+            ntc = ntc.mapIndexed { index, profile ->
+                profile.copy(role = roles[DIGITAL_TEMPERATURE_INPUTS.size + index])
+            },
+        )
+    }
+
     companion object {
+        const val TEMPERATURE_ROLE_DISABLED = 0
+        const val TEMPERATURE_ROLE_OUTSIDE = 1
+        const val TEMPERATURE_ROLE_INSIDE = 2
+        const val TEMPERATURE_ROLE_ENGINE = 3
         const val TEMPERATURE_ROLE_OIL = 4
+        const val TEMPERATURE_ROLE_USER1 = 5
+        const val TEMPERATURE_ROLE_USER2 = 6
+
+        const val ANALOG_MODE_DISABLED = 0
+        const val ANALOG_MODE_OSCILLOSCOPE = 1
+        const val ANALOG_MODE_LAMBDA_O2 = 2
         const val ANALOG_MODE_AFR = 3
+        const val ANALOG_MODE_AFR2 = 4
         const val ANALOG_MODE_BOOST = 5
         const val ANALOG_MODE_OIL_PRESSURE = 6
+        const val ANALOG_MODE_FUEL_PRESSURE = 7
+        const val ANALOG_MODE_EGT1 = 8
+        const val ANALOG_MODE_EGT2 = 9
+        const val ANALOG_MODE_EGT3 = 10
+        const val ANALOG_MODE_EGT4 = 11
         const val ANALOG_MODE_NTC1 = 12
+        const val ANALOG_MODE_NTC2 = 13
+        const val ANALOG_MODE_NTC3 = 14
+        const val ANALOG_MODE_FUEL_LEVEL = 15
+        const val ANALOG_MODE_GEAR = 16
+        const val ANALOG_MODE_EGT5 = 17
+        const val ANALOG_MODE_EGT6 = 18
+        const val ANALOG_MODE_BATTERY = 19
 
-        private val PHYSICAL_ANALOG_INPUTS = listOf(
+        val PHYSICAL_ANALOG_INPUTS = listOf(
             "ADC1",
             "ADC2",
             "ADC3",
@@ -54,16 +102,63 @@ internal data class ControllerCalibration(
             "ADCVCC1",
             "ADCVCC2",
         )
+
+        val DIGITAL_TEMPERATURE_INPUTS = listOf("DS-A", "DS-B", "DS-C", "DS-D")
+        val NTC_INPUTS = listOf("NTC1", "NTC2", "NTC3")
+        val TEMPERATURE_INPUTS = DIGITAL_TEMPERATURE_INPUTS + NTC_INPUTS
+
+        val ANALOG_MODE_CHOICES = listOf(
+            SettingChoice(ANALOG_MODE_DISABLED, "Disabled"),
+            SettingChoice(ANALOG_MODE_OSCILLOSCOPE, "Oscilloscope / raw voltage"),
+            SettingChoice(ANALOG_MODE_LAMBDA_O2, "Lambda O2 sensor"),
+            SettingChoice(ANALOG_MODE_AFR, "AFR 1"),
+            SettingChoice(ANALOG_MODE_AFR2, "AFR 2"),
+            SettingChoice(ANALOG_MODE_BOOST, "Boost pressure"),
+            SettingChoice(ANALOG_MODE_OIL_PRESSURE, "Oil pressure"),
+            SettingChoice(ANALOG_MODE_FUEL_PRESSURE, "Fuel pressure"),
+            SettingChoice(ANALOG_MODE_EGT1, "EGT 1"),
+            SettingChoice(ANALOG_MODE_EGT2, "EGT 2"),
+            SettingChoice(ANALOG_MODE_EGT3, "EGT 3"),
+            SettingChoice(ANALOG_MODE_EGT4, "EGT 4"),
+            SettingChoice(ANALOG_MODE_NTC1, "NTC 1"),
+            SettingChoice(ANALOG_MODE_NTC2, "NTC 2"),
+            SettingChoice(ANALOG_MODE_NTC3, "NTC 3"),
+            SettingChoice(ANALOG_MODE_FUEL_LEVEL, "Fuel level"),
+            SettingChoice(ANALOG_MODE_GEAR, "Gear-position sensor"),
+            SettingChoice(ANALOG_MODE_EGT5, "EGT 5"),
+            SettingChoice(ANALOG_MODE_EGT6, "EGT 6"),
+            SettingChoice(ANALOG_MODE_BATTERY, "Battery voltage"),
+        )
+
+        val TEMPERATURE_ROLE_CHOICES = listOf(
+            SettingChoice(TEMPERATURE_ROLE_DISABLED, "Disabled"),
+            SettingChoice(TEMPERATURE_ROLE_OUTSIDE, "Outside temperature"),
+            SettingChoice(TEMPERATURE_ROLE_INSIDE, "Inside temperature"),
+            SettingChoice(TEMPERATURE_ROLE_ENGINE, "Engine / coolant temperature"),
+            SettingChoice(TEMPERATURE_ROLE_OIL, "Oil temperature"),
+            SettingChoice(TEMPERATURE_ROLE_USER1, "User temperature 1"),
+            SettingChoice(TEMPERATURE_ROLE_USER2, "User temperature 2"),
+        )
+
+        fun analogModeLabel(mode: Int): String =
+            ANALOG_MODE_CHOICES.firstOrNull { it.value == mode }?.label ?: "Unknown ($mode)"
+
+        fun temperatureRoleLabel(role: Int): String =
+            TEMPERATURE_ROLE_CHOICES.firstOrNull { it.value == role }?.label
+                ?: "Unknown ($role)"
     }
 }
 
 /**
- * Reads and updates only the calibration fields verified against the desktop
- * UTCOMP application. Encoders always start from controller payload copies so
- * unrelated and not-yet-understood bytes are preserved exactly.
+ * Reads and updates only fields verified against the desktop UTCOMP application.
+ * Encoders always start from controller payload copies so unrelated and
+ * not-yet-understood bytes are preserved exactly.
  */
 internal object ControllerCalibrationCodec {
     private const val PAYLOAD_SIZE = 48
+    private val TEMPERATURE_ROLE_OFFSETS = listOf(0, 1, 2, 3, 4, 5, 30)
+    private val NTC_FLOAT_OFFSETS = listOf(6, 18, 31)
+    private val ANALOG_INPUT_MODE_OFFSETS = (4..10).toList()
 
     val requiredPids: List<Int> = listOf(
         TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
@@ -73,6 +168,7 @@ internal object ControllerCalibrationCodec {
 
     val writablePids: Set<Int> = setOf(
         TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
+        TransmitterConstants.UtcompPid.GPIO_SETTINGS,
         TransmitterConstants.UtcompPid.ANALOG_SETTINGS1,
     )
 
@@ -87,31 +183,21 @@ internal object ControllerCalibrationCodec {
         val gpio = payloads.getValue(TransmitterConstants.UtcompPid.GPIO_SETTINGS)
         val analog = payloads.getValue(TransmitterConstants.UtcompPid.ANALOG_SETTINGS1)
 
+        val roles = TEMPERATURE_ROLE_OFFSETS.map(temperatures::u8)
         return ControllerCalibration(
             afr = LinearCalibration(analog.f32le(4), analog.f32le(8)),
             boost = LinearCalibration(analog.f32le(12), analog.f32le(16)),
             oilPressure = LinearCalibration(analog.f32le(20), analog.f32le(24)),
-            ntc = listOf(
+            digitalTemperatureRoles = roles.take(4),
+            ntc = NTC_FLOAT_OFFSETS.mapIndexed { index, offset ->
                 NtcCalibration(
-                    role = temperatures.u8(4),
-                    r25Ohms = temperatures.f32le(6),
-                    betaKelvin = temperatures.f32le(10),
-                    correctionCelsius = temperatures.f32le(14),
-                ),
-                NtcCalibration(
-                    role = temperatures.u8(5),
-                    r25Ohms = temperatures.f32le(18),
-                    betaKelvin = temperatures.f32le(22),
-                    correctionCelsius = temperatures.f32le(26),
-                ),
-                NtcCalibration(
-                    role = temperatures.u8(30),
-                    r25Ohms = temperatures.f32le(31),
-                    betaKelvin = temperatures.f32le(35),
-                    correctionCelsius = temperatures.f32le(39),
-                ),
-            ),
-            analogInputModes = (4..10).map(gpio::u8),
+                    role = roles[4 + index],
+                    r25Ohms = temperatures.f32le(offset),
+                    betaKelvin = temperatures.f32le(offset + 4),
+                    correctionCelsius = temperatures.f32le(offset + 8),
+                )
+            },
+            analogInputModes = ANALOG_INPUT_MODE_OFFSETS.map(gpio::u8),
         )
     }
 
@@ -119,7 +205,6 @@ internal object ControllerCalibrationCodec {
         originalPayloads: Map<Int, ByteArray>,
         calibration: ControllerCalibration,
     ): Map<Int, ByteArray> {
-        require(calibration.ntc.size == 3) { "exactly three NTC profiles are required" }
         val original = requireNotNull(decode(originalPayloads)) {
             "complete controller calibration payloads are required"
         }
@@ -128,9 +213,28 @@ internal object ControllerCalibrationCodec {
             originalPayloads,
             TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS,
         )
-        calibration.ntc[0].writeChangesFrom(original.ntc[0], temperatures, 6)
-        calibration.ntc[1].writeChangesFrom(original.ntc[1], temperatures, 18)
-        calibration.ntc[2].writeChangesFrom(original.ntc[2], temperatures, 31)
+        TEMPERATURE_ROLE_OFFSETS.forEachIndexed { index, offset ->
+            temperatures.putChangedByte(
+                offset,
+                original.temperatureRoles[index],
+                calibration.temperatureRoles[index],
+            )
+        }
+        calibration.ntc.forEachIndexed { index, profile ->
+            profile.writeChangesFrom(original.ntc[index], temperatures, NTC_FLOAT_OFFSETS[index])
+        }
+
+        val gpio = originalPayload(
+            originalPayloads,
+            TransmitterConstants.UtcompPid.GPIO_SETTINGS,
+        )
+        ANALOG_INPUT_MODE_OFFSETS.forEachIndexed { index, offset ->
+            gpio.putChangedByte(
+                offset,
+                original.analogInputModes[index],
+                calibration.analogInputModes[index],
+            )
+        }
 
         val analog = originalPayload(
             originalPayloads,
@@ -145,6 +249,7 @@ internal object ControllerCalibrationCodec {
 
         return linkedMapOf(
             TransmitterConstants.UtcompPid.TEMPERATURES_SETTINGS to temperatures,
+            TransmitterConstants.UtcompPid.GPIO_SETTINGS to gpio,
             TransmitterConstants.UtcompPid.ANALOG_SETTINGS1 to analog,
         )
     }
@@ -185,6 +290,11 @@ internal object ControllerCalibrationCodec {
             original.correctionCelsius,
             correctionCelsius,
         )
+    }
+
+    private fun ByteArray.putChangedByte(offset: Int, original: Int, updated: Int) {
+        require(updated in 0..255) { "byte value out of range" }
+        if (original != updated) this[offset] = updated.toByte()
     }
 
     private fun ByteArray.putChangedFloat(offset: Int, original: Float, updated: Float) {

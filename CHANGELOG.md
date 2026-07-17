@@ -53,6 +53,9 @@
 - Add an explicit rollback for the last calibration write verified in the current page session.
 - Show calculated live values, assigned ADC voltages, and read-only Vref in the calibration page.
 - Read the three required sensor-setting packets sequentially and report any missing PID.
+- Configure all seven physical ADC inputs with every UTCOMP analog sensor function.
+- Assign all four DS and three NTC sources to the six logical temperature roles.
+- Edit all three NTC profiles and show live raw and decoded values beside assignments.
 
 ## 1.0.0
 

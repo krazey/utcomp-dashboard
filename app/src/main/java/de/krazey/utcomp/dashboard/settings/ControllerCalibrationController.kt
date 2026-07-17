@@ -25,10 +25,11 @@ import de.krazey.utcomp.dashboard.protocol.TransmitterPacket
 import de.krazey.utcomp.dashboard.utcomp.ControllerCalibration
 import de.krazey.utcomp.dashboard.utcomp.ControllerCalibrationCodec
 import de.krazey.utcomp.dashboard.utcomp.LinearCalibration
+import de.krazey.utcomp.dashboard.utcomp.SettingChoice
 import de.krazey.utcomp.dashboard.utcomp.UtcompDataSnapshot
 import java.util.Locale
 
-/** Full-screen, USB-backed editor for the verified UTCOMP calibration fields. */
+/** Full-screen, USB-backed editor for verified UTCOMP sensor settings. */
 internal class ControllerCalibrationController(
     private val activity: Activity,
     private val isUsbConnected: () -> Boolean,
@@ -49,6 +50,20 @@ internal class ControllerCalibrationController(
         val byPid: Map<Int, Map<Int, Byte>>,
     )
 
+    private data class ChoiceEditor(
+        val name: String,
+        val choices: List<SettingChoice>,
+        val button: Button,
+        var value: Int = 0,
+    )
+
+    private data class NtcEditors(
+        val source: TextView,
+        val r25: EditText,
+        val beta: EditText,
+        val correction: EditText,
+    )
+
     private companion object {
         const val READ_TIMEOUT_MS = 4_000L
         const val WRITE_SETTLE_MS = 550L
@@ -66,9 +81,6 @@ internal class ControllerCalibrationController(
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var root: View
     private lateinit var statusText: TextView
-    private lateinit var mappingText: TextView
-    private lateinit var oilNtcTitle: TextView
-    private lateinit var oilNtcSource: TextView
     private lateinit var afrLive: TextView
     private lateinit var boostLive: TextView
     private lateinit var oilPressureLive: TextView
@@ -84,16 +96,18 @@ internal class ControllerCalibrationController(
     private lateinit var boostB: EditText
     private lateinit var oilPressureA: EditText
     private lateinit var oilPressureB: EditText
-    private lateinit var ntcR25: EditText
-    private lateinit var ntcBeta: EditText
     private val editors = mutableListOf<EditText>()
+    private val analogModeEditors = mutableListOf<ChoiceEditor>()
+    private val temperatureRoleEditors = mutableListOf<ChoiceEditor>()
+    private val ntcEditors = mutableListOf<NtcEditors>()
+    private val analogAssignmentLive = mutableListOf<TextView>()
+    private val temperatureAssignmentLive = mutableListOf<TextView>()
 
     private var operation = Operation.IDLE
     @Volatile
     private var visible = false
     private var populatingEditors = false
     private var loadedCalibration: ControllerCalibration? = null
-    private var oilNtcIndex: Int? = null
     private var originalPayloads: Map<Int, ByteArray> = emptyMap()
     private val receivedPayloads = linkedMapOf<Int, ByteArray>()
     private val pendingVerification = linkedMapOf<Int, VerificationTarget>()
@@ -106,8 +120,13 @@ internal class ControllerCalibrationController(
     private var liveBoost = Float.NaN
     private var liveOilPressure = Float.NaN
     private var liveOilTemperature = Float.NaN
+    private var liveAfr2 = Float.NaN
+    private var liveFuelPressure = Float.NaN
+    private var liveGear = 0
     private var liveVrefMillivolts = 0
     private val liveAdcVolts = FloatArray(8) { Float.NaN }
+    private val livePhysicalTemperatures = FloatArray(7) { Float.NaN }
+    private val liveEgt = IntArray(6)
 
     private val livePoll = object : Runnable {
         override fun run() {
@@ -191,15 +210,8 @@ internal class ControllerCalibrationController(
         }
 
         content.addView(infoPanel())
-
-        mappingText = TextView(activity).apply {
-            text = "Input assignments will appear after Refresh."
-            textSize = 13f
-            setTextColor(Color.WHITE)
-            setPadding(dp(12f), dp(10f), dp(12f), dp(10f))
-            background = roundedBackground(PANEL_COLOR, 14f)
-        }
-        content.addView(mappingText, panelLayoutParams())
+        content.addView(analogAssignmentsSection(), panelLayoutParams())
+        content.addView(temperatureAssignmentsSection(), panelLayoutParams())
 
         afrLive = liveValueText()
         afrA = numberEditor("2")
@@ -250,9 +262,7 @@ internal class ControllerCalibrationController(
         )
 
         oilTemperatureLive = liveValueText()
-        ntcR25 = numberEditor("10250")
-        ntcBeta = numberEditor("3512")
-        content.addView(ntcSection(), panelLayoutParams())
+        content.addView(ntcProfilesSection(), panelLayoutParams())
 
         vrefLive = liveValueText()
         content.addView(vrefSection(), panelLayoutParams())
@@ -389,32 +399,58 @@ internal class ControllerCalibrationController(
                     snapshot.adcInValCh7,
                 )
                 val vrefMillivolts = snapshot.vref
+                val gear = snapshot.gearNo
                 activity.runOnUiThread {
                     if (!canShowLiveValues()) return@runOnUiThread
                     adcVolts.copyInto(liveAdcVolts)
                     liveVrefMillivolts = vrefMillivolts
+                    liveGear = gear
                     updateLiveReadouts()
                 }
             }
 
             TransmitterConstants.UtcompPid.GENERAL_DATA2 -> {
                 val afr = snapshot.afr1
+                val afr2 = snapshot.afr2
                 val boost = snapshot.bar1
                 val oilPressure = snapshot.bar2
+                val fuelPressure = snapshot.bar3
+                val ntc3 = snapshot.temperatureNtc3
+                val egt = intArrayOf(
+                    snapshot.egt1,
+                    snapshot.egt2,
+                    snapshot.egt3,
+                    snapshot.egt4,
+                    snapshot.egt5,
+                    snapshot.egt6,
+                )
                 activity.runOnUiThread {
                     if (!canShowLiveValues()) return@runOnUiThread
                     liveAfr = afr
+                    liveAfr2 = afr2
                     liveBoost = boost
                     liveOilPressure = oilPressure
+                    liveFuelPressure = fuelPressure
+                    livePhysicalTemperatures[6] = ntc3
+                    egt.copyInto(liveEgt)
                     updateLiveReadouts()
                 }
             }
 
             TransmitterConstants.UtcompPid.TEMPERATURES_DATA -> {
                 val oilTemperature = snapshot.temperatureOil
+                val physical = floatArrayOf(
+                    snapshot.temperatureDsA,
+                    snapshot.temperatureDsB,
+                    snapshot.temperatureDsC,
+                    snapshot.temperatureDsD,
+                    snapshot.temperatureNtc1,
+                    snapshot.temperatureNtc2,
+                )
                 activity.runOnUiThread {
                     if (!canShowLiveValues()) return@runOnUiThread
                     liveOilTemperature = oilTemperature
+                    physical.copyInto(livePhysicalTemperatures)
                     updateLiveReadouts()
                 }
             }
@@ -689,14 +725,37 @@ internal class ControllerCalibrationController(
     }
 
     private fun readEditors(base: ControllerCalibration): ControllerCalibration {
-        val editedNtc = base.ntc.toMutableList()
-        oilNtcIndex?.let { index ->
-            val currentNtc = editedNtc[index]
-            editedNtc[index] = currentNtc.copy(
-                r25Ohms = parseFloat(ntcR25, "Oil temperature R25")
-                    .requireRange(100f, 1_000_000f, "Oil temperature R25"),
-                betaKelvin = parseFloat(ntcBeta, "Oil temperature beta")
-                    .requireRange(100f, 10_000f, "Oil temperature beta"),
+        val analogModes = analogModeEditors.map(ChoiceEditor::value)
+        val temperatureRoles = temperatureRoleEditors.map(ChoiceEditor::value)
+        requireUniqueAssignments(
+            base.analogInputModes,
+            analogModes,
+            ControllerCalibration.PHYSICAL_ANALOG_INPUTS,
+            setOf(
+                ControllerCalibration.ANALOG_MODE_DISABLED,
+                ControllerCalibration.ANALOG_MODE_OSCILLOSCOPE,
+            ),
+            { value -> ControllerCalibration.analogModeLabel(value) },
+        )
+        requireUniqueAssignments(
+            base.temperatureRoles,
+            temperatureRoles,
+            ControllerCalibration.TEMPERATURE_INPUTS,
+            setOf(ControllerCalibration.TEMPERATURE_ROLE_DISABLED),
+            { value -> ControllerCalibration.temperatureRoleLabel(value) },
+        )
+
+        val editedNtc = base.ntc.mapIndexed { index, currentNtc ->
+            val fields = ntcEditors[index]
+            currentNtc.copy(
+                r25Ohms = parseFloat(fields.r25, "NTC${index + 1} R25")
+                    .requireRange(100f, 1_000_000f, "NTC${index + 1} R25"),
+                betaKelvin = parseFloat(fields.beta, "NTC${index + 1} beta")
+                    .requireRange(100f, 10_000f, "NTC${index + 1} beta"),
+                correctionCelsius = parseFloat(
+                    fields.correction,
+                    "NTC${index + 1} correction",
+                ).requireRange(-100f, 100f, "NTC${index + 1} correction"),
             )
         }
 
@@ -714,7 +773,34 @@ internal class ControllerCalibrationController(
                 parseLinear(oilPressureB, "Oil pressure b"),
             ),
             ntc = editedNtc,
-        )
+            analogInputModes = analogModes,
+        ).withTemperatureRoles(temperatureRoles)
+    }
+
+    private fun requireUniqueAssignments(
+        originalValues: List<Int>,
+        values: List<Int>,
+        inputs: List<String>,
+        repeatable: Set<Int>,
+        label: (Int) -> String,
+    ) {
+        values.withIndex()
+            .filter { it.value !in repeatable }
+            .groupBy { it.value }
+            .values
+            .firstOrNull { duplicates ->
+                if (duplicates.size <= 1) return@firstOrNull false
+                val value = duplicates.first().value
+                val originalIndices = originalValues.withIndex()
+                    .filter { it.value == value }
+                    .map { it.index }
+                duplicates.map { it.index } != originalIndices
+            }
+            ?.let { duplicates ->
+                val value = duplicates.first().value
+                val sources = duplicates.joinToString { inputs[it.index] }
+                throw IllegalArgumentException("${label(value)} is assigned more than once: $sources")
+            }
     }
 
     private fun parseLinear(editor: EditText, name: String): Float =
@@ -741,38 +827,25 @@ internal class ControllerCalibrationController(
             boostB.setText(format(calibration.boost.b))
             oilPressureA.setText(format(calibration.oilPressure.a))
             oilPressureB.setText(format(calibration.oilPressure.b))
-            oilNtcIndex = calibration.oilTemperatureNtcIndex()
-            val ntcIndex = oilNtcIndex
-            if (ntcIndex != null) {
-                val ntc = calibration.ntc[ntcIndex]
-                ntcR25.setText(format(ntc.r25Ohms))
-                ntcBeta.setText(format(ntc.betaKelvin))
-                oilNtcTitle.text = "Oil temperature · NTC${ntcIndex + 1}"
-                oilNtcSource.text =
-                    "Physical input: ${calibration.physicalInputForNtc(ntcIndex) ?: "not assigned"} · " +
-                        "T0/correction ${format(ntc.correctionCelsius)} °C is preserved unchanged"
-            } else {
-                ntcR25.setText("")
-                ntcBeta.setText("")
-                oilNtcTitle.text = "Oil temperature"
-                oilNtcSource.text =
-                    "No NTC profile is assigned to the oil-temperature role; NTC editing is disabled."
+            analogModeEditors.forEachIndexed { index, editor ->
+                editor.value = calibration.analogInputModes[index]
+                updateChoiceButton(editor)
             }
-
-            mappingText.text = buildString {
-                append("Controller input assignments\n")
-                append("AFR: ")
-                append(calibration.inputForAnalogMode(ControllerCalibration.ANALOG_MODE_AFR) ?: "not assigned")
-                append("   ·   Boost: ")
-                append(calibration.inputForAnalogMode(ControllerCalibration.ANALOG_MODE_BOOST) ?: "not assigned")
-                append("\nOil pressure: ")
-                append(calibration.inputForAnalogMode(ControllerCalibration.ANALOG_MODE_OIL_PRESSURE) ?: "not assigned")
-                append("   ·   Oil temperature: ")
-                append(
-                    ntcIndex?.let { index ->
-                        "NTC${index + 1} / ${calibration.physicalInputForNtc(index) ?: "not assigned"}"
-                    } ?: "not assigned",
-                )
+            temperatureRoleEditors.forEachIndexed { index, editor ->
+                editor.value = calibration.temperatureRoles[index]
+                updateChoiceButton(editor)
+            }
+            ntcEditors.forEachIndexed { index, fields ->
+                val profile = calibration.ntc[index]
+                fields.r25.setText(format(profile.r25Ohms))
+                fields.beta.setText(format(profile.betaKelvin))
+                fields.correction.setText(format(profile.correctionCelsius))
+                fields.source.text = buildString {
+                    append("NTC${index + 1} · ")
+                    append(ControllerCalibration.temperatureRoleLabel(profile.role))
+                    append(" · physical input: ")
+                    append(calibration.physicalInputForNtc(index) ?: "not assigned")
+                }
             }
             updateLiveReadouts()
         } finally {
@@ -787,7 +860,29 @@ internal class ControllerCalibrationController(
         addLinearChanges("AFR", before.afr, after.afr)
         addLinearChanges("Boost", before.boost, after.boost)
         addLinearChanges("Oil pressure", before.oilPressure, after.oilPressure)
-        oilNtcIndex?.let { index ->
+        before.analogInputModes.indices.forEach { index ->
+            val old = before.analogInputModes[index]
+            val new = after.analogInputModes[index]
+            if (old != new) {
+                add(
+                    "${ControllerCalibration.PHYSICAL_ANALOG_INPUTS[index]}: " +
+                        "${ControllerCalibration.analogModeLabel(old)} → " +
+                        ControllerCalibration.analogModeLabel(new),
+                )
+            }
+        }
+        before.temperatureRoles.indices.forEach { index ->
+            val old = before.temperatureRoles[index]
+            val new = after.temperatureRoles[index]
+            if (old != new) {
+                add(
+                    "${ControllerCalibration.TEMPERATURE_INPUTS[index]}: " +
+                        "${ControllerCalibration.temperatureRoleLabel(old)} → " +
+                        ControllerCalibration.temperatureRoleLabel(new),
+                )
+            }
+        }
+        before.ntc.indices.forEach { index ->
             val old = before.ntc[index]
             val new = after.ntc[index]
             if (!sameFloat(old.r25Ohms, new.r25Ohms)) {
@@ -795,6 +890,12 @@ internal class ControllerCalibrationController(
             }
             if (!sameFloat(old.betaKelvin, new.betaKelvin)) {
                 add("NTC${index + 1} beta: ${format(old.betaKelvin)} → ${format(new.betaKelvin)} K")
+            }
+            if (!sameFloat(old.correctionCelsius, new.correctionCelsius)) {
+                add(
+                    "NTC${index + 1} correction: ${format(old.correctionCelsius)} → " +
+                        "${format(new.correctionCelsius)} °C",
+                )
             }
         }
     }
@@ -827,7 +928,7 @@ internal class ControllerCalibrationController(
         )
         addView(
             TextView(activity).apply {
-                text = "Controller calibration"
+                text = "Controller sensor setup"
                 textSize = 22f
                 setTextColor(Color.WHITE)
                 typeface = Typeface.DEFAULT_BOLD
@@ -841,8 +942,9 @@ internal class ControllerCalibrationController(
         text =
             "Values are read from UTCOMP PRO, not app defaults. Live sensor values and raw " +
                 "input voltages refresh while idle; polling pauses during settings operations. " +
-                "A write changes only verified calibration bytes, sends no automatic retry, " +
-                "commits once, and must pass read-back verification."
+                "This page configures sensor inputs and calibration only; UTCOMP OLED screens " +
+                "are not changed. A write sends no automatic retry, commits once, and must " +
+                "pass read-back verification."
         textSize = 12f
         setTextColor(SECONDARY_TEXT)
         setPadding(dp(12f), dp(10f), dp(12f), dp(10f))
@@ -863,23 +965,133 @@ internal class ControllerCalibrationController(
         addView(editorRow(firstLabel, first, secondLabel, second))
     }
 
-    private fun ntcSection(): View = section("", "").apply {
-        oilNtcTitle = TextView(activity).apply {
-            text = "Oil temperature"
-            textSize = 17f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
+    private fun analogAssignmentsSection(): View = section(
+        title = "Analog input assignments",
+        description =
+            "Link each physical input to its UTCOMP sensor function. The live line shows " +
+                "the raw voltage and, where available, the currently decoded value.",
+    ).apply {
+        ControllerCalibration.PHYSICAL_ANALOG_INPUTS.forEachIndexed { index, input ->
+            val live = assignmentLiveText()
+            analogAssignmentLive += live
+            val editor = choiceEditor(
+                name = input,
+                choices = ControllerCalibration.ANALOG_MODE_CHOICES,
+            )
+            analogModeEditors += editor
+            addView(assignmentRow(input, live, editor.button))
         }
-        addView(oilNtcTitle)
-        oilNtcSource = TextView(activity).apply {
-            text = "Active NTC profile will be detected from the controller."
-            textSize = 11.5f
-            setTextColor(SECONDARY_TEXT)
-            setPadding(0, dp(2f), 0, dp(7f))
+    }
+
+    private fun temperatureAssignmentsSection(): View = section(
+        title = "Temperature assignments",
+        description =
+            "Assign every DS18B20 or NTC source to Outside, Inside, Engine, Oil, User 1, " +
+                "User 2, or Disabled.",
+    ).apply {
+        ControllerCalibration.TEMPERATURE_INPUTS.forEach { input ->
+            val live = assignmentLiveText()
+            temperatureAssignmentLive += live
+            val editor = choiceEditor(
+                name = input,
+                choices = ControllerCalibration.TEMPERATURE_ROLE_CHOICES,
+            )
+            temperatureRoleEditors += editor
+            addView(assignmentRow(input, live, editor.button))
         }
-        addView(oilNtcSource)
+    }
+
+    private fun ntcProfilesSection(): View = section(
+        title = "NTC sensor profiles",
+        description =
+            "Each profile is independent. R25, beta, and temperature correction are read " +
+                "from and written to the controller.",
+    ).apply {
         addView(oilTemperatureLive)
-        addView(editorRow("R25 (Ω)", ntcR25, "Beta (K)", ntcBeta))
+        repeat(3) { index ->
+            val source = TextView(activity).apply {
+                text = "NTC${index + 1} · waiting for controller settings"
+                textSize = 13f
+                setTextColor(Color.WHITE)
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(0, if (index == 0) dp(4f) else dp(12f), 0, dp(4f))
+            }
+            val r25 = numberEditor("10000")
+            val beta = numberEditor("3500")
+            val correction = numberEditor("0")
+            ntcEditors += NtcEditors(source, r25, beta, correction)
+            addView(source)
+            addView(editorRow("R25 (Ω)", r25, "Beta (K)", beta))
+            addView(editorRow("Correction (°C)", correction, null, null))
+        }
+    }
+
+    private fun assignmentRow(label: String, live: TextView, button: Button): View =
+        LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4f), 0, dp(4f))
+            addView(
+                LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(TextView(activity).apply {
+                        text = label
+                        textSize = 14f
+                        setTextColor(Color.WHITE)
+                        typeface = Typeface.DEFAULT_BOLD
+                    })
+                    addView(live)
+                },
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.42f).apply {
+                    setMargins(0, 0, dp(8f), 0)
+                },
+            )
+            addView(
+                button,
+                LinearLayout.LayoutParams(0, dp(50f), 0.58f),
+            )
+        }
+
+    private fun assignmentLiveText(): TextView = TextView(activity).apply {
+        text = "LIVE · waiting"
+        textSize = 11.5f
+        setTextColor(GOOD_COLOR)
+        setPadding(0, dp(2f), 0, 0)
+    }
+
+    private fun choiceEditor(name: String, choices: List<SettingChoice>): ChoiceEditor {
+        lateinit var editor: ChoiceEditor
+        val button = actionButton("Waiting for controller") {
+            if (operation == Operation.IDLE && loadedCalibration != null) {
+                showChoiceDialog(editor)
+            }
+        }
+        editor = ChoiceEditor(name, choices, button)
+        return editor
+    }
+
+    private fun showChoiceDialog(editor: ChoiceEditor) {
+        val labels = editor.choices.map(SettingChoice::label).toTypedArray()
+        val selected = editor.choices.indexOfFirst { it.value == editor.value }
+        AlertDialog.Builder(activity)
+            .setTitle(editor.name)
+            .setSingleChoiceItems(labels, selected) { dialog, which ->
+                val choice = editor.choices[which]
+                editor.value = choice.value
+                updateChoiceButton(editor)
+                dialog.dismiss()
+                if (!populatingEditors) {
+                    setStatus("Edited locally · not written to UTCOMP", WARNING_COLOR)
+                    updateLiveReadouts()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun updateChoiceButton(editor: ChoiceEditor) {
+        editor.button.text = editor.choices.firstOrNull { it.value == editor.value }?.label
+            ?: "Unknown (${editor.value})"
     }
 
     private fun vrefSection(): View = section(
@@ -1026,9 +1238,14 @@ internal class ControllerCalibrationController(
         val idle = operation == Operation.IDLE
         val canEdit = idle && isUsbConnected() && loadedCalibration != null
         editors.forEach { it.isEnabled = canEdit }
-        val ntcAvailable = canEdit && oilNtcIndex != null
-        if (::ntcR25.isInitialized) ntcR25.isEnabled = ntcAvailable
-        if (::ntcBeta.isInitialized) ntcBeta.isEnabled = ntcAvailable
+        analogModeEditors.forEach { editor ->
+            editor.button.isEnabled = canEdit
+            setButtonVisual(editor.button)
+        }
+        temperatureRoleEditors.forEach { editor ->
+            editor.button.isEnabled = canEdit
+            setButtonVisual(editor.button)
+        }
         refreshButton.isEnabled = idle
         writeButton.isEnabled = canEdit
         undoButton.isEnabled = canEdit && lastRollback != null
@@ -1082,7 +1299,53 @@ internal class ControllerCalibrationController(
                 oilTemperatureLive,
                 vrefLive,
             ).forEach { it.text = "LIVE · waiting for controller data" }
+            analogAssignmentLive.forEach { it.text = "LIVE · waiting" }
+            temperatureAssignmentLive.forEach { it.text = "LIVE · waiting" }
             return
+        }
+
+        analogAssignmentLive.forEachIndexed { index, view ->
+            val mode = analogModeEditors.getOrNull(index)?.value
+                ?: calibration.analogInputModes[index]
+            val raw = liveAdcVolts.getOrElse(index + 1) { Float.NaN }
+            view.text = buildString {
+                append("LIVE  ")
+                append(formatLive(raw, 3))
+                append(" V")
+                val decoded = if (mode == calibration.analogInputModes[index]) {
+                    analogDecodedText(mode)
+                } else {
+                    "pending write"
+                }
+                decoded?.let {
+                    append(" · ")
+                    append(it)
+                }
+            }
+        }
+        temperatureAssignmentLive.forEachIndexed { index, view ->
+            val pending = temperatureRoleEditors.getOrNull(index)?.value
+                ?.takeIf { it != calibration.temperatureRoles[index] }
+            view.text = buildString {
+                append("LIVE  ${formatLive(livePhysicalTemperatures[index], 1)} °C")
+                if (pending != null) append(" · pending write")
+            }
+        }
+        ntcEditors.forEachIndexed { index, fields ->
+            val role = temperatureRoleEditors.getOrNull(index + 4)?.value
+                ?: calibration.ntc[index].role
+            val analogIndex = analogModeEditors.indexOfFirst {
+                it.value == ControllerCalibration.ANALOG_MODE_NTC1 + index
+            }
+            fields.source.text = buildString {
+                append("NTC${index + 1} · ")
+                append(ControllerCalibration.temperatureRoleLabel(role))
+                append(" · physical input: ")
+                append(
+                    ControllerCalibration.PHYSICAL_ANALOG_INPUTS.getOrNull(analogIndex)
+                        ?: "not assigned",
+                )
+            }
         }
 
         afrLive.text = linearLiveText(
@@ -1119,6 +1382,33 @@ internal class ControllerCalibrationController(
         } else {
             "LIVE · waiting for reference data"
         }
+    }
+
+    private fun analogDecodedText(mode: Int): String? = when (mode) {
+        ControllerCalibration.ANALOG_MODE_AFR -> "AFR ${formatLive(liveAfr, 2)}"
+        ControllerCalibration.ANALOG_MODE_AFR2 -> "AFR2 ${formatLive(liveAfr2, 2)}"
+        ControllerCalibration.ANALOG_MODE_BOOST -> "Boost ${formatLive(liveBoost, 2)} bar"
+        ControllerCalibration.ANALOG_MODE_OIL_PRESSURE ->
+            "Oil ${formatLive(liveOilPressure, 2)} bar"
+        ControllerCalibration.ANALOG_MODE_FUEL_PRESSURE ->
+            "Fuel ${formatLive(liveFuelPressure, 2)} bar"
+        in ControllerCalibration.ANALOG_MODE_EGT1..ControllerCalibration.ANALOG_MODE_EGT4 -> {
+            val index = mode - ControllerCalibration.ANALOG_MODE_EGT1
+            "EGT${index + 1} ${liveEgt[index]} °C"
+        }
+        in ControllerCalibration.ANALOG_MODE_NTC1..ControllerCalibration.ANALOG_MODE_NTC3 -> {
+            val index = mode - ControllerCalibration.ANALOG_MODE_NTC1
+            "NTC${index + 1} ${formatLive(livePhysicalTemperatures[4 + index], 1)} °C"
+        }
+        ControllerCalibration.ANALOG_MODE_GEAR -> "Gear $liveGear"
+        ControllerCalibration.ANALOG_MODE_EGT5,
+        ControllerCalibration.ANALOG_MODE_EGT6 -> {
+            val index = mode - ControllerCalibration.ANALOG_MODE_EGT5 + 4
+            "EGT${index + 1} ${liveEgt[index]} °C"
+        }
+        ControllerCalibration.ANALOG_MODE_BATTERY ->
+            "Battery ${formatLive(liveAdcVolts[0], 2)} V"
+        else -> null
     }
 
     private fun linearLiveText(
@@ -1159,8 +1449,13 @@ internal class ControllerCalibrationController(
         liveBoost = Float.NaN
         liveOilPressure = Float.NaN
         liveOilTemperature = Float.NaN
+        liveAfr2 = Float.NaN
+        liveFuelPressure = Float.NaN
+        liveGear = 0
         liveVrefMillivolts = 0
         liveAdcVolts.fill(Float.NaN)
+        livePhysicalTemperatures.fill(Float.NaN)
+        liveEgt.fill(0)
         updateLiveReadouts()
     }
 
