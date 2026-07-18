@@ -37,6 +37,7 @@ class UtcompUsbTransport(
 
         private const val TX_QUEUE_CAPACITY = 256
         private const val USB_TRANSFER_TIMEOUT_MS = 100
+        private const val REQUEST_FAILURE_LOG_INTERVAL_MS = 10_000L
     }
 
     private val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
@@ -60,6 +61,8 @@ class UtcompUsbTransport(
 
     @Volatile
     private var lastRxAtMs = 0L
+    private var lastRequestFailureLogAtMs = 0L
+    private var suppressedRequestFailures = 0
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
@@ -386,15 +389,52 @@ class UtcompUsbTransport(
             }
 
             if (attempt < attempts) {
-                logLine(
-                    "USB write retry $attempt/${attempts - 1}: " +
-                        failureContext(packet, lastResult, lastError),
-                )
+                if (!shouldKeepSessionAfterWriteFailure(packet.cmd)) {
+                    logLine(
+                        "USB write retry $attempt/${attempts - 1}: " +
+                            failureContext(packet, lastResult, lastError),
+                    )
+                }
                 Thread.sleep(UsbRecoveryPolicy.writeRetryDelayMs(attempt))
             }
         }
 
+        if (shouldKeepSessionAfterWriteFailure(packet.cmd)) {
+            logResponsiveRequestFailure(packet, lastResult, lastError)
+            return null
+        }
+
         return "write retries exhausted: ${failureContext(packet, lastResult, lastError)}"
+    }
+
+    private fun shouldKeepSessionAfterWriteFailure(command: Int): Boolean {
+        val nowMs = SystemClock.elapsedRealtime()
+        val connectedForMs = (nowMs - connectedAtMs).coerceAtLeast(0L)
+        val lastRxAgoMs = lastRxAtMs.takeIf { it > 0L }
+            ?.let { (nowMs - it).coerceAtLeast(0L) }
+        return UsbRecoveryPolicy.shouldKeepSessionAfterWriteFailure(
+            command = command,
+            connectedForMs = connectedForMs,
+            lastRxAgoMs = lastRxAgoMs,
+        )
+    }
+
+    private fun logResponsiveRequestFailure(
+        packet: UsbPacket,
+        result: Int?,
+        error: Throwable?,
+    ) {
+        suppressedRequestFailures++
+        val nowMs = SystemClock.elapsedRealtime()
+        if (nowMs - lastRequestFailureLogAtMs < REQUEST_FAILURE_LOG_INTERVAL_MS) return
+
+        logLine(
+            "USB polling write remained ambiguous while RX was active; " +
+                "keeping session (events=$suppressedRequestFailures): " +
+                failureContext(packet, result, error),
+        )
+        suppressedRequestFailures = 0
+        lastRequestFailureLogAtMs = nowMs
     }
 
     private fun failureContext(
@@ -480,6 +520,8 @@ class UtcompUsbTransport(
             )
             connectedAtMs = 0L
             lastRxAtMs = 0L
+            lastRequestFailureLogAtMs = 0L
+            suppressedRequestFailures = 0
             if (notify) onConnectionChanged(false)
         }
     }

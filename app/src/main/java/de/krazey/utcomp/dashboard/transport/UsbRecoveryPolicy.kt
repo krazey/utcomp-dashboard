@@ -5,6 +5,8 @@ import de.krazey.utcomp.dashboard.protocol.UsbPacket
 internal object UsbRecoveryPolicy {
     const val FAST_RECONNECT_DELAY_MS = 150L
     const val NORMAL_RECONNECT_DELAY_MS = 2500L
+    const val REQUEST_STARTUP_GRACE_MS = 1500L
+    const val REQUEST_RX_HEALTHY_MS = 1000L
 
     private const val REQUEST_WRITE_ATTEMPTS = 3
     private const val DEFAULT_WRITE_ATTEMPTS = 1
@@ -24,4 +26,15 @@ internal object UsbRecoveryPolicy {
 
     fun isCompleteWrite(result: Int, expectedBytes: Int): Boolean =
         result == expectedBytes
+
+    fun shouldKeepSessionAfterWriteFailure(
+        command: Int,
+        connectedForMs: Long,
+        lastRxAgoMs: Long?,
+    ): Boolean =
+        command == UsbPacket.CMD_REQ_DATA &&
+            (
+                connectedForMs < REQUEST_STARTUP_GRACE_MS ||
+                    lastRxAgoMs?.let { it <= REQUEST_RX_HEALTHY_MS } == true
+            )
 }

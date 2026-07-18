@@ -25,5 +25,41 @@ fun main() {
     check(!UsbRecoveryPolicy.isCompleteWrite(63, 64))
     check(UsbRecoveryPolicy.isCompleteWrite(64, 64))
 
+    check(
+        UsbRecoveryPolicy.shouldKeepSessionAfterWriteFailure(
+            UsbPacket.CMD_REQ_DATA,
+            connectedForMs = 1499L,
+            lastRxAgoMs = null,
+        ),
+    )
+    check(
+        !UsbRecoveryPolicy.shouldKeepSessionAfterWriteFailure(
+            UsbPacket.CMD_REQ_DATA,
+            connectedForMs = 1500L,
+            lastRxAgoMs = null,
+        ),
+    )
+    check(
+        UsbRecoveryPolicy.shouldKeepSessionAfterWriteFailure(
+            UsbPacket.CMD_REQ_DATA,
+            connectedForMs = 5000L,
+            lastRxAgoMs = 1000L,
+        ),
+    )
+    check(
+        !UsbRecoveryPolicy.shouldKeepSessionAfterWriteFailure(
+            UsbPacket.CMD_REQ_DATA,
+            connectedForMs = 5000L,
+            lastRxAgoMs = 1001L,
+        ),
+    )
+    check(
+        !UsbRecoveryPolicy.shouldKeepSessionAfterWriteFailure(
+            UsbPacket.CMD_TRANSFER_DATA,
+            connectedForMs = 1L,
+            lastRxAgoMs = 1L,
+        ),
+    )
+
     println("USB recovery policy tests passed")
 }
