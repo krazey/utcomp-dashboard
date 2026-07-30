@@ -7,8 +7,7 @@ import de.krazey.utcomp.dashboard.util.u8
  * Native Kotlin port of the decompiled RCOMP.Communication.UsbPacket.
  * UTCOMP USB reports are 64 bytes; protocol payload begins at byte 16.
  */
-@Suppress("ArrayInDataClass")
-data class UsbPacket(
+class UsbPacket(
     val cmd: Int,
     val pid: Int = 0,
     val direction: Int = 0,
@@ -42,8 +41,6 @@ data class UsbPacket(
         const val REPORT_SIZE = 64
         const val DATA_LENGTH = 48
 
-        @Suppress("unused")
-        const val CMD_UNKNOWN = 0
         const val CMD_TRANSFER_DATA = 1
         const val CMD_TRANSFER_STATUS = 2
         const val CMD_REQ_DATA = 3

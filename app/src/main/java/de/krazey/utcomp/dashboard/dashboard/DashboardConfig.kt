@@ -761,5 +761,4 @@ private fun defaultCriticalHigh(sensor: DashboardSensor): Float =
         else -> Float.NaN
     }
 
-@Suppress("NOTHING_TO_INLINE")
-private inline fun uncheckedColor(value: UInt): Int = value.toInt()
+private fun uncheckedColor(value: UInt): Int = value.toInt()

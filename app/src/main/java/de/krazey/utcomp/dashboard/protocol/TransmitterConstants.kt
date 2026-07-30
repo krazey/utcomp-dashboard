@@ -1,8 +1,7 @@
 package de.krazey.utcomp.dashboard.protocol
 
 object TransmitterConstants {
-    @Suppress("unused")
-enum class Command(val id: Int) {
+    enum class Command(val id: Int) {
         UNKNOWN(0),
         TRANSFER_DATA(1),
         TRANSFER_STATUS(2),
@@ -32,8 +31,7 @@ enum class Command(val id: Int) {
         }
     }
 
-    @Suppress("unused")
-object UtcompPid {
+    object UtcompPid {
         const val TEMPERATURES_SETTINGS = 0x1002
         const val GPIO_SETTINGS = 0x1009
         const val ANALOG_SETTINGS1 = 0x100A

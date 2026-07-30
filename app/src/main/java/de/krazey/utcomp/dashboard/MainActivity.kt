@@ -1,9 +1,7 @@
 package de.krazey.utcomp.dashboard
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
-import android.os.Build
 import android.os.SystemClock
 import android.content.SharedPreferences
 import android.text.style.RelativeSizeSpan
@@ -44,6 +42,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -77,6 +77,8 @@ import java.util.LinkedHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : Activity(), DashboardRenderHost {
+    private val backCallback = OnBackInvokedCallback(::handleBackNavigation)
+
     private class ClickableLinearLayout(context: Context) : LinearLayout(context) {
         override fun performClick(): Boolean {
             super.performClick()
@@ -357,6 +359,10 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        onBackInvokedDispatcher.registerOnBackInvokedCallback(
+            OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+            backCallback,
+        )
         AppDiagnostics.info(
             "LIFECYCLE",
             "MainActivity.onCreate savedState=${savedInstanceState != null} " +
@@ -527,8 +533,7 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
     }
 
-    @Suppress("DEPRECATION")
-    override fun onBackPressed() {
+    private fun handleBackNavigation() {
         if (
             ::controllerCalibrationController.isInitialized &&
             controllerCalibrationController.isVisible()
@@ -536,7 +541,7 @@ class MainActivity : Activity(), DashboardRenderHost {
             controllerCalibrationController.close()
             return
         }
-        super.onBackPressed()
+        finishAfterTransition()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -546,22 +551,10 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     private fun enableImmersiveDriverMode() {
         val decorView = window.decorView
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            decorView.windowInsetsController?.let { controller ->
-                controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-                controller.systemBarsBehavior =
-                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            decorView.systemUiVisibility =
-                View.SYSTEM_UI_FLAG_FULLSCREEN or
-                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
-                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        decorView.windowInsetsController?.let { controller ->
+            controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+            controller.systemBarsBehavior =
+                WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
     }
 
@@ -581,6 +574,7 @@ class MainActivity : Activity(), DashboardRenderHost {
 
     override fun onDestroy() {
         AppDiagnostics.info("LIFECYCLE", "MainActivity.onDestroy changingConfig=$isChangingConfigurations")
+        onBackInvokedDispatcher.unregisterOnBackInvokedCallback(backCallback)
         dashboardRenderHandler.removeCallbacks(dashboardRenderRunnable)
         dashboardRenderHandler.removeCallbacks(decodedRenderRunnable)
         decodedRenderPosted.set(false)
@@ -1333,9 +1327,7 @@ class MainActivity : Activity(), DashboardRenderHost {
         }
 
     private fun View.setTooltipCompat(text: CharSequence?) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            tooltipText = text
-        }
+        tooltipText = text
     }
 
     private fun updateEditModeButton() {

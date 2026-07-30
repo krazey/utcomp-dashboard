@@ -1,6 +1,7 @@
 package de.krazey.utcomp.dashboard.logging
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
@@ -46,15 +47,13 @@ internal object AppDiagnostics {
         installCrashHandler()
 
         val packageInfo = runCatching {
-            appContext.packageManager.getPackageInfo(appContext.packageName, 0)
+            appContext.packageManager.getPackageInfo(
+                appContext.packageName,
+                PackageManager.PackageInfoFlags.of(0),
+            )
         }.getOrNull()
         val versionName = packageInfo?.versionName ?: "unknown"
-        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            packageInfo?.longVersionCode?.toString() ?: "unknown"
-        } else {
-            @Suppress("DEPRECATION")
-            packageInfo?.versionCode?.toString() ?: "unknown"
-        }
+        val versionCode = packageInfo?.longVersionCode?.toString() ?: "unknown"
 
         info("APP", "=== UTCOMP Dashboard session started ===")
         info(

@@ -3,8 +3,7 @@ package de.krazey.utcomp.dashboard.protocol
 import de.krazey.utcomp.dashboard.util.hex
 
 /** Protocol-level packet, independent of USB/Bluetooth framing. */
-@Suppress("ArrayInDataClass", "unused")
-data class TransmitterPacket(
+class TransmitterPacket(
     val cmd: TransmitterConstants.Command,
     val pid: Int,
     val source: TransmitterConstants.Source,
@@ -18,7 +17,6 @@ data class TransmitterPacket(
     override fun toString(): String =
         "TXP cmd=$cmd pid=0x%04X source=$source ack=$ack len=$dataLength data=${data.hex(32)}".format(pid)
 
-    @Suppress("unused")
     companion object {
         fun request(pid: Int): TransmitterPacket = TransmitterPacket(
             cmd = TransmitterConstants.Command.REQ_DATA,
