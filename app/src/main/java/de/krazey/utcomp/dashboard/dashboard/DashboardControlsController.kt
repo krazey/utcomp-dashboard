@@ -28,6 +28,8 @@ internal class DashboardControlsController(
     private val toggleMinMax: () -> Unit,
     private val toggleSubtitles: () -> Unit,
     private val showDataLog: () -> Unit,
+    private val exportAppSettings: () -> Unit,
+    private val importAppSettings: () -> Unit,
     private val diagnosticsState: () -> DashboardDiagnosticsState,
     private val toggleAutomaticPolling: () -> Unit,
     private val requestLiveSnapshot: () -> Unit,
@@ -61,6 +63,10 @@ internal class DashboardControlsController(
             actionButton("Data log", showDataLog),
             actionButton("Live data", showLiveSignalInspector),
             actionButton("Diagnostics", ::showDiagnosticsMenu),
+        ))
+        controls.addView(row(
+            actionButton("Export app settings", exportAppSettings),
+            actionButton("Import app settings", importAppSettings),
         ))
 
         return MaxHeightScrollView(activity).apply {

@@ -2,6 +2,7 @@ package de.krazey.utcomp.dashboard
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
 import android.content.SharedPreferences
@@ -52,6 +53,8 @@ import android.widget.Toast
 import de.krazey.utcomp.dashboard.protocol.TransmitterConstants
 import de.krazey.utcomp.dashboard.protocol.TransmitterPacket
 import de.krazey.utcomp.dashboard.settings.ControllerCalibrationController
+import de.krazey.utcomp.dashboard.settings.DashboardSettingsExportController
+import de.krazey.utcomp.dashboard.settings.DashboardSettingsSnapshot
 import de.krazey.utcomp.dashboard.simulation.SimulationEngine
 import de.krazey.utcomp.dashboard.transport.UsbRecoveryPolicy
 import de.krazey.utcomp.dashboard.transport.UtcompUsbTransport
@@ -123,6 +126,7 @@ class MainActivity : Activity(), DashboardRenderHost {
     private lateinit var dashboardScreenView: View
     private lateinit var controllerCalibrationPageView: View
     private lateinit var controllerCalibrationController: ControllerCalibrationController
+    private lateinit var dashboardSettingsExportController: DashboardSettingsExportController
     private lateinit var dashboardControlsController: DashboardControlsController
     private lateinit var dashboardRoot: LinearLayout
     private lateinit var logTitleText: TextView
@@ -402,6 +406,13 @@ class MainActivity : Activity(), DashboardRenderHost {
             currentPageConfig = ::currentPageConfig,
             dashboardPages = { dashboardPages },
         )
+        dashboardSettingsExportController = DashboardSettingsExportController(
+            activity = this,
+            snapshotProvider = ::dashboardSettingsSnapshot,
+            prepareImport = ::prepareDashboardSettingsImport,
+            applyImport = ::applyDashboardSettingsImport,
+            appendLog = ::appendLog,
+        )
         dashboardControlsController = DashboardControlsController(
             activity = this,
             connectUsb = {
@@ -414,6 +425,8 @@ class MainActivity : Activity(), DashboardRenderHost {
             toggleMinMax = ::toggleMinMaxMode,
             toggleSubtitles = ::toggleSourceSubtitles,
             showDataLog = { csvLogController.showMenu() },
+            exportAppSettings = dashboardSettingsExportController::export,
+            importAppSettings = dashboardSettingsExportController::importSettings,
             diagnosticsState = {
                 DashboardDiagnosticsState(
                     usbConnected = connected,
@@ -948,6 +961,100 @@ class MainActivity : Activity(), DashboardRenderHost {
         }.onFailure { error ->
             appendLog("Could not save dashboard settings: ${error.message}")
         }
+    }
+
+    private fun dashboardSettingsSnapshot(): DashboardSettingsSnapshot =
+        DashboardSettingsSnapshot(
+            appVersion = runCatching {
+                packageManager.getPackageInfo(
+                    packageName,
+                    PackageManager.PackageInfoFlags.of(0),
+                ).versionName
+            }.getOrNull() ?: "unknown",
+            dashboardStyle = uiMode.name,
+            selectedSimplePageId = simplePageConfig().id,
+            simplePagesJson = DashboardConfigJson.encode(dashboardPages),
+            ralliartPageJson = DashboardConfigJson.encode(listOf(ralliartPageConfig)),
+            protocolLogEnabled = protocolLogEnabled,
+            liveDataSettingsJson = liveSignalInspectorController.exportSettingsJson(),
+            periodicNoiseCalibrationJson = periodicNoiseCalibrationManager.exportProfileJson(),
+            csvQuickTarget = csvLogController.exportQuickTarget(),
+        )
+
+    private fun prepareDashboardSettingsImport(
+        snapshot: DashboardSettingsSnapshot,
+    ): DashboardSettingsSnapshot {
+        val importedMode = UiMode.entries.firstOrNull {
+            it.name == snapshot.dashboardStyle
+        } ?: throw IllegalArgumentException("Unknown dashboard style")
+
+        val importedPages = DashboardConfigJson.decode(snapshot.simplePagesJson)
+            ?.map(DashboardPageConfig::normalized)
+            ?.takeIf { it.isNotEmpty() && it.size <= 12 }
+            ?: throw IllegalArgumentException("Invalid simple dashboard pages")
+        require(importedPages.all { it.id.isNotBlank() }) {
+            "Dashboard page IDs must not be empty"
+        }
+        require(importedPages.map { it.id }.distinct().size == importedPages.size) {
+            "Dashboard page IDs must be unique"
+        }
+        require(importedPages.any { it.id == snapshot.selectedSimplePageId }) {
+            "Selected dashboard page is missing"
+        }
+
+        val importedRalliart = DashboardConfigJson.decode(
+            snapshot.ralliartPageJson,
+            defaults = listOf(DefaultDashboardPages.ralliart),
+        )?.takeIf { it.size == 1 }
+            ?.first()
+            ?.normalized()
+            ?: throw IllegalArgumentException("Invalid Ralliart settings")
+
+        return snapshot.copy(
+            dashboardStyle = importedMode.name,
+            simplePagesJson = DashboardConfigJson.encode(importedPages),
+            ralliartPageJson = DashboardConfigJson.encode(listOf(importedRalliart)),
+            liveDataSettingsJson =
+                liveSignalInspectorController.normalizeImportedSettingsJson(
+                    snapshot.liveDataSettingsJson,
+                ),
+            periodicNoiseCalibrationJson =
+                periodicNoiseCalibrationManager.normalizeImportedProfileJson(
+                    snapshot.periodicNoiseCalibrationJson,
+                ),
+            csvQuickTarget = csvLogController.normalizeImportedQuickTarget(
+                snapshot.csvQuickTarget,
+            ),
+        )
+    }
+
+    private fun applyDashboardSettingsImport(
+        snapshot: DashboardSettingsSnapshot,
+    ): Boolean {
+        val liveSaved = liveSignalInspectorController.importSettingsJson(
+            snapshot.liveDataSettingsJson,
+        )
+        val calibrationSaved = periodicNoiseCalibrationManager.importProfileJson(
+            snapshot.periodicNoiseCalibrationJson,
+        )
+        val csvSaved = csvLogController.importQuickTarget(snapshot.csvQuickTarget)
+        val dashboardSaved = dashboardPrefs.edit()
+            .putString("uiMode", snapshot.dashboardStyle)
+            .putString("pageId", snapshot.selectedSimplePageId)
+            .putBoolean("protocolLogEnabled", snapshot.protocolLogEnabled)
+            .putString("dashboardPagesJson", snapshot.simplePagesJson)
+            .putString("ralliartPageJson", snapshot.ralliartPageJson)
+            .putBoolean("fastSensorSmoothingV1Applied", true)
+            .putBoolean("pageScopedSourceLineV1Applied", true)
+            .commit()
+        if (!liveSaved || !calibrationSaved || !csvSaved || !dashboardSaved) {
+            return false
+        }
+
+        appendLog("App settings imported; restarting dashboard")
+        Toast.makeText(this, "App settings imported", Toast.LENGTH_SHORT).show()
+        window.decorView.post { recreate() }
+        return true
     }
 
     private fun simplePageConfig(): DashboardPageConfig =
@@ -1655,6 +1762,12 @@ class MainActivity : Activity(), DashboardRenderHost {
         data: Intent?,
     ) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (
+            ::dashboardSettingsExportController.isInitialized &&
+            dashboardSettingsExportController.onActivityResult(requestCode, resultCode, data)
+        ) {
+            return
+        }
         if (
             ::appDiagnosticsController.isInitialized &&
             appDiagnosticsController.onActivityResult(requestCode, resultCode, data)

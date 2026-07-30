@@ -77,6 +77,23 @@ class PeriodicNoiseCalibrationManager(
 
     fun profile(): PeriodicNoiseCalibrationProfile? = profile
 
+    fun exportProfileJson(): String? = profile?.let(::encodeProfile)
+
+    fun normalizeImportedProfileJson(raw: String?): String? {
+        if (raw == null) return null
+        return decodeProfile(raw)?.let(::encodeProfile)
+            ?: throw IllegalArgumentException("Invalid periodic-noise calibration")
+    }
+
+    fun importProfileJson(raw: String?): Boolean {
+        val normalized = normalizeImportedProfileJson(raw)
+        return if (normalized == null) {
+            prefs.edit().remove(PREF_PROFILE).commit()
+        } else {
+            prefs.edit().putString(PREF_PROFILE, normalized).commit()
+        }
+    }
+
     fun status(nowMs: Long = SystemClock.elapsedRealtime()): PeriodicCalibrationStatus =
         synchronized(stateLock) {
             val activeSession = session
@@ -295,7 +312,19 @@ class PeriodicNoiseCalibrationManager(
                 ).toFloat(),
                 signals = signals,
             ).takeIf {
-                it.frequencyHz.isFinite() && it.signals.isNotEmpty()
+                it.durationMs > 0L &&
+                    it.frequencyHz.isFinite() &&
+                    it.frequencyHz > 0f &&
+                    it.referenceAmplitude.isFinite() &&
+                    it.referenceConfidence.isFinite() &&
+                    it.signals.isNotEmpty() &&
+                    it.signals.values.all { signal ->
+                        signal.amplitude.isFinite() &&
+                            signal.phaseOffsetDegrees.isFinite() &&
+                            signal.confidence.isFinite() &&
+                            signal.sampleRateHz.isFinite() &&
+                            signal.sampleRateHz > 0f
+                    }
             }
         }.getOrNull()
     }

@@ -71,6 +71,23 @@ internal class CsvLogController(
             "Start high-resolution CSV logging in ${quickTarget().label}"
         }
 
+    fun exportQuickTarget(): String = quickTarget().storedValue
+
+    fun normalizeImportedQuickTarget(raw: String): String {
+        val target = QuickTarget.entries.firstOrNull { it.storedValue == raw }
+            ?: throw IllegalArgumentException("Unknown CSV quick-log target")
+        return if (target == QuickTarget.SAVED_FOLDER && savedTreeUri() == null) {
+            QuickTarget.APP_EXTERNAL.storedValue
+        } else {
+            target.storedValue
+        }
+    }
+
+    fun importQuickTarget(raw: String): Boolean =
+        prefs.edit()
+            .putString(PREF_QUICK_TARGET, normalizeImportedQuickTarget(raw))
+            .commit()
+
     fun toggleQuickLogging() {
         if (logger.isRunning) {
             stopLoggingAsync()

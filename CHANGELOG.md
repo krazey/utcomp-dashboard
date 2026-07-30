@@ -58,6 +58,8 @@
 - Edit all three NTC profiles and show live raw and decoded values beside assignments.
 - Add verified AFR/Lambda, fuel-pressure, EGT, fuel-level, ADC-voltage, averaging, and RPM settings.
 - Read and verify the second analog and general-settings packets before enabling those writes.
+- Export and import all app-owned dashboard, Live Data, filter, and logging
+  settings as validated JSON backups.
 
 ## 1.0.0
 

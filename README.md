@@ -83,6 +83,14 @@ menu can view, export, or clear lifecycle, USB recovery, CSV, UI-stall,
 slow-render, memory-pressure, and uncaught-exception events without requiring an
 app-focused logcat capture.
 
+The controls panel can export a versioned JSON backup of all app-owned
+configuration without a USB connection. This includes every customized simple
+page and Ralliart setting, the selected style/page, per-box alarms, colors,
+layout, smoothing and periodic-filter choices, Live Data preferences, the
+learned engine-off periodic-noise profile, and the portable CSV quick-target
+choice. UTCOMP controller calibration is intentionally left to the official
+Reveltronics desktop backup workflow.
+
 The Live Data action graphs one decoded value at its real packet update cadence.
 Raw and filtered traces are shown together with rolling min/max, peak-to-peak
 noise, standard deviation, average, and sample rate. Experimental live-fit notch

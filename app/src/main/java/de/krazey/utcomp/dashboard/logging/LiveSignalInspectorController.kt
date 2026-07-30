@@ -23,6 +23,7 @@ import de.krazey.utcomp.dashboard.utcomp.UtcompDataSnapshot
 import de.krazey.utcomp.dashboard.view.DarkActionDialog
 import de.krazey.utcomp.dashboard.view.DarkActionItem
 import de.krazey.utcomp.dashboard.view.LiveSignalGraphView
+import org.json.JSONObject
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -161,6 +162,58 @@ class LiveSignalInspectorController(
                 "windowMs=$windowMs",
         )
         offerSnapshot(snapshotProvider())
+    }
+
+    fun exportSettingsJson(): String =
+        JSONObject().apply {
+            put("signalId", selectedSignal.id)
+            put("smoothingAlpha", buffer.smoothingAlpha.toDouble())
+            put("periodicFilterMode", buffer.periodicMode.name)
+            put("periodicFilterFrequency", buffer.manualFrequencyHz.toDouble())
+            put("counterWaveStrength", buffer.counterWaveStrength.toDouble())
+            put("windowMs", windowMs)
+        }.toString()
+
+    fun normalizeImportedSettingsJson(raw: String): String {
+        val json = JSONObject(raw)
+        val signalId = json.getString(PREF_SIGNAL_ID)
+        require(LiveSignalCatalog.all.any { it.id == signalId }) {
+            "Unknown Live Data signal"
+        }
+        val modeName = json.getString(PREF_FILTER_MODE)
+        require(PeriodicNoiseFilterMode.entries.any { it.name == modeName }) {
+            "Unknown Live Data filter mode"
+        }
+        val alpha = finiteFloat(json, PREF_ALPHA).coerceIn(0.01f, 1f)
+        val frequency = finiteFloat(json, PREF_FILTER_FREQUENCY).coerceIn(0.20f, 0.55f)
+        val strength = finiteFloat(json, PREF_COUNTER_WAVE_STRENGTH).coerceIn(0f, 1f)
+        val importedWindow = normalizeWindow(json.getLong(PREF_WINDOW_MS))
+        return JSONObject().apply {
+            put(PREF_SIGNAL_ID, signalId)
+            put(PREF_ALPHA, alpha.toDouble())
+            put(PREF_FILTER_MODE, modeName)
+            put(PREF_FILTER_FREQUENCY, frequency.toDouble())
+            put(PREF_COUNTER_WAVE_STRENGTH, strength.toDouble())
+            put(PREF_WINDOW_MS, importedWindow)
+        }.toString()
+    }
+
+    fun importSettingsJson(raw: String): Boolean {
+        val json = JSONObject(normalizeImportedSettingsJson(raw))
+        return prefs.edit()
+            .putString(PREF_SIGNAL_ID, json.getString(PREF_SIGNAL_ID))
+            .putFloat(PREF_ALPHA, finiteFloat(json, PREF_ALPHA))
+            .putString(PREF_FILTER_MODE, json.getString(PREF_FILTER_MODE))
+            .putFloat(
+                PREF_FILTER_FREQUENCY,
+                finiteFloat(json, PREF_FILTER_FREQUENCY),
+            )
+            .putFloat(
+                PREF_COUNTER_WAVE_STRENGTH,
+                finiteFloat(json, PREF_COUNTER_WAVE_STRENGTH),
+            )
+            .putLong(PREF_WINDOW_MS, json.getLong(PREF_WINDOW_MS))
+            .commit()
     }
 
     fun offerSnapshot(
@@ -1283,6 +1336,11 @@ class LiveSignalInspectorController(
 
     private fun normalizeWindow(value: Long): Long =
         WINDOW_OPTIONS_MS.minByOrNull { kotlin.math.abs(it - value) } ?: 30_000L
+
+    private fun finiteFloat(json: JSONObject, key: String): Float =
+        json.getDouble(key).toFloat().also {
+            require(it.isFinite()) { "Invalid Live Data value for $key" }
+        }
 
     private fun dp(value: Float): Int =
         (value * activity.resources.displayMetrics.density + 0.5f).toInt()
