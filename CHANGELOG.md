@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.0
 
 - Extract simple and Ralliart rendering from `MainActivity`.
 - Add configurable dashboard pages with 1×1 through 4×4 grids.
